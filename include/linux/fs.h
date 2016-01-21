@@ -1394,6 +1394,7 @@ extern int send_sigurg(struct fown_struct *fown);
 #define SB_I_UNTRUSTED_MOUNTER		0x00000040
 
 #define SB_I_SKIP_SYNC	0x00000100	/* Skip superblock at global sync */
+#define SB_I_NOSUID	0x00000200	/* Ignore suid on this fs */
 
 /* Possible states of 'frozen' field */
 enum {
@@ -3559,6 +3560,7 @@ static inline bool dir_relax_shared(struct inode *inode)
 }
 
 extern bool path_noexec(const struct path *path);
+extern bool path_nosuid(const struct path *path);
 extern void inode_nohighmem(struct inode *inode);
 
 /* mm/fadvise.c */
