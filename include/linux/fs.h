@@ -1429,6 +1429,7 @@ extern int send_sigurg(struct fown_struct *fown);
 #define SB_I_PERSB_BDI	0x00000200	/* has a per-sb bdi */
 #define SB_I_TS_EXPIRY_WARNED 0x00000400 /* warned about timestamp range expiry */
 #define SB_I_RETIRED	0x00000800	/* superblock shouldn't be reused */
+#define SB_I_NOSUID	0x00001000	/* Ignore suid on this fs */
 
 /* Possible states of 'frozen' field */
 enum {
@@ -3581,6 +3582,7 @@ static inline bool dir_relax_shared(struct inode *inode)
 }
 
 extern bool path_noexec(const struct path *path);
+extern bool path_nosuid(const struct path *path);
 extern void inode_nohighmem(struct inode *inode);
 
 /* mm/fadvise.c */
