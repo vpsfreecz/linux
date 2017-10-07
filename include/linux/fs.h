@@ -2321,6 +2321,7 @@ extern int current_umask(void);
 extern void ihold(struct inode * inode);
 extern void iput(struct inode *);
 extern int generic_update_time(struct inode *, struct timespec64 *, int);
+extern int update_time(struct inode *, struct timespec64 *, int);
 
 /* /sys/fs */
 extern struct kobject *fs_kobj;
