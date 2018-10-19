@@ -455,7 +455,6 @@ __vfs_removexattr_noperm(struct dentry *dentry, const char *name)
 		evm_inode_post_removexattr(dentry, name);
 	}
 
-out:
 	return error;
 }
 EXPORT_SYMBOL_GPL(__vfs_removexattr_noperm);
