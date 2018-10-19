@@ -47,7 +47,7 @@ struct super_block *ovl_same_sb(struct super_block *sb)
 	if (!ofs->fs)
 		return ofs->upper_mnt->mnt_sb;
 	else if (ofs->fs == 1 && !ofs->upper_mnt)
-		return ofs->layers[0].fs.sb;
+		return ofs->layers[0].fs->sb;
 	else
 		return NULL;
 }
