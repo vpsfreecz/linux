@@ -40,6 +40,31 @@ const struct cred *ovl_override_creds(struct super_block *sb)
 	return override_creds(ofs->creator_cred);
 }
 
+struct super_block *ovl_same_sb(struct super_block *sb)
+{
+	struct ovl_fs *ofs = sb->s_fs_info;
+
+	if (!ofs->fs)
+		return ovl_upper_mnt(ofs)->mnt_sb;
+	else if (ofs->numfs == 1 && !ovl_upper_mnt(ofs)->mnt_sb)
+		return ofs->layers[0].fs->sb;
+	else
+		return NULL;
+}
+
+int ovl_creator_permission(struct super_block *sb, struct inode *inode,
+			   int mode)
+{
+	const struct cred *old_cred;
+	int err = 0;
+
+	old_cred = ovl_override_creds(sb);
+	err = inode_permission(&init_user_ns, inode, mode);
+	revert_creds(old_cred);
+
+	return err;
+}
+
 /*
  * Check if underlying fs supports file handles and try to determine encoding
  * type, in order to deduce maximum inode number used by fs.
