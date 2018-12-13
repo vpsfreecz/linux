@@ -47,6 +47,10 @@
 #include <linux/sched/clock.h>
 #include <linux/sched/debug.h>
 #include <linux/sched/task_stack.h>
+#include <linux/cred.h>
+#include <linux/user_namespace.h>
+#include <linux/proc_ns.h>
+#include <linux/syslog_namespace.h>
 
 #include <linux/uaccess.h>
 #include <asm/sections.h>
@@ -430,11 +434,10 @@ static u32 clear_idx;
 
 /* record buffer */
 #define LOG_ALIGN __alignof__(struct printk_log)
-#define __LOG_BUF_LEN (1 << CONFIG_LOG_BUF_SHIFT)
 #define LOG_BUF_LEN_MAX (u32)(1 << 31)
+
+/* this buf only for init_syslog_ns */
 static char __log_buf[__LOG_BUF_LEN] __aligned(LOG_ALIGN);
-static char *log_buf = __log_buf;
-static u32 log_buf_len = __LOG_BUF_LEN;
 
 /* Return log buffer address */
 char *log_buf_addr_get(void)
@@ -3276,5 +3279,26 @@ void kmsg_dump_rewind(struct kmsg_dumper *dumper)
 	logbuf_unlock_irqrestore(flags);
 }
 EXPORT_SYMBOL_GPL(kmsg_dump_rewind);
+
+struct syslog_namespace init_syslog_ns = {
+	.user_ns = &init_user_ns,
+	.ucounts = NULL,
+	.kref = KREF_INIT(2),
+	.parent = NULL,
+	.logbuf_lock = __RAW_SPIN_LOCK_UNLOCKED(init_syslog_ns.logbuf_lock),
+	.logbuf_cpu = UINT_MAX,
+	.log_buf_len = __LOG_BUF_LEN,
+	.log_buf = __log_buf,
+	.dump_list_lock = __SPIN_LOCK_UNLOCKED(init_syslog_ns.dump_list_lock),
+	.dump_list = LIST_HEAD_INIT(init_syslog_ns.dump_list),
+	.ns.ops = &syslogns_operations,
+	.ns.inum = PROC_SYSLOG_INIT_INO,
+#ifdef CONFIG_SECURITY_DMESG_RESTRICT
+	.dmesg_restrict = 1,
+#else
+	.dmesg_restrict = 0,
+#endif
+};
+EXPORT_SYMBOL_GPL(init_syslog_ns);
 
 #endif

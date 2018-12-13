@@ -46,6 +46,7 @@
 
 #define SYSLOG_FROM_READER           0
 #define SYSLOG_FROM_PROC             1
+#define __LOG_BUF_LEN (1 << CONFIG_LOG_BUF_SHIFT)
 
 int do_syslog(int type, char __user *buf, int count, int source);
 
