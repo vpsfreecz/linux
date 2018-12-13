@@ -21,6 +21,10 @@
 #ifndef _LINUX_SYSLOG_H
 #define _LINUX_SYSLOG_H
 
+#include <linux/slab.h>
+
+struct syslog_namespace;
+
 /* Close the log.  Currently a NOP. */
 #define SYSLOG_ACTION_CLOSE          0
 /* Open the log. Currently a NOP. */
@@ -44,10 +48,19 @@
 /* Return size of the log buffer */
 #define SYSLOG_ACTION_SIZE_BUFFER   10
 
-#define SYSLOG_FROM_READER           0
-#define SYSLOG_FROM_PROC             1
+#define SYSLOG_FROM_READER	     0
+#define SYSLOG_FROM_PROC	     1
+
+enum log_flags {
+	LOG_NOCONS      = 1,    /* already flushed, do not print to console */
+	LOG_NEWLINE     = 2,    /* text ended with a newline */
+	LOG_PREFIX      = 4,    /* text started with a prefix */
+	LOG_CONT	= 8,    /* text is a fragment of a continuation line */
+};
+
 #define __LOG_BUF_LEN (1 << CONFIG_LOG_BUF_SHIFT)
 
-int do_syslog(int type, char __user *buf, int count, int source);
+int do_syslog(int type, char __user *buf, int len, int source,
+			struct syslog_namespace *ns);
 
 #endif /* _LINUX_SYSLOG_H */

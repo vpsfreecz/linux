@@ -66,6 +66,7 @@
 #include <linux/kexec.h>
 #include <linux/bpf.h>
 #include <linux/mount.h>
+#include <linux/syslog_namespace.h>
 
 #include <linux/uaccess.h>
 #include <asm/processor.h>
@@ -854,7 +855,7 @@ static struct ctl_table kern_table[] = {
 	},
 	{
 		.procname	= "dmesg_restrict",
-		.data		= &dmesg_restrict,
+		.data		= &init_syslog_ns.dmesg_restrict,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax_sysadmin,
