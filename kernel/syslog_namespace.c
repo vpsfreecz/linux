@@ -161,6 +161,7 @@ static struct user_namespace *syslogns_owner(struct ns_common *ns)
 
 const struct proc_ns_operations syslogns_operations = {
 	.name = "syslog",
+	.type = SYSLOG_ACTION_NEW_NS,
 	.get = syslogns_get,
 	.put = syslogns_put,
 	.install = syslogns_install,

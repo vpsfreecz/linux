@@ -69,6 +69,7 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 {
 	struct nsproxy *new_nsp;
 	int err;
+	bool new_syslogns = false;
 
 	new_nsp = create_nsproxy();
 	if (!new_nsp)
@@ -112,8 +113,22 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 		goto out_net;
 	}
 
+	task_lock(current);
+	new_syslogns = current->syslog_ns_for_child;
+	current->syslog_ns_for_child = false;
+	task_unlock(current);
+
+	new_nsp->syslog_ns = copy_syslog_ns(new_syslogns, user_ns,
+				      tsk->nsproxy->syslog_ns);
+	if (IS_ERR(new_nsp->syslog_ns)) {
+		err = PTR_ERR(new_nsp->syslog_ns);
+		goto out_syslog;
+	}
+
 	return new_nsp;
 
+out_syslog:
+	put_net(new_nsp->net_ns);
 out_net:
 	put_cgroup_ns(new_nsp->cgroup_ns);
 out_cgroup:
@@ -145,7 +160,9 @@ int copy_namespaces(unsigned long flags, struct task_struct *tsk)
 
 	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			      CLONE_NEWPID | CLONE_NEWNET |
-			      CLONE_NEWCGROUP)))) {
+			      CLONE_NEWCGROUP)))
+	    && likely(!tsk->syslog_ns_for_child)
+	) {
 		get_nsproxy(old_ns);
 		return 0;
 	}
@@ -182,6 +199,8 @@ void free_nsproxy(struct nsproxy *ns)
 		put_ipc_ns(ns->ipc_ns);
 	if (ns->pid_ns_for_children)
 		put_pid_ns(ns->pid_ns_for_children);
+	if (ns->syslog_ns)
+		put_syslog_ns(ns->syslog_ns);
 	put_cgroup_ns(ns->cgroup_ns);
 	put_net(ns->net_ns);
 	kmem_cache_free(nsproxy_cachep, ns);
