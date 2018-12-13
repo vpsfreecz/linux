@@ -22,6 +22,8 @@
 #include <linux/cpumask.h>
 #include <linux/irq_work.h>
 #include <linux/printk.h>
+#include <linux/syslog.h>
+#include <linux/syslog_namespace.h>
 
 #include "internal.h"
 
@@ -277,16 +279,17 @@ void printk_safe_flush(void)
  */
 void printk_safe_flush_on_panic(void)
 {
+	struct syslog_namespace *ns = &init_syslog_ns;
 	/*
 	 * Make sure that we could access the main ring buffer.
 	 * Do not risk a double release when more CPUs are up.
 	 */
-	if (raw_spin_is_locked(&logbuf_lock)) {
+	if (raw_spin_is_locked(&ns->logbuf_lock)) {
 		if (num_online_cpus() > 1)
 			return;
 
 		debug_locks_off();
-		raw_spin_lock_init(&logbuf_lock);
+		raw_spin_lock_init(&ns->logbuf_lock);
 	}
 
 	printk_safe_flush();
@@ -372,16 +375,17 @@ void __printk_safe_exit(void)
 
 __printf(1, 0) int vprintk_func(const char *fmt, va_list args)
 {
+	struct syslog_namespace *ns = &init_syslog_ns;
 	/*
 	 * Try to use the main logbuf even in NMI. But avoid calling console
 	 * drivers that might have their own locks.
 	 */
 	if ((this_cpu_read(printk_context) & PRINTK_NMI_DIRECT_CONTEXT_MASK) &&
-	    raw_spin_trylock(&logbuf_lock)) {
+	    raw_spin_trylock(&ns->logbuf_lock)) {
 		int len;
 
 		len = vprintk_store(0, LOGLEVEL_DEFAULT, NULL, 0, fmt, args);
-		raw_spin_unlock(&logbuf_lock);
+		raw_spin_unlock(&ns->logbuf_lock);
 		defer_console_output();
 		return len;
 	}

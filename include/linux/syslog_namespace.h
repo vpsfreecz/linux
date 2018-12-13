@@ -48,6 +48,7 @@ struct syslog_namespace {
 
 	enum log_flags	syslog_prev;
 	size_t		syslog_partial;
+	bool		syslog_time;
 
 	/* per ns dumper */
 	spinlock_t	dump_list_lock;
