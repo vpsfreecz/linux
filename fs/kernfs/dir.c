@@ -831,11 +831,18 @@ static struct kernfs_node *kernfs_find_ns(struct kernfs_node *parent,
 					  const unsigned char *name,
 					  const void *ns)
 {
-	struct rb_node *node = parent->dir.children.rb_node;
+	struct rb_node *node;
 	bool has_ns = kernfs_ns_enabled(parent);
 	unsigned int hash;
 
 	lockdep_assert_held(&kernfs_mutex);
+
+	if (!parent) {
+		WARN(1, KERN_WARNING "kernfs: kernfs_find_ns parent 404");
+		return NULL;
+	}
+
+	node = parent->dir.children.rb_node;
 
 	if (has_ns != (bool)ns) {
 		WARN(1, KERN_WARNING "kernfs: ns %s in '%s' for '%s'\n",
