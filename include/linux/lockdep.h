@@ -463,6 +463,7 @@ struct lockdep_map { };
 
 #define lockdep_depth(tsk)	(0)
 
+#define lockdep_is_held(lock)			(1)
 #define lockdep_is_held_type(l, r)		(1)
 
 #define lockdep_assert_held(l)			do { (void)(l); } while (0)
