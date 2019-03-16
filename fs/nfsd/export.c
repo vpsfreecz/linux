@@ -517,6 +517,7 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
 	struct auth_domain *dom = NULL;
 	struct svc_export exp = {}, *expp;
 	int an_int;
+	unsigned int an_uint;
 
 	if (mesg[mlen-1] != '\n')
 		return -EINVAL;
@@ -583,6 +584,15 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
 		if (err)
 			goto out3;
 		exp.ex_fsid = an_int;
+
+		/* root_uid */
+		err = get_uint(&mesg, &an_uint);
+		if (err)
+			goto out3;
+		exp.ex_root_uid = KUIDT_INIT(an_uint);
+#if 0
+		printk("nfsd: got root_uid=%u\n", an_uint);
+#endif
 
 		while ((len = qword_get(&mesg, buf, PAGE_SIZE)) > 0) {
 			if (strcmp(buf, "fsloc") == 0)
@@ -723,6 +733,7 @@ static void export_update(struct cache_head *cnew, struct cache_head *citem)
 	new->ex_anon_uid = item->ex_anon_uid;
 	new->ex_anon_gid = item->ex_anon_gid;
 	new->ex_fsid = item->ex_fsid;
+	new->ex_root_uid = item->ex_root_uid;
 	new->ex_devid_map = item->ex_devid_map;
 	item->ex_devid_map = NULL;
 	new->ex_uuid = item->ex_uuid;
