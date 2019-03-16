@@ -508,6 +508,24 @@ nfsd_uuid_parse(char **mesg, char *buf, unsigned char **puuid)
 	return 0;
 }
 
+static inline int
+root_uid_parse(char **mesg, char *buf, struct svc_export *exp)
+{
+	int err;
+	unsigned int an_uint;
+
+	/* root_uid */
+	err = get_uint(mesg, &an_uint);
+	if (err)
+		return err;
+
+	exp->ex_root_uid = KUIDT_INIT(an_uint);
+#if 0
+	printk("nfsd: got root_uid=%u\n", an_uint);
+#endif
+	return 0;
+}
+
 static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
 {
 	/* client path expiry [flags anonuid anongid fsid] */
@@ -517,6 +535,7 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
 	struct auth_domain *dom = NULL;
 	struct svc_export exp = {}, *expp;
 	int an_int;
+	unsigned int an_uint;
 
 	if (mesg[mlen-1] != '\n')
 		return -EINVAL;
@@ -584,6 +603,9 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
 			goto out3;
 		exp.ex_fsid = an_int;
 
+		/* root_uid */
+		exp.ex_root_uid = KUIDT_INIT(0);
+
 		while ((len = qword_get(&mesg, buf, PAGE_SIZE)) > 0) {
 			if (strcmp(buf, "fsloc") == 0)
 				err = fsloc_parse(&mesg, buf, &exp.ex_fslocs);
@@ -591,6 +613,9 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
 				err = nfsd_uuid_parse(&mesg, buf, &exp.ex_uuid);
 			else if (strcmp(buf, "secinfo") == 0)
 				err = secinfo_parse(&mesg, buf, &exp);
+			else if (exp.ex_flags & NFSEXP_ROOTUID &&
+					strcmp(buf, "root_uid") == 0)
+				err = root_uid_parse(&mesg, buf, &exp);
 			else
 				/* quietly ignore unknown words and anything
 				 * following. Newer user-space can try to set
@@ -652,7 +677,8 @@ out:
 }
 
 static void exp_flags(struct seq_file *m, int flag, int fsid,
-		kuid_t anonu, kgid_t anong, struct nfsd4_fs_locations *fslocs);
+		kuid_t anonu, kgid_t anong, kuid_t root_uid,
+		struct nfsd4_fs_locations *fslocs);
 static void show_secinfo(struct seq_file *m, struct svc_export *exp);
 
 static int svc_export_show(struct seq_file *m,
@@ -673,7 +699,8 @@ static int svc_export_show(struct seq_file *m,
 	if (test_bit(CACHE_VALID, &h->flags) && 
 	    !test_bit(CACHE_NEGATIVE, &h->flags)) {
 		exp_flags(m, exp->ex_flags, exp->ex_fsid,
-			  exp->ex_anon_uid, exp->ex_anon_gid, &exp->ex_fslocs);
+			  exp->ex_anon_uid, exp->ex_anon_gid, exp->ex_root_uid,
+			  &exp->ex_fslocs);
 		if (exp->ex_uuid) {
 			int i;
 			seq_puts(m, ",uuid=");
@@ -723,6 +750,7 @@ static void export_update(struct cache_head *cnew, struct cache_head *citem)
 	new->ex_anon_uid = item->ex_anon_uid;
 	new->ex_anon_gid = item->ex_anon_gid;
 	new->ex_fsid = item->ex_fsid;
+	new->ex_root_uid = item->ex_root_uid;
 	new->ex_devid_map = item->ex_devid_map;
 	item->ex_devid_map = NULL;
 	new->ex_uuid = item->ex_uuid;
@@ -1168,7 +1196,8 @@ static void show_secinfo(struct seq_file *m, struct svc_export *exp)
 }
 
 static void exp_flags(struct seq_file *m, int flag, int fsid,
-		kuid_t anonu, kgid_t anong, struct nfsd4_fs_locations *fsloc)
+		kuid_t anonu, kgid_t anong, kuid_t root_uid,
+		struct nfsd4_fs_locations *fsloc)
 {
 	struct user_namespace *userns = m->file->f_cred->user_ns;
 
@@ -1181,6 +1210,8 @@ static void exp_flags(struct seq_file *m, int flag, int fsid,
 	if (!gid_eq(anong, make_kgid(userns, (gid_t)-2)) &&
 	    !gid_eq(anong, make_kgid(userns, 0x10000-2)))
 		seq_printf(m, ",anongid=%u", from_kgid_munged(userns, anong));
+	if (flag & NFSEXP_ROOTUID)
+		seq_printf(m, ",root_uid=%u", __kuid_val(root_uid));
 	if (fsloc && fsloc->locations_count > 0) {
 		char *loctype = (fsloc->migrated) ? "refer" : "replicas";
 		int i;
