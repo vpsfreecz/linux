@@ -1621,7 +1621,17 @@ int do_syslog(int type, char __user *buf, int len, int source)
 		break;
 	/* Size of the log buffer */
 	case SYSLOG_ACTION_SIZE_BUFFER:
-		error = log_buf_len;
+		error = ns->log_buf_len;
+		break;
+	case SYSLOG_ACTION_NEW_NS:
+#ifdef CONFIG_SYSLOG_NS
+		pr_debug("Setting flag, new syslog namespace in clone()\n");
+		task_lock(current);
+		current->syslog_ns_for_child = true;
+		task_unlock(current);
+#else
+		error = -EINVAL;
+#endif
 		break;
 	default:
 		error = -EINVAL;
