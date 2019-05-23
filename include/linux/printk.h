@@ -125,6 +125,9 @@ struct va_format {
  */
 #define DEPRECATED	"[Deprecated]: "
 
+asmlinkage __printf(2, 3) __cold
+int ns_printk(struct syslog_namespace *ns, const char *fmt, ...);
+
 /*
  * Dummy printk for disabled debugging statements to use whilst maintaining
  * gcc's format checking.
@@ -314,6 +317,8 @@ extern int kptr_restrict;
  */
 #define pr_cont(fmt, ...) \
 	printk(KERN_CONT fmt, ##__VA_ARGS__)
+#define ns_pr_cont(ns, fmt, ...) \
+	ns_printk(ns, KERN_CONT fmt, ##__VA_ARGS__)
 
 /* pr_devel() should produce zero code unless DEBUG is defined */
 #ifdef DEBUG
