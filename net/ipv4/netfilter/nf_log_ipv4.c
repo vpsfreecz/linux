@@ -270,6 +270,21 @@ static void dump_ipv4_packet(struct net *net, struct nf_log_buf *m,
 	/* (ICMP allows recursion one level deep) */
 	/* maxlen =  IP + ICMP +  IP + max(TCP,UDP,ICMP,unknown) */
 	/* maxlen = 230+   91  + 230 + 252 = 803 */
+
+#ifdef DEBUG
+	nf_log_buf_add(m, "current(%6i)='%s' parent(%6i)='%s' ",
+		       current->pid, current->comm,
+		       current->parent ? current->parent->pid : -1,
+		       current->parent ? current->parent->comm : "");
+
+	nf_log_buf_add(m, "netns=%p?init=%p?currprox=%p ", net, &init_net,
+		       current->nsproxy ? current->nsproxy->net_ns : NULL);
+
+	nf_log_buf_add(m, "sysns=%p?init=%p?currprox=%p ",
+		       net->nsproxy->syslog_ns,
+		       &init_syslog_ns, current->nsproxy ?
+				current->nsproxy->syslog_ns : NULL);
+#endif
 }
 
 static void dump_ipv4_mac_header(struct nf_log_buf *m,
