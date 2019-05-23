@@ -794,6 +794,15 @@ static ssize_t devkmsg_write(struct kiocb *iocb, struct iov_iter *from)
 	struct devkmsg_user *user = file->private_data;
 	size_t len = iov_iter_count(from);
 	ssize_t ret = len;
+	struct syslog_namespace *ns;
+
+	if (!current->nsproxy)
+		return -EFAULT;
+
+	ns = current->nsproxy->syslog_ns;
+
+	if (!ns)
+		ns = &init_syslog_ns;
 
 	if (!user || len > LOG_LINE_MAX)
 		return -EINVAL;
@@ -855,6 +864,12 @@ static ssize_t devkmsg_read(struct file *file, char __user *buf,
 	struct printk_log *msg;
 	size_t len;
 	ssize_t ret;
+	struct syslog_namespace *ns;
+
+	if (!current->nsproxy)
+		return -EFAULT;
+
+	ns = current->nsproxy->syslog_ns;
 
 	if (!user)
 		return -EBADF;
@@ -917,7 +932,13 @@ out:
 static loff_t devkmsg_llseek(struct file *file, loff_t offset, int whence)
 {
 	struct devkmsg_user *user = file->private_data;
+	struct syslog_namespace *ns;
 	loff_t ret = 0;
+
+	if (!current->nsproxy)
+		return -EFAULT;
+
+	ns = current->nsproxy->syslog_ns;
 
 	if (!user)
 		return -EBADF;
@@ -955,7 +976,13 @@ static loff_t devkmsg_llseek(struct file *file, loff_t offset, int whence)
 static __poll_t devkmsg_poll(struct file *file, poll_table *wait)
 {
 	struct devkmsg_user *user = file->private_data;
+	struct syslog_namespace *ns;
 	__poll_t ret = 0;
+
+	if (!current->nsproxy)
+		return -EFAULT;
+
+	ns = current->nsproxy->syslog_ns;
 
 	if (!user)
 		return EPOLLERR|EPOLLNVAL;
@@ -978,7 +1005,13 @@ static __poll_t devkmsg_poll(struct file *file, poll_table *wait)
 static int devkmsg_open(struct inode *inode, struct file *file)
 {
 	struct devkmsg_user *user;
+	struct syslog_namespace *ns;
 	int err;
+
+	if (!current->nsproxy)
+		return -EFAULT;
+
+	ns = current->nsproxy->syslog_ns;
 
 	if (devkmsg_log & DEVKMSG_LOG_MASK_OFF)
 		return -EPERM;
