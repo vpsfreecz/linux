@@ -110,6 +110,56 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 		goto out_net;
 	}
 
+	/* Will tsk be always the same as reported from current? */
+	task_lock(tsk);
+	new_syslogns = tsk->syslog_ns_for_child;
+	tsk->syslog_ns_for_child = false;
+	task_unlock(tsk);
+
+	/* do a new syslog NS, you can force always new by new_syslogns = 1 */
+	new_nsp->syslog_ns = copy_syslog_ns(new_syslogns, user_ns,
+				      tsk->nsproxy->syslog_ns);
+	if (IS_ERR(new_nsp->syslog_ns)) {
+		err = PTR_ERR(new_nsp->syslog_ns);
+		goto out_syslog;
+	}
+
+	if ((flags & CLONE_NEWNET) || new_syslogns ||
+		(&init_net != new_nsp->net_ns)) {
+
+		pr_debug("Create new namespace:\n");
+		pr_debug("\t%p %6i '%s', current task\n", current,
+			 current->pid, current->comm);
+		pr_debug("\t%p %6i '%s', parent of current task\n",
+			 current->parent,
+			 current->parent ? current->parent->pid : -1,
+			 current->parent ? current->parent->comm : "");
+		pr_debug("\t%p %6i '%s', changed task\n", tsk, tsk->pid,
+			 tsk->comm);
+		pr_debug("\t%p %6i '%s', parent of changed task\n",
+			 tsk->parent, tsk->parent ? tsk->parent->pid : -1,
+			 tsk->parent ? tsk->parent->comm : "");
+
+		pr_debug("Net namespace:\n");
+		pr_debug("\t%p, new created\n", new_nsp->net_ns);
+		pr_debug("\t%p, from current nsproxy\n",
+			current->nsproxy ? current->nsproxy->net_ns : NULL);
+		pr_debug("\t%p, changed task nsproxy\n",
+			tsk->nsproxy ? tsk->nsproxy->net_ns : NULL);
+		pr_debug("\t%p, initial\n", &init_net);
+	}
+
+	/*
+	 * HACK HACK HACK
+	 * Creating a new syslog NS with old network namespace will cause
+	 * an overwrite of the all namespaces which are using this net NS
+	 * (it could destroy initial syslog namespace)
+	 *
+	 * also unshare -> new syslog racing
+	 */
+	if (&init_net != new_nsp->net_ns)
+		new_nsp->net_ns->nsproxy = new_nsp;
+
 	return new_nsp;
 
 out_net:
