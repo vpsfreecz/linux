@@ -35,6 +35,7 @@
 #include <linux/ns_common.h>
 #include <linux/idr.h>
 #include <linux/skbuff.h>
+#include <linux/syslog_namespace.h>
 
 struct user_namespace;
 struct proc_dir_entry;
@@ -72,6 +73,9 @@ struct net {
 	struct llist_node	cleanup_list;	/* namespaces on death row */
 
 	struct user_namespace   *user_ns;	/* Owning user namespace */
+
+	struct nsproxy		*nsproxy;	/* Used for syslog namespace */
+
 	struct ucounts		*ucounts;
 	spinlock_t		nsid_lock;
 	struct idr		netns_ids;

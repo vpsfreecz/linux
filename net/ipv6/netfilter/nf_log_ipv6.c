@@ -367,7 +367,8 @@ static void nf_log_ip6_packet(struct net *net, u_int8_t pf,
 
 	dump_ipv6_packet(net, m, loginfo, skb, skb_network_offset(skb), 1);
 
-	nf_log_buf_close(m);
+	/* link to syslog ns */
+	nf_log_buf_close(m, net->nsproxy->syslog_ns);
 }
 
 static struct nf_logger nf_ip6_logger __read_mostly = {

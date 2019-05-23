@@ -23,6 +23,7 @@
 #include <net/netlink.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
+#include <linux/syslog_namespace.h>
 
 /*
  *	Our network namespace constructor/destructor lists
@@ -38,9 +39,12 @@ EXPORT_SYMBOL_GPL(net_namespace_list);
 DECLARE_RWSEM(net_rwsem);
 EXPORT_SYMBOL_GPL(net_rwsem);
 
+extern struct nsproxy init_nsproxy;
+
 struct net init_net = {
 	.count		= REFCOUNT_INIT(1),
 	.dev_base_head	= LIST_HEAD_INIT(init_net.dev_base_head),
+	.nsproxy	= &init_nsproxy,
 };
 EXPORT_SYMBOL(init_net);
 
