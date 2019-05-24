@@ -1923,9 +1923,9 @@ static size_t log_output(int facility, int level, enum log_flags lflags, const c
 }
 
 /* Must be called under logbuf_lock. */
-int vprintk_store(int facility, int level,
-		  const char *dict, size_t dictlen,
-		  const char *fmt, va_list args)
+static int ns_vprintk_store(struct syslog_namespace *ns, int facility,
+			    int level, const char *dict, size_t dictlen,
+			    const char *fmt, va_list args)
 {
 	static char textbuf[LOG_LINE_MAX];
 	char *text = textbuf;
@@ -1970,7 +1970,15 @@ int vprintk_store(int facility, int level,
 		lflags |= LOG_NEWLINE;
 
 	return log_output(facility, level, lflags,
-			  dict, dictlen, text, text_len);
+			  dict, dictlen, text, text_len, ns);
+}
+
+/* Must be called under logbuf_lock. */
+int vprintk_store(int facility, int level, const char *dict, size_t dictlen,
+		  const char *fmt, va_list args)
+{
+	return ns_vprintk_store(&init_syslog_ns, facility, level, dict,
+			dictlen, fmt, args);
 }
 
 asmlinkage int vprintk_emit(int facility, int level,
@@ -3126,9 +3134,6 @@ bool printk_timed_ratelimit(unsigned long *caller_jiffies,
 	return true;
 }
 EXPORT_SYMBOL(printk_timed_ratelimit);
-
-static DEFINE_SPINLOCK(dump_list_lock);
-static LIST_HEAD(dump_list);
 
 /**
  * kmsg_dump_register - register a kernel log dumper.
