@@ -1981,9 +1981,21 @@ int vprintk_store(int facility, int level, const char *dict, size_t dictlen,
 			dictlen, fmt, args);
 }
 
-asmlinkage int vprintk_emit(int facility, int level,
-			    const char *dict, size_t dictlen,
-			    const char *fmt, va_list args)
+static __printf(5, 6)
+void init_prefix_helper(int facility, int level, const char *dict,
+			size_t dictlen, const char *fmt, ...)
+{
+	va_list helper_args;
+
+	va_start(helper_args, fmt);
+	ns_vprintk_store(&init_syslog_ns, facility, level, dict, dictlen,
+			 fmt, helper_args);
+	va_end(helper_args);
+}
+
+int ns_vprintk_emit(struct syslog_namespace *ns, int facility, int level,
+			const char *dict, size_t dictlen,
+			const char *fmt, va_list args)
 {
 	int printed_len;
 	bool in_sched = false, pending_output = false;
@@ -2026,6 +2038,11 @@ asmlinkage int vprintk_emit(int facility, int level,
 		logbuf_lock_irqsave(flags, init_ns);
 		curr_log_seq = init_ns->log_next_seq;
 
+#ifdef DEBUG
+		/* TODO this is ugly */
+		init_prefix_helper(facility, level, dict, dictlen,
+				   "namespace (PID %i):\n", current->pid);
+#endif
 		ns_vprintk_store(init_ns, facility, level, dict, dictlen,
 						fmt, init_args);
 		logbuf_unlock_irqrestore(flags, init_ns);
