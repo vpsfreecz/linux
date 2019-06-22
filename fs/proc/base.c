@@ -1054,10 +1054,66 @@ static ssize_t oom_adj_read(struct file *file, char __user *buf, size_t count,
 	return simple_read_from_buffer(buf, count, ppos, buffer, len);
 }
 
+/*
+ * Process is privileged to change oom_score_adj_min, when:
+ *  - the caller is in init_user_ns and has CAP_SYS_RESOURCE
+ *  - the caller is in the userns of the manipulated process,
+ *    or the caller is in a parent userns of the manipulated
+ *    process; the caller's userns is a direct descendant of
+ *    init_user_ns; the caller has CAP_SYS_RESOURCE in its userns
+ */
+static int can_set_oom_adj_min(struct task_struct *task)
+{
+	struct user_namespace *task_user_ns;
+	struct user_namespace *caller_user_ns;
+
+	if (capable(CAP_SYS_RESOURCE)) {
+#if 0
+		printk("can_set_oom_adj_min(%d) called by %d: %s\n",
+				task_pid_nr(task), task_pid_nr(current),
+				"yes, has CAP_SYS_RESOURCE in init_user_ns");
+#endif
+		return 1;
+	}
+
+	caller_user_ns = current_user_ns();
+
+	if (caller_user_ns == &init_user_ns) {
+#if 0
+		printk("can_set_oom_adj_min(%d) called by %d: %s\n",
+				task_pid_nr(task), task_pid_nr(current),
+				"no, does not have CAP_SYS_RESOURCE in init_user_ns");
+#endif
+		return 0;
+	}
+
+	task_user_ns = task_cred_xxx(task, user_ns);
+
+	if (caller_user_ns->parent != &init_user_ns ||
+			!in_userns(caller_user_ns, task_user_ns) ||
+			!ns_capable(caller_user_ns, CAP_SYS_RESOURCE)) {
+#if 0
+		printk("can_set_oom_adj_min(%d) called by %d: %s\n",
+				task_pid_nr(task), task_pid_nr(current),
+				"no, not a child of init_user_ns or does not have CAP_SYS_RESOURCE");
+#endif
+		return 0;
+	}
+
+#if 0
+	printk("can_set_oom_adj_min(%d) called by %d: %s\n",
+			task_pid_nr(task), task_pid_nr(current),
+			"access from userns allowed");
+#endif
+
+	return 1;
+}
+
 static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 {
 	struct mm_struct *mm = NULL;
 	struct task_struct *task;
+	int privileged = 0;
 	int err = 0;
 
 	task = get_proc_task(file_inode(file));
@@ -1079,8 +1135,10 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 			  current->comm, task_pid_nr(current), task_pid_nr(task),
 			  task_pid_nr(task));
 	} else {
+		privileged = can_set_oom_adj_min(task);
+
 		if ((short)oom_adj < task->signal->oom_score_adj_min &&
-				!capable(CAP_SYS_RESOURCE)) {
+				!privileged) {
 			err = -EACCES;
 			goto err_unlock;
 		}
@@ -1104,7 +1162,7 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 	}
 
 	task->signal->oom_score_adj = oom_adj;
-	if (!legacy && has_capability_noaudit(current, CAP_SYS_RESOURCE))
+	if (!legacy && privileged)
 		task->signal->oom_score_adj_min = (short)oom_adj;
 	trace_oom_score_adj_update(task);
 
@@ -1123,7 +1181,7 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 			task_lock(p);
 			if (!p->vfork_done && process_shares_mm(p, mm)) {
 				p->signal->oom_score_adj = oom_adj;
-				if (!legacy && has_capability_noaudit(current, CAP_SYS_RESOURCE))
+				if (!legacy && privileged)
 					p->signal->oom_score_adj_min = (short)oom_adj;
 			}
 			task_unlock(p);
