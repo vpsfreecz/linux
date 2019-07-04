@@ -76,7 +76,13 @@ int nfsd_setuser(struct svc_rqst *rqstp, struct svc_export *exp)
 	set_groups(new, gi);
 	put_group_info(gi);
 
-	if (!uid_eq(new->fsuid, GLOBAL_ROOT_UID))
+#if 0
+	printk("nfsd: auth: fsuid=%u, root_uid=%u\n",
+			__kuid_val(new->fsuid), __kuid_val(exp->ex_root_uid));
+#endif
+
+	if (!uid_eq(new->fsuid, GLOBAL_ROOT_UID)
+	    && !uid_eq(new->fsuid, exp->ex_root_uid))
 		new->cap_effective = cap_drop_nfsd_set(new->cap_effective);
 	else
 		new->cap_effective = cap_raise_nfsd_set(new->cap_effective,
