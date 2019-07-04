@@ -55,8 +55,13 @@ struct mem_cgroup_reclaim_cookie {
 
 #ifdef CONFIG_MEMCG
 
+#if defined(__x86_64__) && defined(CONFIG_MEMCG_32BIT_IDS)
+#define MEM_CGROUP_ID_SHIFT	32
+#define MEM_CGROUP_ID_MAX	INT_MAX
+#else
 #define MEM_CGROUP_ID_SHIFT	16
 #define MEM_CGROUP_ID_MAX	USHRT_MAX
+#endif
 
 struct mem_cgroup_id {
 	int id;
