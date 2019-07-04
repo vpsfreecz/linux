@@ -102,7 +102,7 @@ void kernel_fpu_begin(void)
 	}
 	__cpu_invalidate_fpregs_state();
 }
-EXPORT_SYMBOL_GPL(kernel_fpu_begin);
+EXPORT_SYMBOL(kernel_fpu_begin);
 
 void kernel_fpu_end(void)
 {
@@ -111,7 +111,7 @@ void kernel_fpu_end(void)
 	this_cpu_write(in_kernel_fpu, false);
 	preempt_enable();
 }
-EXPORT_SYMBOL_GPL(kernel_fpu_end);
+EXPORT_SYMBOL(kernel_fpu_end);
 
 /*
  * Save the FPU state (mark it for reload if necessary):
