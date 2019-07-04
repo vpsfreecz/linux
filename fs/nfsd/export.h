@@ -62,6 +62,7 @@ struct svc_export {
 	struct nfsd4_deviceid_map *ex_devid_map;
 	struct cache_detail	*cd;
 	struct rcu_head		ex_rcu;
+	kuid_t                  ex_root_uid;
 };
 
 /* an "export key" (expkey) maps a filehandlefragement to an
