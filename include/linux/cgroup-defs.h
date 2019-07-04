@@ -152,6 +152,14 @@ struct cgroup_subsys_state {
 	/* flush target list anchored at cgrp->rstat_css_list */
 	struct list_head rstat_css_node;
 
+#ifdef CONFIG_CGROUP_CGLIMIT
+	/*
+	 * PI: the parent css.	Placed here for cache proximity to following
+	 * fields of the containing structure.
+	 */
+	struct cgroup_subsys_state *parent_cglimit_css;
+#endif
+
 	/*
 	 * PI: Subsys-unique ID.  0 is unused and root is always 1.  The
 	 * matching css can be looked up using css_from_id().
