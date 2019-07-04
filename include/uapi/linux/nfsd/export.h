@@ -53,6 +53,7 @@
  */
 #define	NFSEXP_V4ROOT		0x10000
 #define NFSEXP_PNFS		0x20000
+#define NFSEXP_ROOTUID          0x40000
 
 /* All flags that we claim to support.  (Note we don't support NOACL.) */
 #define NFSEXP_ALLFLAGS		0x3FEFF
