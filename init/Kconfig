@@ -918,6 +918,17 @@ config MEMCG_KMEM
 	depends on MEMCG && !SLOB
 	default y
 
+config MEMCG_32BIT_IDS
+	bool "Use 32 bit IDs"
+	depends on MEMCG && X86_64
+	default n
+	help
+	  Extends the default limit of max 65536 memory cgroups to
+	  2147483647. This may cause an increase of bucket_order in
+	  mm/workingset.c, having TODO consequences.
+	  See https://lore.kernel.org/patchwork/patch/690171/ for original
+	  reasoning behind 16 bit limit.
+
 config BLK_CGROUP
 	bool "IO controller"
 	depends on BLOCK
