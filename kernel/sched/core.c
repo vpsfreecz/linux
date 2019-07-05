@@ -6880,11 +6880,20 @@ SYSCALL_DEFINE3(sched_setaffinity, pid_t, pid, unsigned int, len,
 	return retval;
 }
 
+#ifdef CONFIG_CFS_BANDWIDTH
+static long tg_get_cfs_quota(struct task_group *tg);
+static long tg_get_cfs_period(struct task_group *tg);
+#endif
+
 long sched_getaffinity(pid_t pid, struct cpumask *mask)
 {
 	struct task_struct *p;
 	unsigned long flags;
 	int retval;
+#ifdef CONFIG_CFS_BANDWIDTH
+	long quota, period;
+	int cpus = 0, cpu, enabled = 0;
+#endif
 
 	rcu_read_lock();
 
@@ -6897,8 +6906,32 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 	if (retval)
 		goto out_unlock;
 
+#ifdef CONFIG_CFS_BANDWIDTH
+	quota = tg_get_cfs_quota(p->sched_task_group);
+	period = tg_get_cfs_period(p->sched_task_group);
+
+	if (quota > 0 && period > 0) {
+		cpus = quota / period;
+
+		if ((quota % period) > 0)
+			cpus++;
+	}
+#endif
+
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
+#ifdef CONFIG_CFS_BANDWIDTH
+	if (cpus > 0) {
+		for (cpu = nr_cpu_ids - 1; cpu >= 0; cpu--) {
+			if (cpumask_test_cpu(cpu, mask)) {
+				if (enabled == cpus)
+					cpumask_clear_cpu(cpu, mask);
+				else
+					enabled++;
+			}
+		}
+	}
+#endif
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 out_unlock:
