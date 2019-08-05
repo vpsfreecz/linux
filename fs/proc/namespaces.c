@@ -9,6 +9,7 @@
 #include <linux/ipc_namespace.h>
 #include <linux/pid_namespace.h>
 #include <linux/user_namespace.h>
+#include <linux/syslog_namespace.h>
 #include "internal.h"
 
 
@@ -32,6 +33,9 @@ static const struct proc_ns_operations *ns_entries[] = {
 	&mntns_operations,
 #ifdef CONFIG_CGROUPS
 	&cgroupns_operations,
+#endif
+#ifdef CONFIG_SYSLOG_NS
+	&syslogns_operations,
 #endif
 };
 
