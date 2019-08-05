@@ -68,6 +68,7 @@
 #include <linux/bpf.h>
 #include <linux/mount.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/syslog_namespace.h>
 
 #include "../lib/kstrtox.h"
 
