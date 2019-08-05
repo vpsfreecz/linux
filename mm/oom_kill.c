@@ -419,7 +419,8 @@ static void dump_tasks(struct mem_cgroup *memcg, const nodemask_t *nodemask)
 		}
 
 		pr_info("[%7d] %5d %5d %8lu %8lu %8ld %8lu         %5hd %s\n",
-			task->pid, from_kuid(&init_user_ns, task_uid(task)),
+			pid_nr_ns(task_pid(task), task_active_pid_ns(task)),
+			from_kuid(&init_user_ns, task_uid(task)),
 			task->tgid, task->mm->total_vm, get_mm_rss(task->mm),
 			mm_pgtables_bytes(task->mm),
 			get_mm_counter(task->mm, MM_SWAPENTS),
