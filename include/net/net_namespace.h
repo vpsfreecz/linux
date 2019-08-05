@@ -38,6 +38,7 @@
 #include <linux/idr.h>
 #include <linux/skbuff.h>
 #include <linux/notifier.h>
+#include <linux/syslog_namespace.h>
 
 struct user_namespace;
 struct proc_dir_entry;
