@@ -9,6 +9,7 @@
 #include <linux/cache.h>
 #include <linux/ratelimit_types.h>
 
+struct syslog_namespace;
 extern const char linux_banner[];
 extern const char linux_proc_banner[];
 
@@ -128,6 +129,9 @@ struct va_format {
  */
 #define DEPRECATED	"[Deprecated]: "
 
+asmlinkage __printf(2, 3) __cold
+int ns_printk(struct syslog_namespace *ns, const char *fmt, ...);
+
 /*
  * Dummy printk for disabled debugging statements to use whilst maintaining
  * gcc's format checking.
@@ -162,6 +166,11 @@ static inline void printk_nmi_direct_exit(void) { }
 #ifdef CONFIG_PRINTK
 asmlinkage __printf(5, 0)
 int vprintk_emit(int facility, int level,
+		 const char *dict, size_t dictlen,
+		 const char *fmt, va_list args);
+
+asmlinkage __printf(6, 0)
+int ns_vprintk_emit(struct syslog_namespace *ns, int facility, int level,
 		 const char *dict, size_t dictlen,
 		 const char *fmt, va_list args);
 
@@ -305,6 +314,22 @@ extern int kptr_restrict;
  * This macro expands to a printk with KERN_EMERG loglevel. It uses pr_fmt() to
  * generate the format string.
  */
+#define ns_pr_emerg(ns, fmt, ...) \
+	ns_printk(ns, KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_alert(ns, fmt, ...) \
+	ns_printk(ns, KERN_ALERT pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_crit(ns, fmt, ...) \
+	ns_printk(ns, KERN_CRIT pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_err(ns, fmt, ...) \
+	ns_printk(ns, KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_warning(ns, fmt, ...) \
+	ns_printk(ns, KERN_WARNING pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_warn ns_pr_warning
+#define ns_pr_notice(ns, fmt, ...) \
+	ns_printk(ns, KERN_NOTICE pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_info(ns, fmt, ...) \
+	ns_printk(ns, KERN_INFO pr_fmt(fmt), ##__VA_ARGS__)
+
 #define pr_emerg(fmt, ...) \
 	printk(KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
 /**
@@ -379,6 +404,8 @@ extern int kptr_restrict;
  */
 #define pr_cont(fmt, ...) \
 	printk(KERN_CONT fmt, ##__VA_ARGS__)
+#define ns_pr_cont(ns, fmt, ...) \
+	ns_printk(ns, KERN_CONT fmt, ##__VA_ARGS__)
 
 /**
  * pr_devel - Print a debug-level message conditionally
