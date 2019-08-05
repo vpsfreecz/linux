@@ -2,6 +2,7 @@
 #ifndef _NF_LOG_H
 #define _NF_LOG_H
 
+#include <linux/syslog.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_log.h>
 
@@ -98,7 +99,7 @@ struct nf_log_buf;
 
 struct nf_log_buf *nf_log_buf_open(void);
 __printf(2, 3) int nf_log_buf_add(struct nf_log_buf *m, const char *f, ...);
-void nf_log_buf_close(struct nf_log_buf *m);
+void nf_log_buf_close(struct nf_log_buf *m, struct syslog_namespace *ns);
 
 /* common logging functions */
 int nf_log_dump_udp_header(struct nf_log_buf *m, const struct sk_buff *skb,

@@ -18,6 +18,7 @@
 #include <linux/pid_namespace.h>
 #include <net/net_namespace.h>
 #include <linux/ipc_namespace.h>
+#include <linux/syslog_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/file.h>
 #include <linux/syscalls.h>
@@ -40,6 +41,7 @@ struct nsproxy init_nsproxy = {
 #ifdef CONFIG_CGROUPS
 	.cgroup_ns		= &init_cgroup_ns,
 #endif
+	.syslog_ns		= &init_syslog_ns,
 };
 
 static inline struct nsproxy *create_nsproxy(void)
@@ -63,6 +65,7 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 {
 	struct nsproxy *new_nsp;
 	int err;
+	bool new_syslogns = false;
 
 	new_nsp = create_nsproxy();
 	if (!new_nsp)
@@ -106,8 +109,50 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 		goto out_net;
 	}
 
+	/* Will tsk be always the same as reported from current? */
+	task_lock(tsk);
+	if (tsk->syslog_ns_for_child == 2)
+		new_syslogns = true;
+	tsk->syslog_ns_for_child = 0;
+	task_unlock(tsk);
+
+	/* do a new syslog NS, you can force always new by new_syslogns = 1 */
+	new_nsp->syslog_ns = copy_syslog_ns(new_syslogns, user_ns,
+				      tsk->nsproxy->syslog_ns);
+	if (IS_ERR(new_nsp->syslog_ns)) {
+		err = PTR_ERR(new_nsp->syslog_ns);
+		goto out_syslog;
+	}
+
+	if ((flags & CLONE_NEWNET) || new_syslogns ||
+		(&init_net != new_nsp->net_ns)) {
+
+		pr_debug("Create new namespace:\n");
+		pr_debug("\t%p %6i '%s', current task\n", current,
+			 current->pid, current->comm);
+		pr_debug("\t%p %6i '%s', parent of current task\n",
+			 current->parent,
+			 current->parent ? current->parent->pid : -1,
+			 current->parent ? current->parent->comm : "");
+		pr_debug("\t%p %6i '%s', changed task\n", tsk, tsk->pid,
+			 tsk->comm);
+		pr_debug("\t%p %6i '%s', parent of changed task\n",
+			 tsk->parent, tsk->parent ? tsk->parent->pid : -1,
+			 tsk->parent ? tsk->parent->comm : "");
+
+		pr_debug("Net namespace:\n");
+		pr_debug("\t%p, new created\n", new_nsp->net_ns);
+		pr_debug("\t%p, from current nsproxy\n",
+			current->nsproxy ? current->nsproxy->net_ns : NULL);
+		pr_debug("\t%p, changed task nsproxy\n",
+			tsk->nsproxy ? tsk->nsproxy->net_ns : NULL);
+		pr_debug("\t%p, initial\n", &init_net);
+	}
+
 	return new_nsp;
 
+out_syslog:
+	put_net(new_nsp->net_ns);
 out_net:
 	put_cgroup_ns(new_nsp->cgroup_ns);
 out_cgroup:
@@ -124,6 +169,7 @@ out_uts:
 		put_mnt_ns(new_nsp->mnt_ns);
 out_ns:
 	kmem_cache_free(nsproxy_cachep, new_nsp);
+
 	return ERR_PTR(err);
 }
 
@@ -139,7 +185,9 @@ int copy_namespaces(unsigned long flags, struct task_struct *tsk)
 
 	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			      CLONE_NEWPID | CLONE_NEWNET |
-			      CLONE_NEWCGROUP)))) {
+			      CLONE_NEWCGROUP)))
+	    && likely(!tsk->syslog_ns_for_child)
+	) {
 		get_nsproxy(old_ns);
 		return 0;
 	}
@@ -155,7 +203,7 @@ int copy_namespaces(unsigned long flags, struct task_struct *tsk)
 	 * it along with CLONE_NEWIPC.
 	 */
 	if ((flags & (CLONE_NEWIPC | CLONE_SYSVSEM)) ==
-		(CLONE_NEWIPC | CLONE_SYSVSEM)) 
+		(CLONE_NEWIPC | CLONE_SYSVSEM))
 		return -EINVAL;
 
 	new_ns = create_new_namespaces(flags, tsk, user_ns, tsk->fs);
@@ -176,6 +224,8 @@ void free_nsproxy(struct nsproxy *ns)
 		put_ipc_ns(ns->ipc_ns);
 	if (ns->pid_ns_for_children)
 		put_pid_ns(ns->pid_ns_for_children);
+	if (ns->syslog_ns)
+		put_syslog_ns(ns->syslog_ns);
 	put_cgroup_ns(ns->cgroup_ns);
 	put_net(ns->net_ns);
 	kmem_cache_free(nsproxy_cachep, ns);
@@ -192,7 +242,8 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 	int err = 0;
 
 	if (!(unshare_flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
-			       CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWCGROUP)))
+			       CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWCGROUP))
+	    && !current->syslog_ns_for_child)
 		return 0;
 
 	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
