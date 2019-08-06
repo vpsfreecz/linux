@@ -29,6 +29,9 @@ struct shiftfs_super_info {
 	bool mark;
 	unsigned int passthrough;
 	unsigned int passthrough_mark;
+	bool map;
+	bool lower;
+	struct uid_gid_map uid_map, gid_map;
 };
 
 struct shiftfs_file_info {
@@ -64,6 +67,8 @@ static inline bool shiftfs_passthrough_statfs(struct shiftfs_super_info *info)
 }
 
 enum {
+	OPT_UIDMAP,
+	OPT_GIDMAP,
 	OPT_MARK,
 	OPT_PASSTHROUGH,
 	OPT_LAST,
@@ -71,10 +76,97 @@ enum {
 
 /* global filesystem options */
 static const match_table_t tokens = {
+	{ OPT_UIDMAP, "uidmap=%u:%u:%u" },
+	{ OPT_GIDMAP, "gidmap=%u:%u:%u" },
 	{ OPT_MARK, "mark" },
 	{ OPT_PASSTHROUGH, "passthrough=%u" },
 	{ OPT_LAST, NULL }
 };
+
+/*
+ * code stolen from user_namespace.c ... except that these functions
+ * return the same id back if unmapped ... should probably have a
+ * library?
+ */
+static u32 map_id_down(struct uid_gid_map *map, u32 id)
+{
+	unsigned idx, extents;
+	u32 first, last;
+
+	/* Find the matching extent */
+	extents = map->nr_extents;
+	smp_rmb();
+	for (idx = 0; idx < extents; idx++) {
+		 first = map->extent[idx].first;
+		 last = first + map->extent[idx].count - 1;
+		 if (id >= first && id <= last)
+			  break;
+	}
+	/* Map the id or note failure */
+	if (idx < extents)
+		 id = (id - first) + map->extent[idx].lower_first;
+
+	return id;
+}
+
+static u32 map_id_up(struct uid_gid_map *map, u32 id)
+{
+	unsigned idx, extents;
+	u32 first, last;
+
+	/* Find the matching extent */
+	extents = map->nr_extents;
+	smp_rmb();
+	for (idx = 0; idx < extents; idx++) {
+		 first = map->extent[idx].lower_first;
+		 last = first + map->extent[idx].count - 1;
+		 if (id >= first && id <= last)
+			  break;
+	}
+	/* Map the id or note failure */
+	if (idx < extents)
+		 id = (id - first) + map->extent[idx].first;
+
+	return id;
+}
+
+static bool mappings_overlap(struct uid_gid_map *new_map,
+				struct uid_gid_extent *extent)
+{
+	u32 upper_first, lower_first, upper_last, lower_last;
+	unsigned idx;
+
+	upper_first = extent->first;
+	lower_first = extent->lower_first;
+	upper_last = upper_first + extent->count - 1;
+	lower_last = lower_first + extent->count - 1;
+
+	for (idx = 0; idx < new_map->nr_extents; idx++) {
+		 u32 prev_upper_first, prev_lower_first;
+		 u32 prev_upper_last, prev_lower_last;
+		 struct uid_gid_extent *prev;
+
+		 prev = &new_map->extent[idx];
+
+		 prev_upper_first = prev->first;
+		 prev_lower_first = prev->lower_first;
+		 prev_upper_last = prev_upper_first + prev->count - 1;
+		 prev_lower_last = prev_lower_first + prev->count - 1;
+
+		 /* Does the upper range intersect a previous extent? */
+		 if ((prev_upper_first <= upper_last) &&
+		     (prev_upper_last >= upper_first))
+			  return true;
+
+		 /* Does the lower range intersect a previous extent? */
+		 if ((prev_lower_first <= lower_last) &&
+		     (prev_lower_last >= lower_first))
+			  return true;
+	}
+	return false;
+}
+/* end code stolen from user_namespace.c */
+
 
 static const struct cred *shiftfs_override_creds(const struct super_block *sb)
 {
@@ -96,6 +188,7 @@ static int shiftfs_override_object_creds(const struct super_block *sb,
 					 struct dentry *dentry, umode_t mode,
 					 bool hardlink)
 {
+	struct shiftfs_super_info *ssi = sb->s_fs_info;
 	kuid_t fsuid = current_fsuid();
 	kgid_t fsgid = current_fsgid();
 
@@ -107,8 +200,15 @@ static int shiftfs_override_object_creds(const struct super_block *sb,
 		return -ENOMEM;
 	}
 
-	(*newcred)->fsuid = KUIDT_INIT(from_kuid(sb->s_user_ns, fsuid));
-	(*newcred)->fsgid = KGIDT_INIT(from_kgid(sb->s_user_ns, fsgid));
+	if (ssi->map) {
+		(*newcred)->fsuid = KUIDT_INIT(map_id_up(&ssi->uid_map,
+					    __kuid_val(fsuid)));
+		(*newcred)->fsgid = KGIDT_INIT(map_id_up(&ssi->gid_map,
+					    __kgid_val(fsgid)));
+	} else {
+		(*newcred)->fsuid = KUIDT_INIT(from_kuid(sb->s_user_ns, fsuid));
+		(*newcred)->fsgid = KGIDT_INIT(from_kgid(sb->s_user_ns, fsgid));
+	}
 
 	if (!hardlink) {
 		int err = security_dentry_create_files_as(dentry, mode,
@@ -142,9 +242,17 @@ static void shiftfs_copyattr(struct inode *from, struct inode *to)
 {
 	struct user_namespace *from_ns = from->i_sb->s_user_ns;
 	struct user_namespace *to_ns = to->i_sb->s_user_ns;
+	struct shiftfs_super_info *sbinfo = from->i_sb->s_fs_info;
 
-	to->i_uid = shift_kuid(from_ns, to_ns, from->i_uid);
-	to->i_gid = shift_kgid(from_ns, to_ns, from->i_gid);
+	if (sbinfo->map) {
+		to->i_uid = KUIDT_INIT(map_id_up(&sbinfo->uid_map,
+						   __kuid_val(from->i_uid)));
+		to->i_gid = KGIDT_INIT(map_id_up(&sbinfo->gid_map,
+						   __kgid_val(from->i_gid)));
+	} else {
+		to->i_uid = shift_kuid(from_ns, to_ns, from->i_uid);
+		to->i_gid = shift_kgid(from_ns, to_ns, from->i_gid);
+	}
 	to->i_mode = from->i_mode;
 	to->i_atime = from->i_atime;
 	to->i_mtime = from->i_mtime;
@@ -183,12 +291,18 @@ static int shiftfs_parse_mount_options(struct shiftfs_super_info *sbinfo,
 {
 	char *p;
 	substring_t args[MAX_OPT_ARGS];
+	struct uid_gid_map *map, *maps[2] = {
+		[OPT_UIDMAP] = &sbinfo->uid_map,
+		[OPT_GIDMAP] = &sbinfo->gid_map,
+	};
 
+	pr_debug("shiftfs: %s: %s\n", __FUNCTION__, "called");
+	sbinfo->lower = false;
 	sbinfo->mark = false;
 	sbinfo->passthrough = 0;
-
 	while ((p = strsep(&options, ",")) != NULL) {
-		int err, intarg, token;
+		int err, intarg, token, from, to, count;
+		struct uid_gid_extent ext;
 
 		if (!*p)
 			continue;
@@ -207,11 +321,36 @@ static int shiftfs_parse_mount_options(struct shiftfs_super_info *sbinfo,
 				return -EINVAL;
 
 			sbinfo->passthrough = intarg;
+			sbinfo->lower = true;
+			break;
+		case OPT_UIDMAP:
+			/* fall through */
+		case OPT_GIDMAP:
+			pr_debug("%s\n", (token == OPT_UIDMAP) ? "OPT_UIDMAP"
+								: "OPT_GIDMAP");
+			sbinfo->lower = true;
+			sbinfo->map = true;
+			if (match_int(&args[0], &from) ||
+			    match_int(&args[1], &to) ||
+			    match_int(&args[2], &count))
+				return -EINVAL;
+			map = maps[token];
+			if (map->nr_extents >= UID_GID_MAP_MAX_EXTENTS)
+				return -EINVAL;
+			ext.first = from;
+			ext.lower_first = to;
+			ext.count = count;
+			if (mappings_overlap(map, &ext))
+				return -EINVAL;
+			map->extent[map->nr_extents++] = ext;
+			pr_debug("from %d, to %d, count %d\n", from, to, count);
 			break;
 		default:
 			return -EINVAL;
 		}
 	}
+	pr_debug("return with sbinfo->lower %s\n", sbinfo->lower ? "true" : "false");
+	pr_debug("return with sbinfo->mark %s\n", sbinfo->mark ? "true" : "false");
 
 	return 0;
 }
@@ -760,6 +899,7 @@ static int shiftfs_setattr(struct dentry *dentry, struct iattr *attr)
 	struct iattr newattr;
 	const struct cred *oldcred;
 	struct super_block *sb = dentry->d_sb;
+	struct shiftfs_super_info *ssi = sb->s_fs_info;
 	int err;
 
 	err = setattr_prepare(dentry, attr);
@@ -767,8 +907,17 @@ static int shiftfs_setattr(struct dentry *dentry, struct iattr *attr)
 		return err;
 
 	newattr = *attr;
-	newattr.ia_uid = KUIDT_INIT(from_kuid(sb->s_user_ns, attr->ia_uid));
-	newattr.ia_gid = KGIDT_INIT(from_kgid(sb->s_user_ns, attr->ia_gid));
+	if (ssi->map) {
+		newattr.ia_uid = KUIDT_INIT(map_id_up(&ssi->uid_map,
+					    __kuid_val(attr->ia_uid)));
+		newattr.ia_gid = KGIDT_INIT(map_id_up(&ssi->gid_map,
+					    __kgid_val(attr->ia_gid)));
+	} else {
+		newattr.ia_uid = KUIDT_INIT(from_kuid(sb->s_user_ns,
+						      attr->ia_uid));
+		newattr.ia_gid = KGIDT_INIT(from_kgid(sb->s_user_ns,
+						      attr->ia_gid));
+	}
 
 	/*
 	 * mode change is for clearing setuid/setgid bits. Allow lower fs
@@ -1339,6 +1488,7 @@ static int shiftfs_override_ioctl_creds(const struct super_block *sb,
 					const struct cred **oldcred,
 					struct cred **newcred)
 {
+	struct shiftfs_super_info *ssi = sb->s_fs_info;
 	kuid_t fsuid = current_fsuid();
 	kgid_t fsgid = current_fsgid();
 
@@ -1350,8 +1500,15 @@ static int shiftfs_override_ioctl_creds(const struct super_block *sb,
 		return -ENOMEM;
 	}
 
-	(*newcred)->fsuid = KUIDT_INIT(from_kuid(sb->s_user_ns, fsuid));
-	(*newcred)->fsgid = KGIDT_INIT(from_kgid(sb->s_user_ns, fsgid));
+	if (ssi->map) {
+		(*newcred)->fsuid = KUIDT_INIT(map_id_up(&ssi->uid_map,
+					    __kuid_val(fsuid)));
+		(*newcred)->fsgid = KGIDT_INIT(map_id_up(&ssi->gid_map,
+					    __kgid_val(fsgid)));
+	} else {
+		(*newcred)->fsuid = KUIDT_INIT(from_kuid(sb->s_user_ns, fsuid));
+		(*newcred)->fsgid = KGIDT_INIT(from_kgid(sb->s_user_ns, fsgid));
+	}
 
 	/* clear all caps to prevent bypassing capable() checks */
 	cap_clear((*newcred)->cap_bset);
@@ -1735,6 +1892,20 @@ static int shiftfs_show_options(struct seq_file *m, struct dentry *dentry)
 {
 	struct super_block *sb = dentry->d_sb;
 	struct shiftfs_super_info *sbinfo = sb->s_fs_info;
+	static const char *options[] = { "uidmap", "gidmap" };
+	const struct uid_gid_map *map[ARRAY_SIZE(options)] =
+				{ &sbinfo->uid_map, &sbinfo->gid_map };
+	int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(options); i++) {
+		for (j = 0; j < map[i]->nr_extents; j++) {
+			const struct uid_gid_extent *ext = &map[i]->extent[j];
+
+			seq_show_option(m, options[i], NULL);
+			seq_printf(m, "=%u:%u:%u", ext->first,
+			ext->lower_first, ext->count);
+		}
+	}
 
 	if (sbinfo->mark)
 		seq_show_option(m, "mark", NULL);
@@ -1900,6 +2071,7 @@ static int shiftfs_fill_super(struct super_block *sb, void *raw_data,
 	struct shiftfs_data *data = raw_data;
 	struct shiftfs_super_info *sbinfo = NULL;
 
+	pr_debug("shiftfs: %s: %s\n", __FUNCTION__, "called");
 	if (!data->path)
 		return -EINVAL;
 
@@ -1911,10 +2083,6 @@ static int shiftfs_fill_super(struct super_block *sb, void *raw_data,
 	err = shiftfs_parse_mount_options(sbinfo, data->data);
 	if (err)
 		return err;
-
-	/* to mount a mark, must be userns admin */
-	if (!sbinfo->mark && !ns_capable(current_user_ns(), CAP_SYS_ADMIN))
-		return -EPERM;
 
 	name = kstrdup(data->path, GFP_KERNEL);
 	if (!name)
@@ -1931,14 +2099,12 @@ static int shiftfs_fill_super(struct super_block *sb, void *raw_data,
 
 	sb->s_flags |= SB_POSIXACL;
 
-	if (sbinfo->mark) {
+	if (sbinfo->lower) {
 		struct super_block *lower_sb = path.mnt->mnt_sb;
 
-		/* to mark a mount point, must root wrt lower s_user_ns */
-		if (!ns_capable(lower_sb->s_user_ns, CAP_SYS_ADMIN)) {
-			err = -EPERM;
+		/* must be root wrt lower s_user_ns */
+		if (!ns_capable(lower_sb->s_user_ns, CAP_SYS_ADMIN))
 			goto out_put_path;
-		}
 
 		/*
 		 * this part is visible unshifted, so make sure no
@@ -1950,22 +2116,25 @@ static int shiftfs_fill_super(struct super_block *sb, void *raw_data,
 		shiftfs_super_force_flags(sb, lower_sb->s_flags);
 
 		/*
-		 * Handle nesting of shiftfs mounts by referring this mark
-		 * mount back to the original mark mount. This is more
+		 * Handle nesting of shiftfs mounts by referring this lower
+		 * mount back to the original lower mount. This is more
 		 * efficient and alleviates concerns about stack depth.
 		 */
 		if (lower_sb->s_magic == SHIFTFS_MAGIC) {
+			pr_debug("shiftfs: %s: %s\n", __FUNCTION__, "acually SHIFTFS_MAGIC");
 			sbinfo_mp = lower_sb->s_fs_info;
 
-			/* Doesn't make sense to mark a mark mount */
-			if (sbinfo_mp->mark) {
+			/* Doesn't make sense to mount a lower mount on lower */
+			if (sbinfo_mp->lower) {
 				err = -EINVAL;
+				pr_debug("shiftfs: %s: %s\n", __FUNCTION__, "EINVAL, mounting lower on lower");
 				goto out_put_path;
 			}
 
 			if (!passthrough_is_subset(sbinfo_mp->passthrough,
 						   sbinfo->passthrough)) {
 				err = -EPERM;
+				pr_debug("shiftfs: %s: %s\n", __FUNCTION__, "EPERM, aint passthrough subset");
 				goto out_put_path;
 			}
 
@@ -1977,6 +2146,7 @@ static int shiftfs_fill_super(struct super_block *sb, void *raw_data,
 			 */
 			sbinfo->passthrough_mark = sbinfo_mp->passthrough_mark;
 		} else {
+			pr_debug("shiftfs: %s: %s\n", __FUNCTION__, "not SHIFTFS_MAGIC");
 			sbinfo->mnt = mntget(path.mnt);
 			dentry = dget(path.dentry);
 			/*
@@ -1996,20 +2166,38 @@ static int shiftfs_fill_super(struct super_block *sb, void *raw_data,
 		 * This leg executes if we're admin capable in the namespace,
 		 * so be very careful.
 		 */
+		pr_debug("shiftfs: %s: %s\n", __FUNCTION__, "mounting in upper");
 		err = -EPERM;
-		if (path.dentry->d_sb->s_magic != SHIFTFS_MAGIC)
+		if (path.dentry->d_sb->s_magic != SHIFTFS_MAGIC) {
+			pr_debug("path.dentry->d_sb->s_magic != SHIFTFS_MAGIC\n");
 			goto out_put_path;
+		}
 
 		sbinfo_mp = path.dentry->d_sb->s_fs_info;
-		if (!sbinfo_mp->mark)
+		if (!sbinfo_mp->mark && !sbinfo->map) {
+			pr_debug("!sbinfo_mp->mark && !sbinfo->map\n");
 			goto out_put_path;
+		}
 
 		if (!passthrough_is_subset(sbinfo_mp->passthrough,
-					   sbinfo->passthrough))
+					   sbinfo->passthrough)) {
+			pr_debug("passthrough_is_subset\n");
 			goto out_put_path;
+		}
 
 		sbinfo->mnt = mntget(sbinfo_mp->mnt);
 		sbinfo->creator_cred = get_cred(sbinfo_mp->creator_cred);
+
+		/* to mount a mark, must be userns admin */
+		if (sbinfo_mp->mark &&
+		    !ns_capable(current_user_ns(), CAP_SYS_ADMIN))
+			goto out_put_path;
+		if (sbinfo_mp->map) {
+			sbinfo->uid_map = sbinfo_mp->uid_map;
+			sbinfo->gid_map = sbinfo_mp->gid_map;
+			sbinfo->map = true;
+		}
+
 		dentry = dget(path.dentry->d_fsdata);
 		/*
 		 * Copy up passthrough settings from mark mountpoint so we can
