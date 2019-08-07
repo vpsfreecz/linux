@@ -94,4 +94,6 @@
 
 #define SHIFTFS_MAGIC		0x6a656a62
 
+#define REMAPFS_MAGIC		0x94160581
+
 #endif /* __LINUX_MAGIC_H__ */
