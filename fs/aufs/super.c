@@ -1031,4 +1031,5 @@ struct file_system_type aufs_fs_type = {
 	.kill_sb	= aufs_kill_sb,
 	/* no need to __module_get() and module_put(). */
 	.owner		= THIS_MODULE,
+	.fs_flags	= FS_USERNS_MOUNT,
 };
