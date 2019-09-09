@@ -520,7 +520,7 @@ root_uid_parse(char **mesg, char *buf, struct svc_export *exp)
 		return err;
 
 	exp->ex_root_uid = KUIDT_INIT(an_uint);
-#if 0
+#if 1
 	printk("nfsd: got root_uid=%u\n", an_uint);
 #endif
 	return 0;

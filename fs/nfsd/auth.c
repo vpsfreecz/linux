@@ -76,7 +76,7 @@ int nfsd_setuser(struct svc_rqst *rqstp, struct svc_export *exp)
 	set_groups(new, gi);
 	put_group_info(gi);
 
-#if 0
+#if 1
 	printk("nfsd: auth: fsuid=%u, root_uid=%u\n",
 			__kuid_val(new->fsuid), __kuid_val(exp->ex_root_uid));
 #endif
