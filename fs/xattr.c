@@ -28,6 +28,14 @@
 
 #include "internal.h"
 
+bool xattr_trusted(struct user_namespace *ns)
+{
+	if (((ns == &init_user_ns) || (ns->parent == &init_user_ns)) &&
+	    ns_capable_noaudit(ns, CAP_SYS_ADMIN))
+		return true;
+	return false;
+}
+
 static const char *
 strcmp_prefix(const char *a, const char *a_prefix)
 {
@@ -134,7 +142,7 @@ xattr_permission(struct mnt_idmap *idmap, struct inode *inode,
 	 * The trusted.* namespace can only be accessed by privileged users.
 	 */
 	if (!strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN)) {
-		if (!capable(CAP_SYS_ADMIN))
+		if (!xattr_trusted(current_user_ns()))
 			return (mask & MAY_WRITE) ? -EPERM : -ENODATA;
 		return 0;
 	}
@@ -1308,7 +1316,7 @@ static bool xattr_is_trusted(const char *name)
 ssize_t simple_xattr_list(struct inode *inode, struct simple_xattrs *xattrs,
 			  char *buffer, size_t size)
 {
-	bool trusted = ns_capable_noaudit(&init_user_ns, CAP_SYS_ADMIN);
+	bool trusted = xattr_trusted(current_user_ns());
 	struct simple_xattr *xattr;
 	struct rb_node *rbp;
 	ssize_t remaining_size = size;
