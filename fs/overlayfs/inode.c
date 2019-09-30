@@ -11,6 +11,7 @@
 #include <linux/posix_acl.h>
 #include <linux/ratelimit.h>
 #include <linux/fiemap.h>
+#include <linux/user_namespace.h>
 #include "overlayfs.h"
 
 
@@ -401,6 +402,8 @@ int ovl_xattr_get(struct dentry *dentry, struct inode *inode, const char *name,
 
 static bool ovl_can_list(struct super_block *sb, const char *s)
 {
+	struct user_namespace *ns = sb->s_user_ns;
+
 	/* Never list private (.overlay) */
 	if (ovl_is_private_xattr(sb, s))
 		return false;
@@ -409,8 +412,8 @@ static bool ovl_can_list(struct super_block *sb, const char *s)
 	if (strncmp(s, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN) != 0)
 		return true;
 
-	/* list other trusted for superuser only */
-	return ns_capable_noaudit(&init_user_ns, CAP_SYS_ADMIN);
+	return ns_capable_noaudit(ns, CAP_SYS_ADMIN) &&
+	       ((ns == &init_user_ns) || (ns->parent == &init_user_ns));
 }
 
 ssize_t ovl_listxattr(struct dentry *dentry, char *list, size_t size)
