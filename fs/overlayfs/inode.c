@@ -15,6 +15,7 @@
 #include <linux/namei.h>
 #include <linux/posix_acl.h>
 #include <linux/posix_acl_xattr.h>
+#include <linux/user_namespace.h>
 #include "overlayfs.h"
 
 
