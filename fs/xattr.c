@@ -27,6 +27,14 @@
 
 #include "internal.h"
 
+bool xattr_trusted(struct user_namespace *ns)
+{
+	if (((ns == &init_user_ns) || (ns->parent == &init_user_ns)) &&
+	    ns_capable_noaudit(ns, CAP_SYS_ADMIN))
+		return true;
+	return false;
+}
+
 static const char *
 strcmp_prefix(const char *a, const char *a_prefix)
 {
@@ -116,7 +124,7 @@ xattr_permission(struct user_namespace *mnt_userns, struct inode *inode,
 	 * The trusted.* namespace can only be accessed by privileged users.
 	 */
 	if (!strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN)) {
-		if (!capable(CAP_SYS_ADMIN))
+		if (!xattr_trusted(current_user_ns()))
 			return (mask & MAY_WRITE) ? -EPERM : -ENODATA;
 		return 0;
 	}
@@ -1140,11 +1148,10 @@ static int xattr_list_one(char **buffer, ssize_t *remaining_size,
 ssize_t simple_xattr_list(struct inode *inode, struct simple_xattrs *xattrs,
 			  char *buffer, size_t size)
 {
-	bool trusted = ns_capable_noaudit(&init_user_ns, CAP_SYS_ADMIN);
+	bool trusted = xattr_trusted(current_user_ns());
 	struct simple_xattr *xattr;
 	ssize_t remaining_size = size;
 	int err = 0;
-
 #ifdef CONFIG_FS_POSIX_ACL
 	if (IS_POSIXACL(inode)) {
 		if (inode->i_acl) {
