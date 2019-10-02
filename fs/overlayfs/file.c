@@ -40,6 +40,7 @@ static char ovl_whatisit(struct inode *inode, struct inode *realinode)
 static struct file *ovl_open_realfile(const struct file *file,
 				      struct inode *realinode)
 {
+	struct path realpath;
 	struct inode *inode = file_inode(file);
 	struct file *realfile;
 	const struct cred *old_cred;
@@ -51,13 +52,14 @@ static struct file *ovl_open_realfile(const struct file *file,
 		acc_mode |= MAY_APPEND;
 
 	old_cred = ovl_override_creds(inode->i_sb);
+	ovl_path_real(file->f_path.dentry, &realpath);
 	err = inode_permission(realinode, MAY_OPEN | acc_mode);
 	if (err) {
 		realfile = ERR_PTR(err);
 	} else if (!inode_owner_or_capable(realinode)) {
 		realfile = ERR_PTR(-EPERM);
 	} else {
-		realfile = open_with_fake_path(&file->f_path, flags, realinode,
+		realfile = open_with_fake_path(&realpath, flags, realinode,
 					       current_cred());
 	}
 	revert_creds(old_cred);
