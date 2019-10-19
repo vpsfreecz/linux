@@ -651,11 +651,11 @@ static int svc_export_parse(struct cache_detail *cd, char *mesg, int mlen)
 			else if (strcmp(buf, "secinfo") == 0)
 				err = secinfo_parse(&mesg, buf, &exp);
 			else
-				/* quietly ignore unknown words and anything
-				 * following. Newer user-space can try to set
+				/* Quietly ignore unknown words.
+				 * Newer user-space can try to set
 				 * new values, then see what the result was.
 				 */
-				break;
+				continue;
 			if (err)
 				goto out4;
 		}
