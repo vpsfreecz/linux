@@ -1396,14 +1396,18 @@ SYSCALL_DEFINE2(setdomainname, char __user *, name, int, len)
 	return errno;
 }
 
-SYSCALL_DEFINE2(getrlimit, unsigned int, resource, struct rlimit __user *, rlim)
+SYSCALL_DEFINE2(getrlimit, unsigned int, resource, struct rlimit_user __user *, rlim)
 {
 	struct rlimit value;
+	struct rlimit_user retval;
 	int ret;
 
 	ret = do_prlimit(current, resource, NULL, &value);
-	if (!ret)
-		ret = copy_to_user(rlim, &value, sizeof(*rlim)) ? -EFAULT : 0;
+	if (!ret) {
+		retval.rlim_cur = value.rlim_cur;
+		retval.rlim_max = value.rlim_max;
+		ret = copy_to_user(rlim, &retval, sizeof(*rlim)) ? -EFAULT : 0;
+	}
 
 	return ret;
 }
@@ -1462,9 +1466,10 @@ COMPAT_SYSCALL_DEFINE2(getrlimit, unsigned int, resource,
  *	Back compatibility for getrlimit. Needed for some apps.
  */
 SYSCALL_DEFINE2(old_getrlimit, unsigned int, resource,
-		struct rlimit __user *, rlim)
+		struct rlimit_user __user *, rlim)
 {
 	struct rlimit x;
+	struct rlimit_user retval;
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
 
@@ -1476,7 +1481,9 @@ SYSCALL_DEFINE2(old_getrlimit, unsigned int, resource,
 		x.rlim_cur = 0x7FFFFFFF;
 	if (x.rlim_max > 0x7FFFFFFF)
 		x.rlim_max = 0x7FFFFFFF;
-	return copy_to_user(rlim, &x, sizeof(x)) ? -EFAULT : 0;
+	retval.rlim_cur = x.rlim_cur;
+	retval.rlim_max = x.rlim_max;
+	return copy_to_user(rlim, &retval, sizeof(retval)) ? -EFAULT : 0;
 }
 
 #ifdef CONFIG_COMPAT
@@ -1537,6 +1544,73 @@ static void rlim64_to_rlim(const struct rlimit64 *rlim64, struct rlimit *rlim)
 		rlim->rlim_max = RLIM_INFINITY;
 	else
 		rlim->rlim_max = (unsigned long)rlim64->rlim_max;
+	if (rlim64_is_infinity(rlim64->rlim_max))
+		rlim->rlim_ns_max = RLIM_INFINITY;
+	else
+		rlim->rlim_ns_max = (unsigned long)rlim64->rlim_max;
+}
+
+/*
+ * Process can exceed current prlimit rlim_max up to rlim_ns_max, if:
+ *  - the caller has CAP_SYS_RESOURCE in the init user ns
+ *  - the caller is in the userns of the manipulated process,
+ *    or the caller is in a parent userns of the manipulated
+ *    process; the caller's userns is a direct descendant of
+ *    init_user_ns; the caller has CAP_SYS_RESOURCE in its userns
+ * Only processes from init_user_ns with CAP_SYS_RESOURCE change rlim_ns_max
+ */
+static int check_update_prlimit_max(struct task_struct *tsk,
+		struct rlimit *new_rlim, struct rlimit *old_rlim)
+{
+	struct user_namespace *task_user_ns;
+	struct user_namespace *caller_user_ns;
+
+	if (capable(CAP_SYS_RESOURCE)) {
+#if 0
+		printk("prlimit64(%d) called by %d (max=%lu): %s\n",
+			task_pid_nr(tsk), task_pid_nr(current), new_rlim->rlim_max,
+			"yes, has CAP_SYS_RESOURCE in init_user_ns");
+#endif
+		new_rlim->rlim_ns_max = new_rlim->rlim_max;
+		return 0;
+	}
+
+	caller_user_ns = current_user_ns();
+
+	if (caller_user_ns == &init_user_ns) {
+#if 0
+		printk("prlimit64(%d) called by %d: %s\n",
+			task_pid_nr(tsk), task_pid_nr(current),
+			"no, does not have CAP_SYS_RESOURCE in init_user_ns");
+#endif
+		return -EPERM;
+	}
+
+	task_user_ns = task_cred_xxx(tsk, user_ns);
+
+	if (caller_user_ns->parent == &init_user_ns &&
+		in_userns(caller_user_ns, task_user_ns) &&
+		ns_capable(caller_user_ns, CAP_SYS_RESOURCE) &&
+		old_rlim->rlim_ns_max >= new_rlim->rlim_ns_max) {
+#if 0
+		printk("prlimit64(%d) called by %d (max=%lu <= ns_max=%lu): %s\n",
+			task_pid_nr(tsk), task_pid_nr(current),
+			new_rlim->rlim_max, old_rlim->rlim_ns_max,
+			"yes, a child of init_user_ns, has CAP_SYS_RESOURCE "
+			"and rlim_max within rlim_ns_max");
+#endif
+		new_rlim->rlim_ns_max = old_rlim->rlim_ns_max;
+		return 0;
+	}
+
+#if 0
+	printk("prlimit64(%d) called by %d (old_max=%lu, old_ns_max=%lu): %s\n",
+			task_pid_nr(tsk), task_pid_nr(current),
+			old_rlim->rlim_max, old_rlim->rlim_ns_max,
+			"access from userns not allowed");
+#endif
+
+	return -EPERM;
 }
 
 /* make sure you are allowed to change @tsk limits before calling this */
@@ -1566,11 +1640,13 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
 	rlim = tsk->signal->rlim + resource;
 	task_lock(tsk->group_leader);
 	if (new_rlim) {
-		/* Keep the capable check against init_user_ns until
-		   cgroups can contain all limits */
-		if (new_rlim->rlim_max > rlim->rlim_max &&
-				!capable(CAP_SYS_RESOURCE))
-			retval = -EPERM;
+		if (new_rlim->rlim_max > rlim->rlim_max)
+			retval = check_update_prlimit_max(tsk, new_rlim, rlim);
+		else if (capable(CAP_SYS_RESOURCE))
+			new_rlim->rlim_ns_max = new_rlim->rlim_max;
+		else
+			new_rlim->rlim_ns_max = rlim->rlim_ns_max;
+
 		if (!retval)
 			retval = security_task_setrlimit(tsk, resource, new_rlim);
 	}
