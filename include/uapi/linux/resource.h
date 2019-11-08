@@ -43,6 +43,12 @@ struct	rusage {
 struct rlimit {
 	__kernel_ulong_t	rlim_cur;
 	__kernel_ulong_t	rlim_max;
+	__kernel_ulong_t	rlim_ns_max;
+};
+
+struct rlimit_user {
+	__kernel_ulong_t	rlim_cur;
+	__kernel_ulong_t	rlim_max;
 };
 
 #define RLIM64_INFINITY		(~0ULL)
