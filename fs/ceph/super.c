@@ -1582,7 +1582,7 @@ static struct file_system_type ceph_fs_type = {
 	.name		= "ceph",
 	.init_fs_context = ceph_init_fs_context,
 	.kill_sb	= ceph_kill_sb,
-	.fs_flags	= FS_RENAME_DOES_D_MOVE | FS_ALLOW_IDMAP,
+	.fs_flags	= FS_RENAME_DOES_D_MOVE | FS_ALLOW_IDMAP | FS_USERNS_MOUNT,
 };
 MODULE_ALIAS_FS("ceph");
 
