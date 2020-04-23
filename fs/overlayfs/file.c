@@ -59,8 +59,12 @@ static struct file *ovl_open_realfile(const struct file *file,
 	} else if (!inode_owner_or_capable(realinode)) {
 		realfile = ERR_PTR(-EPERM);
 	} else {
-		realfile = open_with_fake_path(&realpath, flags, realinode,
-					       current_cred());
+		if (realpath.dentry->d_sb->s_magic == SHIFTFS_MAGIC)
+			realfile = open_with_fake_path(&realpath, flags, realinode,
+						       current_cred());
+		else
+			realfile = open_with_fake_path(&file->f_path, flags, realinode,
+						       current_cred());
 	}
 	revert_creds(old_cred);
 
