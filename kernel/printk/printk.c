@@ -2071,7 +2071,6 @@ int ns_vprintk_emit(struct syslog_namespace *ns, int facility, int level,
 	boot_delay_msec(level);
 	printk_delay();
 
-#if 0
 	if (ns != &init_syslog_ns) {
 		struct syslog_namespace *init_ns = &init_syslog_ns;
 		va_list init_args;
@@ -2094,7 +2093,6 @@ int ns_vprintk_emit(struct syslog_namespace *ns, int facility, int level,
 		logbuf_unlock_irqrestore(flags, init_ns);
 		pending_output = (curr_log_seq != init_ns->log_next_seq);
 	}
-#endif
 
 	/* This stops the holder of console_sem just where we want him */
 	logbuf_lock_irqsave(flags, ns);
