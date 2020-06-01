@@ -423,10 +423,11 @@ static const struct svc_serv_ops lockd_sv_ops = {
 	.svo_enqueue_xprt	= svc_xprt_do_enqueue,
 };
 
-static struct svc_serv *lockd_create_svc(void)
+static struct svc_serv *lockd_create_svc(bool *reg)
 {
 	struct svc_serv *serv;
 
+	*reg = false;
 	/*
 	 * Check whether we're already up and running.
 	 */
@@ -456,11 +457,9 @@ static struct svc_serv *lockd_create_svc(void)
 		printk(KERN_WARNING "lockd_up: create service failed\n");
 		return ERR_PTR(-ENOMEM);
 	}
-	register_inetaddr_notifier(&lockd_inetaddr_notifier);
-#if IS_ENABLED(CONFIG_IPV6)
-	register_inet6addr_notifier(&lockd_inet6addr_notifier);
-#endif
 	dprintk("lockd_up: service created\n");
+	*reg = true;
+
 	return serv;
 }
 
@@ -471,19 +470,25 @@ int lockd_up(struct net *net, const struct cred *cred)
 {
 	struct svc_serv *serv;
 	int error;
+	bool reg = false;
 
 	mutex_lock(&nlmsvc_mutex);
 
-	serv = lockd_create_svc();
+	serv = lockd_create_svc(&reg);
 	if (IS_ERR(serv)) {
 		error = PTR_ERR(serv);
 		goto err_create;
 	}
 
 	error = lockd_up_net(serv, net, cred);
-	if (error < 0) {
-		lockd_unregister_notifiers();
+	if (error < 0)
 		goto err_put;
+
+	if (reg) {
+	register_inetaddr_notifier(&lockd_inetaddr_notifier);
+#if IS_ENABLED(CONFIG_IPV6)
+	register_inet6addr_notifier(&lockd_inet6addr_notifier);
+#endif
 	}
 
 	error = lockd_start_svc(serv);
