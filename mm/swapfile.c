@@ -1854,7 +1854,7 @@ static int unuse_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		unsigned long addr, swp_entry_t entry, struct page *page)
 {
 	struct page *swapcache;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	spinlock_t *ptl;
 	pte_t *pte;
 	int ret = 1;

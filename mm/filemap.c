@@ -832,7 +832,7 @@ static int __add_to_page_cache_locked(struct page *page,
 {
 	XA_STATE(xas, &mapping->i_pages, offset);
 	int huge = PageHuge(page);
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = root_mem_cgroup;
 	int error;
 	void *old;
 
