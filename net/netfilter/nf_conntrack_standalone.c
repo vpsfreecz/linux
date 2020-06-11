@@ -1056,19 +1056,10 @@ static int nf_conntrack_standalone_init_sysctl(struct net *net)
 
 	/* Don't export sysctls to unprivileged users */
 	if (net->user_ns != &init_user_ns) {
-		table[NF_SYSCTL_CT_MAX].procname = NULL;
-		table[NF_SYSCTL_CT_ACCT].procname = NULL;
-		table[NF_SYSCTL_CT_HELPER].procname = NULL;
-#ifdef CONFIG_NF_CONNTRACK_TIMESTAMP
-		table[NF_SYSCTL_CT_TIMESTAMP].procname = NULL;
-#endif
-#ifdef CONFIG_NF_CONNTRACK_EVENTS
-		table[NF_SYSCTL_CT_EVENTS].procname = NULL;
-#endif
+		table[NF_SYSCTL_CT_MAX].data = kmemdup(&nf_conntrack_max, table[NF_SYSCTL_CT_MAX].maxlen, GFP_KERNEL);
+		table[NF_SYSCTL_CT_BUCKETS].data = kmemdup(&nf_conntrack_htable_size_user, table[NF_SYSCTL_CT_MAX].maxlen, GFP_KERNEL);
+		table[NF_SYSCTL_CT_EXPECT_MAX].data = kmemdup(&nf_ct_expect_max, table[NF_SYSCTL_CT_MAX].maxlen, GFP_KERNEL);
 	}
-
-	if (!net_eq(&init_net, net))
-		table[NF_SYSCTL_CT_BUCKETS].mode = 0444;
 
 	net->ct.sysctl_header = register_net_sysctl(net, "net/netfilter", table);
 	if (!net->ct.sysctl_header)
@@ -1087,6 +1078,11 @@ static void nf_conntrack_standalone_fini_sysctl(struct net *net)
 
 	table = net->ct.sysctl_header->ctl_table_arg;
 	unregister_net_sysctl_table(net->ct.sysctl_header);
+	if (net->user_ns != &init_user_ns) {
+		kfree(table[NF_SYSCTL_CT_MAX].data);
+		kfree(table[NF_SYSCTL_CT_BUCKETS].data);
+		kfree(table[NF_SYSCTL_CT_EXPECT_MAX].data);
+	}
 	kfree(table);
 }
 #else
