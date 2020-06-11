@@ -1060,11 +1060,11 @@ static int nf_conntrack_standalone_init_sysctl(struct net *net)
 	nf_conntrack_standalone_init_dccp_sysctl(net, table);
 	nf_conntrack_standalone_init_gre_sysctl(net, table);
 
-	/* Don't allow non-init_net ns to alter global sysctls */
+	/* Don't allow unprivileged users to alter certain sysctls */
 	if (!net_eq(&init_net, net)) {
-		table[NF_SYSCTL_CT_MAX].mode = 0444;
-		table[NF_SYSCTL_CT_EXPECT_MAX].mode = 0444;
-		table[NF_SYSCTL_CT_BUCKETS].mode = 0444;
+		table[NF_SYSCTL_CT_MAX].data = kmemdup(&nf_conntrack_max, table[NF_SYSCTL_CT_MAX].maxlen, GFP_KERNEL);
+		table[NF_SYSCTL_CT_BUCKETS].data = kmemdup(&nf_conntrack_htable_size_user, table[NF_SYSCTL_CT_MAX].maxlen, GFP_KERNEL);
+		table[NF_SYSCTL_CT_EXPECT_MAX].data = kmemdup(&nf_ct_expect_max, table[NF_SYSCTL_CT_MAX].maxlen, GFP_KERNEL);
 	}
 
 	net->ct.sysctl_header = register_net_sysctl(net, "net/netfilter", table);
@@ -1084,6 +1084,11 @@ static void nf_conntrack_standalone_fini_sysctl(struct net *net)
 
 	table = net->ct.sysctl_header->ctl_table_arg;
 	unregister_net_sysctl_table(net->ct.sysctl_header);
+	if (!net_eq(&init_net, net)) {
+		kfree(table[NF_SYSCTL_CT_MAX].data);
+		kfree(table[NF_SYSCTL_CT_BUCKETS].data);
+		kfree(table[NF_SYSCTL_CT_EXPECT_MAX].data);
+	}
 	kfree(table);
 }
 #else
