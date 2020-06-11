@@ -204,6 +204,8 @@ long oom_badness(struct task_struct *p, unsigned long totalpages)
 {
 	long points;
 	long adj;
+	struct pid_namespace *ns;
+	pid_t ns_pid;
 
 	if (oom_unkillable_task(p))
 		return LONG_MIN;
@@ -218,6 +220,21 @@ long oom_badness(struct task_struct *p, unsigned long totalpages)
 	 * the middle of vfork
 	 */
 	adj = (long)p->signal->oom_score_adj;
+
+	ns = task_active_pid_ns(p);
+	ns_pid = task_pid_nr_ns(p, ns);
+
+	if (((p->cred->user_ns == &init_user_ns) &&
+	     (ns == &init_pid_ns) &&
+	     (strcmp(p->comm, "lxc-start") == 0)
+	    ) ||
+	    ((p->cred->user_ns->parent == &init_user_ns) &&
+	     (ns != &init_pid_ns) &&
+	     (ns_pid == 1)
+	    )
+	  )
+		adj = (long)OOM_SCORE_ADJ_MIN;
+
 	if (adj == OOM_SCORE_ADJ_MIN ||
 			test_bit(MMF_OOM_SKIP, &p->mm->flags) ||
 			in_vfork(p)) {
