@@ -94,6 +94,7 @@ struct net {
 
 #ifdef CONFIG_SYSCTL
 	struct ctl_table_set	sysctls;
+	struct ctl_table_header	*ipc_sysctl_hdr;
 #endif
 
 	struct sock 		*rtnl;			/* rtnetlink socket */
