@@ -2713,7 +2713,7 @@ static void migrate_vma_insert_page(struct migrate_vma *migrate,
 {
 	struct vm_area_struct *vma = migrate->vma;
 	struct mm_struct *mm = vma->vm_mm;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	bool flush = false;
 	spinlock_t *ptl;
 	pte_t entry;

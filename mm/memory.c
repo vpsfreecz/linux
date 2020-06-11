@@ -2501,7 +2501,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	struct page *new_page = NULL;
 	pte_t entry;
 	int page_copied = 0;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	struct mmu_notifier_range range;
 
 	if (unlikely(anon_vma_prepare(vma)))
@@ -2939,7 +2939,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct page *page = NULL, *swapcache;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	swp_entry_t entry;
 	pte_t pte;
 	int locked;
@@ -3153,7 +3153,7 @@ out_release:
 static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	struct page *page;
 	vm_fault_t ret = 0;
 	pte_t entry;

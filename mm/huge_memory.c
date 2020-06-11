@@ -587,7 +587,7 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf,
 			struct page *page, gfp_t gfp)
 {
 	struct vm_area_struct *vma = vmf->vma;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	pgtable_t pgtable;
 	unsigned long haddr = vmf->address & HPAGE_PMD_MASK;
 	vm_fault_t ret = 0;
@@ -1211,7 +1211,7 @@ static vm_fault_t do_huge_pmd_wp_page_fallback(struct vm_fault *vmf,
 {
 	struct vm_area_struct *vma = vmf->vma;
 	unsigned long haddr = vmf->address & HPAGE_PMD_MASK;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	pgtable_t pgtable;
 	pmd_t _pmd;
 	int i;
@@ -1327,7 +1327,7 @@ vm_fault_t do_huge_pmd_wp_page(struct vm_fault *vmf, pmd_t orig_pmd)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct page *page = NULL, *new_page;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	unsigned long haddr = vmf->address & HPAGE_PMD_MASK;
 	struct mmu_notifier_range range;
 	gfp_t huge_gfp;			/* for allocation and charge */

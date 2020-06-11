@@ -6442,6 +6442,9 @@ int mem_cgroup_try_charge(struct page *page, struct mm_struct *mm,
 	if (mem_cgroup_disabled())
 		goto out;
 
+	if (*memcgp)
+		memcg = *memcgp;
+
 	if (PageSwapCache(page)) {
 		/*
 		 * Every swap fault against a single page tries to charge the
@@ -6458,11 +6461,13 @@ int mem_cgroup_try_charge(struct page *page, struct mm_struct *mm,
 			swp_entry_t ent = { .val = page_private(page), };
 			unsigned short id = lookup_swap_cgroup_id(ent);
 
-			rcu_read_lock();
-			memcg = mem_cgroup_from_id(id);
-			if (memcg && !css_tryget_online(&memcg->css))
-				memcg = NULL;
-			rcu_read_unlock();
+			if (!memcg) {
+				rcu_read_lock();
+				memcg = mem_cgroup_from_id(id);
+				if (memcg && !css_tryget_online(&memcg->css))
+					memcg = NULL;
+				rcu_read_unlock();
+			}
 		}
 	}
 
@@ -6481,7 +6486,7 @@ int mem_cgroup_try_charge_delay(struct page *page, struct mm_struct *mm,
 			  gfp_t gfp_mask, struct mem_cgroup **memcgp,
 			  bool compound)
 {
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	int ret;
 
 	ret = mem_cgroup_try_charge(page, mm, gfp_mask, memcgp, compound);
@@ -6876,6 +6881,8 @@ static int __init cgroup_memory(char *s)
 	return 0;
 }
 __setup("cgroup.memory=", cgroup_memory);
+
+struct mem_cgroup *root_mem_cgroup = NULL;
 
 /*
  * subsys_initcall() for memory controller.

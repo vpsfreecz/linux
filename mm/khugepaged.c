@@ -954,7 +954,7 @@ static void collapse_huge_page(struct mm_struct *mm,
 	struct page *new_page;
 	spinlock_t *pmd_ptl, *pte_ptl;
 	int isolated = 0, result = 0;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	struct vm_area_struct *vma;
 	struct mmu_notifier_range range;
 	gfp_t gfp;
@@ -1496,7 +1496,7 @@ static void collapse_file(struct mm_struct *mm,
 	struct address_space *mapping = file->f_mapping;
 	gfp_t gfp;
 	struct page *new_page;
-	struct mem_cgroup *memcg;
+	struct mem_cgroup *memcg = NULL;
 	pgoff_t index, end = start + HPAGE_PMD_NR;
 	LIST_HEAD(pagelist);
 	XA_STATE_ORDER(xas, &mapping->i_pages, start, HPAGE_PMD_ORDER);
