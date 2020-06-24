@@ -841,8 +841,8 @@ static int __add_to_page_cache_locked(struct page *page,
 	mapping_set_update(&xas, mapping);
 
 	if (!huge) {
-		error = mem_cgroup_try_charge(page, current->mm,
-					      gfp_mask, &memcg, false);
+		error = mem_cgroup_try_charge(page, &init_mm,
+					      gfp_mask, &root_mem_cgroup, false);
 		if (error)
 			return error;
 	}
