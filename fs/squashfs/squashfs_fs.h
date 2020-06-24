@@ -262,7 +262,7 @@ struct squashfs_dir_index {
 	__le32			index;
 	__le32			start_block;
 	__le32			size;
-	unsigned char		name[];
+	unsigned char		name[0];
 };
 
 struct squashfs_base_inode {
@@ -327,7 +327,7 @@ struct squashfs_symlink_inode {
 	__le32			inode_number;
 	__le32			nlink;
 	__le32			symlink_size;
-	char			symlink[];
+	char			symlink[0];
 };
 
 struct squashfs_reg_inode {
@@ -341,7 +341,7 @@ struct squashfs_reg_inode {
 	__le32			fragment;
 	__le32			offset;
 	__le32			file_size;
-	__le16			block_list[];
+	__le16			block_list[0];
 };
 
 struct squashfs_lreg_inode {
@@ -358,7 +358,7 @@ struct squashfs_lreg_inode {
 	__le32			fragment;
 	__le32			offset;
 	__le32			xattr;
-	__le16			block_list[];
+	__le16			block_list[0];
 };
 
 struct squashfs_dir_inode {
@@ -389,7 +389,7 @@ struct squashfs_ldir_inode {
 	__le16			i_count;
 	__le16			offset;
 	__le32			xattr;
-	struct squashfs_dir_index	index[];
+	struct squashfs_dir_index	index[0];
 };
 
 union squashfs_inode {
@@ -410,7 +410,7 @@ struct squashfs_dir_entry {
 	__le16			inode_number;
 	__le16			type;
 	__le16			size;
-	char			name[];
+	char			name[0];
 };
 
 struct squashfs_dir_header {
@@ -428,12 +428,12 @@ struct squashfs_fragment_entry {
 struct squashfs_xattr_entry {
 	__le16			type;
 	__le16			size;
-	char			data[];
+	char			data[0];
 };
 
 struct squashfs_xattr_val {
 	__le32			vsize;
-	char			value[];
+	char			value[0];
 };
 
 struct squashfs_xattr_id {
