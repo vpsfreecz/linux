@@ -68,7 +68,7 @@ struct user_namespace init_user_ns = {
 	.keyring_sem = __RWSEM_INITIALIZER(init_user_ns.keyring_sem),
 #endif
 };
-EXPORT_SYMBOL_GPL(init_user_ns);
+EXPORT_SYMBOL(init_user_ns);
 
 /*
  * UID task count cache, to get fast user lookup in "alloc_uid"
