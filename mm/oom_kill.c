@@ -67,7 +67,7 @@ DEFINE_MUTEX(oom_lock);
 
 static inline bool is_memcg_oom(struct oom_control *oc)
 {
-	return oc->memcg != NULL;
+	return ((oc->memcg != NULL) && (oc->memcg != root_mem_cgroup));
 }
 
 #ifdef CONFIG_NUMA
@@ -384,28 +384,21 @@ static void select_bad_process(struct oom_control *oc)
 {
 	if (is_memcg_oom(oc))
 		mem_cgroup_scan_tasks(oc->memcg, oom_evaluate_task, oc);
-	else {
+	 else {
 		struct task_struct *p;
 
 		rcu_read_lock();
 		for_each_process(p)
-			if (oom_evaluate_task(p, oc))
+			if (oom_evaluate_task(p, oc)) {
 				break;
+			}
 		rcu_read_unlock();
 	}
 }
 
 static int dump_task(struct task_struct *p, void *arg)
 {
-	struct oom_control *oc = arg;
 	struct task_struct *task;
-
-	if (oom_unkillable_task(p))
-		return 0;
-
-	/* p may not have freeable memory in nodemask */
-	if (!is_memcg_oom(oc) && !oom_cpuset_eligible(p, oc))
-		return 0;
 
 	task = find_lock_task_mm(p);
 	if (!task) {
@@ -451,13 +444,6 @@ static void dump_tasks(struct oom_control *oc)
 		rcu_read_lock();
 		for_each_process(p)
 			dump_task(p, oc);
-			pr_info("[%7d] %5d %5d %8lu %8lu %8ld %8lu         %5hd %s\n",
-				pid_nr_ns(task_pid(p), task_active_pid_ns(p)),
-				from_kuid(&init_user_ns, task_uid(p)),
-				p->tgid, p->mm->total_vm, get_mm_rss(p->mm),
-				mm_pgtables_bytes(p->mm),
-				get_mm_counter(p->mm, MM_SWAPENTS),
-				p->signal->oom_score_adj, p->comm);
 		rcu_read_unlock();
 	}
 }
