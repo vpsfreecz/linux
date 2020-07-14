@@ -131,7 +131,7 @@ int rcu_num_nodes __read_mostly = NUM_RCU_NODES; /* Total # rcu_nodes in use. */
  * is fully initialized, including all of its kthreads having been spawned.
  */
 int rcu_scheduler_active __read_mostly;
-EXPORT_SYMBOL_GPL(rcu_scheduler_active);
+EXPORT_SYMBOL(rcu_scheduler_active);
 
 /*
  * The rcu_scheduler_fully_active variable transitions from zero to one
@@ -190,7 +190,7 @@ int rcu_get_gp_kthreads_prio(void)
 {
 	return kthread_prio;
 }
-EXPORT_SYMBOL_GPL(rcu_get_gp_kthreads_prio);
+EXPORT_SYMBOL(rcu_get_gp_kthreads_prio);
 
 /*
  * Number of grace periods between delays, normalized by the duration of
@@ -433,7 +433,7 @@ notrace void rcu_momentary_dyntick_idle(void)
 	WARN_ON_ONCE(!(special & RCU_DYNTICK_CTRL_CTR));
 	rcu_preempt_deferred_qs(current);
 }
-EXPORT_SYMBOL_GPL(rcu_momentary_dyntick_idle);
+EXPORT_SYMBOL(rcu_momentary_dyntick_idle);
 
 /**
  * rcu_is_cpu_rrupt_from_idle - see if 'interrupted' from idle
@@ -583,7 +583,7 @@ unsigned long rcu_get_gp_seq(void)
 {
 	return READ_ONCE(rcu_state.gp_seq);
 }
-EXPORT_SYMBOL_GPL(rcu_get_gp_seq);
+EXPORT_SYMBOL(rcu_get_gp_seq);
 
 /*
  * Return the number of RCU expedited batches completed thus far for
@@ -595,7 +595,7 @@ unsigned long rcu_exp_batches_completed(void)
 {
 	return rcu_state.expedited_sequence;
 }
-EXPORT_SYMBOL_GPL(rcu_exp_batches_completed);
+EXPORT_SYMBOL(rcu_exp_batches_completed);
 
 /*
  * Return the root node of the rcu_state structure.
@@ -620,7 +620,7 @@ void rcutorture_get_gp_data(enum rcutorture_type test_type, int *flags,
 		break;
 	}
 }
-EXPORT_SYMBOL_GPL(rcutorture_get_gp_data);
+EXPORT_SYMBOL(rcutorture_get_gp_data);
 
 /*
  * Enter an RCU extended quiescent state, which can be either the
@@ -1169,7 +1169,7 @@ notrace bool rcu_is_watching(void)
 	preempt_enable_notrace();
 	return ret;
 }
-EXPORT_SYMBOL_GPL(rcu_is_watching);
+EXPORT_SYMBOL(rcu_is_watching);
 
 /*
  * If a holdout task is actually running, request an urgent quiescent
@@ -1220,7 +1220,7 @@ bool rcu_lockdep_current_cpu_online(void)
 	preempt_enable_notrace();
 	return ret;
 }
-EXPORT_SYMBOL_GPL(rcu_lockdep_current_cpu_online);
+EXPORT_SYMBOL(rcu_lockdep_current_cpu_online);
 
 #endif /* #if defined(CONFIG_PROVE_RCU) && defined(CONFIG_HOTPLUG_CPU) */
 
@@ -2742,7 +2742,7 @@ void rcu_force_quiescent_state(void)
 	raw_spin_unlock_irqrestore_rcu_node(rnp_old, flags);
 	rcu_gp_kthread_wake();
 }
-EXPORT_SYMBOL_GPL(rcu_force_quiescent_state);
+EXPORT_SYMBOL(rcu_force_quiescent_state);
 
 // Workqueue handler for an RCU reader for kernels enforcing struct RCU
 // grace periods.
@@ -3112,7 +3112,7 @@ void call_rcu(struct rcu_head *head, rcu_callback_t func)
 {
 	__call_rcu(head, func);
 }
-EXPORT_SYMBOL_GPL(call_rcu);
+EXPORT_SYMBOL(call_rcu);
 
 
 /* Maximum number of jiffies to wait before draining a batch. */
@@ -3767,7 +3767,7 @@ void synchronize_rcu(void)
 	else
 		wait_rcu_gp(call_rcu);
 }
-EXPORT_SYMBOL_GPL(synchronize_rcu);
+EXPORT_SYMBOL(synchronize_rcu);
 
 /**
  * get_state_synchronize_rcu - Snapshot current RCU state
@@ -3785,7 +3785,7 @@ unsigned long get_state_synchronize_rcu(void)
 	smp_mb();  /* ^^^ */
 	return rcu_seq_snap(&rcu_state.gp_seq);
 }
-EXPORT_SYMBOL_GPL(get_state_synchronize_rcu);
+EXPORT_SYMBOL(get_state_synchronize_rcu);
 
 /**
  * cond_synchronize_rcu - Conditionally wait for an RCU grace period
@@ -3808,7 +3808,7 @@ void cond_synchronize_rcu(unsigned long oldstate)
 	else
 		smp_mb(); /* Ensure GP ends before subsequent accesses. */
 }
-EXPORT_SYMBOL_GPL(cond_synchronize_rcu);
+EXPORT_SYMBOL(cond_synchronize_rcu);
 
 /*
  * Check to see if there is any immediate RCU-related work to be done by
@@ -4007,7 +4007,7 @@ void rcu_barrier(void)
 	/* Other rcu_barrier() invocations can now safely proceed. */
 	mutex_unlock(&rcu_state.barrier_mutex);
 }
-EXPORT_SYMBOL_GPL(rcu_barrier);
+EXPORT_SYMBOL(rcu_barrier);
 
 /*
  * Propagate ->qsinitmask bits up the rcu_node tree to account for the

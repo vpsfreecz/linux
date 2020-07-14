@@ -142,7 +142,7 @@ bool rcu_gp_is_normal(void)
 	return READ_ONCE(rcu_normal) &&
 	       rcu_scheduler_active != RCU_SCHEDULER_INIT;
 }
-EXPORT_SYMBOL_GPL(rcu_gp_is_normal);
+EXPORT_SYMBOL(rcu_gp_is_normal);
 
 static atomic_t rcu_expedited_nesting = ATOMIC_INIT(1);
 
@@ -157,7 +157,7 @@ bool rcu_gp_is_expedited(void)
 {
 	return rcu_expedited || atomic_read(&rcu_expedited_nesting);
 }
-EXPORT_SYMBOL_GPL(rcu_gp_is_expedited);
+EXPORT_SYMBOL(rcu_gp_is_expedited);
 
 /**
  * rcu_expedite_gp - Expedite future RCU grace periods
@@ -170,7 +170,7 @@ void rcu_expedite_gp(void)
 {
 	atomic_inc(&rcu_expedited_nesting);
 }
-EXPORT_SYMBOL_GPL(rcu_expedite_gp);
+EXPORT_SYMBOL(rcu_expedite_gp);
 
 /**
  * rcu_unexpedite_gp - Cancel prior rcu_expedite_gp() invocation
@@ -185,7 +185,7 @@ void rcu_unexpedite_gp(void)
 {
 	atomic_dec(&rcu_expedited_nesting);
 }
-EXPORT_SYMBOL_GPL(rcu_unexpedite_gp);
+EXPORT_SYMBOL(rcu_unexpedite_gp);
 
 static bool rcu_boot_ended __read_mostly;
 
@@ -207,7 +207,7 @@ bool rcu_inkernel_boot_has_ended(void)
 {
 	return rcu_boot_ended;
 }
-EXPORT_SYMBOL_GPL(rcu_inkernel_boot_has_ended);
+EXPORT_SYMBOL(rcu_inkernel_boot_has_ended);
 
 #endif /* #ifndef CONFIG_TINY_RCU */
 
@@ -249,7 +249,7 @@ struct lockdep_map rcu_lock_map = {
 	.wait_type_outer = LD_WAIT_FREE,
 	.wait_type_inner = LD_WAIT_CONFIG, /* XXX PREEMPT_RCU ? */
 };
-EXPORT_SYMBOL_GPL(rcu_lock_map);
+EXPORT_SYMBOL(rcu_lock_map);
 
 static struct lock_class_key rcu_bh_lock_key;
 struct lockdep_map rcu_bh_lock_map = {
@@ -258,7 +258,7 @@ struct lockdep_map rcu_bh_lock_map = {
 	.wait_type_outer = LD_WAIT_FREE,
 	.wait_type_inner = LD_WAIT_CONFIG, /* PREEMPT_LOCK also makes BH preemptible */
 };
-EXPORT_SYMBOL_GPL(rcu_bh_lock_map);
+EXPORT_SYMBOL(rcu_bh_lock_map);
 
 static struct lock_class_key rcu_sched_lock_key;
 struct lockdep_map rcu_sched_lock_map = {
@@ -267,20 +267,20 @@ struct lockdep_map rcu_sched_lock_map = {
 	.wait_type_outer = LD_WAIT_FREE,
 	.wait_type_inner = LD_WAIT_SPIN,
 };
-EXPORT_SYMBOL_GPL(rcu_sched_lock_map);
+EXPORT_SYMBOL(rcu_sched_lock_map);
 
 // Tell lockdep when RCU callbacks are being invoked.
 static struct lock_class_key rcu_callback_key;
 struct lockdep_map rcu_callback_map =
 	STATIC_LOCKDEP_MAP_INIT("rcu_callback", &rcu_callback_key);
-EXPORT_SYMBOL_GPL(rcu_callback_map);
+EXPORT_SYMBOL(rcu_callback_map);
 
 noinstr int notrace debug_lockdep_rcu_enabled(void)
 {
 	return rcu_scheduler_active != RCU_SCHEDULER_INACTIVE && debug_locks &&
 	       current->lockdep_recursion == 0;
 }
-EXPORT_SYMBOL_GPL(debug_lockdep_rcu_enabled);
+EXPORT_SYMBOL(debug_lockdep_rcu_enabled);
 
 /**
  * rcu_read_lock_held() - might we be in RCU read-side critical section?
@@ -310,7 +310,7 @@ int rcu_read_lock_held(void)
 		return ret;
 	return lock_is_held(&rcu_lock_map);
 }
-EXPORT_SYMBOL_GPL(rcu_read_lock_held);
+EXPORT_SYMBOL(rcu_read_lock_held);
 
 /**
  * rcu_read_lock_bh_held() - might we be in RCU-bh read-side critical section?
@@ -335,7 +335,7 @@ int rcu_read_lock_bh_held(void)
 		return ret;
 	return in_softirq() || irqs_disabled();
 }
-EXPORT_SYMBOL_GPL(rcu_read_lock_bh_held);
+EXPORT_SYMBOL(rcu_read_lock_bh_held);
 
 int rcu_read_lock_any_held(void)
 {
@@ -349,7 +349,7 @@ int rcu_read_lock_any_held(void)
 		return 1;
 	return !preemptible();
 }
-EXPORT_SYMBOL_GPL(rcu_read_lock_any_held);
+EXPORT_SYMBOL(rcu_read_lock_any_held);
 
 #endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
@@ -366,7 +366,7 @@ void wakeme_after_rcu(struct rcu_head *head)
 	rcu = container_of(head, struct rcu_synchronize, head);
 	complete(&rcu->completion);
 }
-EXPORT_SYMBOL_GPL(wakeme_after_rcu);
+EXPORT_SYMBOL(wakeme_after_rcu);
 
 void __wait_rcu_gp(bool checktiny, int n, call_rcu_func_t *crcu_array,
 		   struct rcu_synchronize *rs_array)
@@ -405,20 +405,20 @@ void __wait_rcu_gp(bool checktiny, int n, call_rcu_func_t *crcu_array,
 		}
 	}
 }
-EXPORT_SYMBOL_GPL(__wait_rcu_gp);
+EXPORT_SYMBOL(__wait_rcu_gp);
 
 #ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD
 void init_rcu_head(struct rcu_head *head)
 {
 	debug_object_init(head, &rcuhead_debug_descr);
 }
-EXPORT_SYMBOL_GPL(init_rcu_head);
+EXPORT_SYMBOL(init_rcu_head);
 
 void destroy_rcu_head(struct rcu_head *head)
 {
 	debug_object_free(head, &rcuhead_debug_descr);
 }
-EXPORT_SYMBOL_GPL(destroy_rcu_head);
+EXPORT_SYMBOL(destroy_rcu_head);
 
 static bool rcuhead_is_static_object(void *addr)
 {
@@ -439,7 +439,7 @@ void init_rcu_head_on_stack(struct rcu_head *head)
 {
 	debug_object_init_on_stack(head, &rcuhead_debug_descr);
 }
-EXPORT_SYMBOL_GPL(init_rcu_head_on_stack);
+EXPORT_SYMBOL(init_rcu_head_on_stack);
 
 /**
  * destroy_rcu_head_on_stack() - destroy on-stack rcu_head for debugobjects
@@ -456,13 +456,13 @@ void destroy_rcu_head_on_stack(struct rcu_head *head)
 {
 	debug_object_free(head, &rcuhead_debug_descr);
 }
-EXPORT_SYMBOL_GPL(destroy_rcu_head_on_stack);
+EXPORT_SYMBOL(destroy_rcu_head_on_stack);
 
 const struct debug_obj_descr rcuhead_debug_descr = {
 	.name = "rcu_head",
 	.is_static_object = rcuhead_is_static_object,
 };
-EXPORT_SYMBOL_GPL(rcuhead_debug_descr);
+EXPORT_SYMBOL(rcuhead_debug_descr);
 #endif /* #ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD */
 
 #if defined(CONFIG_TREE_RCU) || defined(CONFIG_RCU_TRACE)
@@ -472,7 +472,7 @@ void do_trace_rcu_torture_read(const char *rcutorturename, struct rcu_head *rhp,
 {
 	trace_rcu_torture_read(rcutorturename, rhp, secs, c_old, c);
 }
-EXPORT_SYMBOL_GPL(do_trace_rcu_torture_read);
+EXPORT_SYMBOL(do_trace_rcu_torture_read);
 #else
 #define do_trace_rcu_torture_read(rcutorturename, rhp, secs, c_old, c) \
 	do { } while (0)
@@ -488,14 +488,14 @@ long rcutorture_sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	WARN_ONCE(ret, "%s: sched_setaffinity() returned %d\n", __func__, ret);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(rcutorture_sched_setaffinity);
+EXPORT_SYMBOL(rcutorture_sched_setaffinity);
 #endif
 
 #ifdef CONFIG_RCU_STALL_COMMON
 int rcu_cpu_stall_ftrace_dump __read_mostly;
 module_param(rcu_cpu_stall_ftrace_dump, int, 0644);
 int rcu_cpu_stall_suppress __read_mostly; // !0 = suppress stall warnings.
-EXPORT_SYMBOL_GPL(rcu_cpu_stall_suppress);
+EXPORT_SYMBOL(rcu_cpu_stall_suppress);
 module_param(rcu_cpu_stall_suppress, int, 0644);
 int rcu_cpu_stall_timeout __read_mostly = CONFIG_RCU_CPU_STALL_TIMEOUT;
 module_param(rcu_cpu_stall_timeout, int, 0644);
@@ -504,7 +504,7 @@ module_param(rcu_cpu_stall_timeout, int, 0644);
 // Suppress boot-time RCU CPU stall warnings and rcutorture writer stall
 // warnings.  Also used by rcutorture even if stall warnings are excluded.
 int rcu_cpu_stall_suppress_at_boot __read_mostly; // !0 = suppress boot stalls.
-EXPORT_SYMBOL_GPL(rcu_cpu_stall_suppress_at_boot);
+EXPORT_SYMBOL(rcu_cpu_stall_suppress_at_boot);
 module_param(rcu_cpu_stall_suppress_at_boot, int, 0444);
 
 #ifdef CONFIG_PROVE_RCU
