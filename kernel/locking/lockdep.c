@@ -1192,7 +1192,7 @@ out_unlock:
 restore_irqs:
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lockdep_register_key);
+EXPORT_SYMBOL(lockdep_register_key);
 
 /* Check whether a key has been registered as a dynamic key. */
 static bool is_dynamic_key(const struct lock_class_key *key)
@@ -4758,10 +4758,10 @@ void lockdep_init_map_type(struct lockdep_map *lock, const char *name,
 		raw_local_irq_restore(flags);
 	}
 }
-EXPORT_SYMBOL_GPL(lockdep_init_map_type);
+EXPORT_SYMBOL(lockdep_init_map_type);
 
 struct lock_class_key __lockdep_no_validate__;
-EXPORT_SYMBOL_GPL(__lockdep_no_validate__);
+EXPORT_SYMBOL(__lockdep_no_validate__);
 
 static void
 print_lock_nested_lock_not_held(struct task_struct *curr,
@@ -5452,7 +5452,7 @@ void lock_set_class(struct lockdep_map *lock, const char *name,
 	lockdep_recursion_finish();
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lock_set_class);
+EXPORT_SYMBOL(lock_set_class);
 
 void lock_downgrade(struct lockdep_map *lock, unsigned long ip)
 {
@@ -5469,7 +5469,7 @@ void lock_downgrade(struct lockdep_map *lock, unsigned long ip)
 	lockdep_recursion_finish();
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lock_downgrade);
+EXPORT_SYMBOL(lock_downgrade);
 
 /* NMI context !!! */
 static void verify_lock_unused(struct lockdep_map *lock, struct held_lock *hlock, int subclass)
@@ -5567,7 +5567,7 @@ void lock_acquire(struct lockdep_map *lock, unsigned int subclass,
 	lockdep_recursion_finish();
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lock_acquire);
+EXPORT_SYMBOL(lock_acquire);
 
 void lock_release(struct lockdep_map *lock, unsigned long ip)
 {
@@ -5587,7 +5587,7 @@ void lock_release(struct lockdep_map *lock, unsigned long ip)
 	lockdep_recursion_finish();
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lock_release);
+EXPORT_SYMBOL(lock_release);
 
 noinstr int lock_is_held_type(const struct lockdep_map *lock, int read)
 {
@@ -5607,7 +5607,7 @@ noinstr int lock_is_held_type(const struct lockdep_map *lock, int read)
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(lock_is_held_type);
+EXPORT_SYMBOL(lock_is_held_type);
 NOKPROBE_SYMBOL(lock_is_held_type);
 
 struct pin_cookie lock_pin_lock(struct lockdep_map *lock)
@@ -5628,7 +5628,7 @@ struct pin_cookie lock_pin_lock(struct lockdep_map *lock)
 
 	return cookie;
 }
-EXPORT_SYMBOL_GPL(lock_pin_lock);
+EXPORT_SYMBOL(lock_pin_lock);
 
 void lock_repin_lock(struct lockdep_map *lock, struct pin_cookie cookie)
 {
@@ -5645,7 +5645,7 @@ void lock_repin_lock(struct lockdep_map *lock, struct pin_cookie cookie)
 	lockdep_recursion_finish();
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lock_repin_lock);
+EXPORT_SYMBOL(lock_repin_lock);
 
 void lock_unpin_lock(struct lockdep_map *lock, struct pin_cookie cookie)
 {
@@ -5662,7 +5662,7 @@ void lock_unpin_lock(struct lockdep_map *lock, struct pin_cookie cookie)
 	lockdep_recursion_finish();
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lock_unpin_lock);
+EXPORT_SYMBOL(lock_unpin_lock);
 
 #ifdef CONFIG_LOCK_STAT
 static void print_lock_contention_bug(struct task_struct *curr,
@@ -5797,7 +5797,7 @@ void lock_contended(struct lockdep_map *lock, unsigned long ip)
 	lockdep_recursion_finish();
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lock_contended);
+EXPORT_SYMBOL(lock_contended);
 
 void lock_acquired(struct lockdep_map *lock, unsigned long ip)
 {
@@ -5815,7 +5815,7 @@ void lock_acquired(struct lockdep_map *lock, unsigned long ip)
 	lockdep_recursion_finish();
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(lock_acquired);
+EXPORT_SYMBOL(lock_acquired);
 #endif
 
 /*
@@ -6256,7 +6256,7 @@ void lockdep_unregister_key(struct lock_class_key *key)
 	/* Wait until is_dynamic_key() has finished accessing k->hash_entry. */
 	synchronize_rcu();
 }
-EXPORT_SYMBOL_GPL(lockdep_unregister_key);
+EXPORT_SYMBOL(lockdep_unregister_key);
 
 void __init lockdep_init(void)
 {
@@ -6355,7 +6355,7 @@ void debug_check_no_locks_freed(const void *mem_from, unsigned long mem_len)
 	}
 	raw_local_irq_restore(flags);
 }
-EXPORT_SYMBOL_GPL(debug_check_no_locks_freed);
+EXPORT_SYMBOL(debug_check_no_locks_freed);
 
 static void print_held_locks_bug(void)
 {
@@ -6380,7 +6380,7 @@ void debug_check_no_locks_held(void)
 	if (unlikely(current->lockdep_depth > 0))
 		print_held_locks_bug();
 }
-EXPORT_SYMBOL_GPL(debug_check_no_locks_held);
+EXPORT_SYMBOL(debug_check_no_locks_held);
 
 #ifdef __KERNEL__
 void debug_show_all_locks(void)
@@ -6406,7 +6406,7 @@ void debug_show_all_locks(void)
 	pr_warn("\n");
 	pr_warn("=============================================\n\n");
 }
-EXPORT_SYMBOL_GPL(debug_show_all_locks);
+EXPORT_SYMBOL(debug_show_all_locks);
 #endif
 
 /*
@@ -6421,7 +6421,7 @@ void debug_show_held_locks(struct task_struct *task)
 	}
 	lockdep_print_held_locks(task);
 }
-EXPORT_SYMBOL_GPL(debug_show_held_locks);
+EXPORT_SYMBOL(debug_show_held_locks);
 
 asmlinkage __visible void lockdep_sys_exit(void)
 {
@@ -6490,4 +6490,4 @@ void lockdep_rcu_suspicious(const char *file, const int line, const char *s)
 	pr_warn("\nstack backtrace:\n");
 	dump_stack();
 }
-EXPORT_SYMBOL_GPL(lockdep_rcu_suspicious);
+EXPORT_SYMBOL(lockdep_rcu_suspicious);
