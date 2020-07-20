@@ -648,6 +648,7 @@ static const struct genl_ops taskstats_ops[] = {
 		.policy		= taskstats_cmd_get_policy,
 		.maxattr	= ARRAY_SIZE(taskstats_cmd_get_policy) - 1,
 		.flags		= GENL_ADMIN_PERM,
+		.flags		= GENL_UNS_ADMIN_PERM,
 	},
 	{
 		.cmd		= CGROUPSTATS_CMD_GET,
@@ -664,6 +665,7 @@ static struct genl_family family __ro_after_init = {
 	.module		= THIS_MODULE,
 	.ops		= taskstats_ops,
 	.n_ops		= ARRAY_SIZE(taskstats_ops),
+	.netnsok	= true,
 };
 
 /* Needed early in initialization */
