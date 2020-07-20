@@ -650,7 +650,7 @@ static const struct genl_ops taskstats_ops[] = {
 		.validate = GENL_DONT_VALIDATE_STRICT | GENL_DONT_VALIDATE_DUMP,
 		.doit		= taskstats_user_cmd,
 		/* policy enforced later */
-		.flags		= GENL_ADMIN_PERM | GENL_CMD_CAP_HASPOL,
+		.flags		= GENL_UNS_ADMIN_PERM | GENL_CMD_CAP_HASPOL,
 	},
 	{
 		.cmd		= CGROUPSTATS_CMD_GET,
@@ -690,6 +690,7 @@ static struct genl_family family __ro_after_init = {
 	.ops		= taskstats_ops,
 	.n_ops		= ARRAY_SIZE(taskstats_ops),
 	.pre_doit	= taskstats_pre_doit,
+	.netnsok	= true,
 };
 
 /* Needed early in initialization */
