@@ -139,6 +139,10 @@ struct mem_cgroup_per_node {
 	bool			on_tree;
 	struct mem_cgroup	*memcg;		/* Back pointer, we cannot */
 						/* use container_of	   */
+
+	wait_queue_head_t	ksoftlimd_wait;
+	struct task_struct	*ksoftlimd_task;
+	struct pglist_data 	*ksoftlimd_pgdat;
 };
 
 struct mem_cgroup_threshold {
@@ -240,6 +244,13 @@ struct mem_cgroup {
 	 * Should the OOM killer kill all belonging tasks, had it kill one?
 	 */
 	bool oom_group;
+
+	/* Number of ksoftlimd threads running for this memcg */
+	atomic_long_t	ksoftlimd_threads_running; // one per NUMA node
+	atomic_long_t	ksoftlimd_total_runs;
+	atomic_long_t	ksoftlimd_total_scanned;
+	atomic_long_t	ksoftlimd_total_reclaimed;
+
 
 	/* protected by memcg_oom_lock */
 	bool		oom_lock;
@@ -741,6 +752,13 @@ static inline void mod_lruvec_page_state(struct page *page,
 unsigned long mem_cgroup_soft_limit_reclaim(pg_data_t *pgdat, int order,
 						gfp_t gfp_mask,
 						unsigned long *total_scanned);
+
+int mem_cgroup_ksoftlimd_run_node(struct mem_cgroup *memcg, int nid);
+void mem_cgroup_ksoftlimd_stop_node(struct mem_cgroup *memcg, int nid);
+int mem_cgroup_ksoftlimd_run(struct mem_cgroup *memcg);
+void mem_cgroup_ksoftlimd_stop(struct mem_cgroup *memcg);
+int mem_cgroup_ksoftlimd_node_run(int nid);
+void mem_cgroup_ksoftlimd_node_stop(int nid);
 
 void __count_memcg_events(struct mem_cgroup *memcg, enum vm_event_item idx,
 			  unsigned long count);
