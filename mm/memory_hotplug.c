@@ -860,6 +860,7 @@ int __ref online_pages(unsigned long pfn, unsigned long nr_pages,
 
 	kswapd_run(nid);
 	kcompactd_run(nid);
+	mem_cgroup_ksoftlimd_node_run(nid);
 
 	writeback_set_ratelimit();
 
@@ -1624,6 +1625,7 @@ static int __ref __offline_pages(unsigned long start_pfn,
 
 	node_states_clear_node(node, &arg);
 	if (arg.status_change_nid >= 0) {
+		mem_cgroup_ksoftlimd_node_stop(node);
 		kswapd_stop(node);
 		kcompactd_stop(node);
 	}
