@@ -3140,6 +3140,17 @@ static struct ctl_table vm_table[] = {
 		.extra2		= SYSCTL_ONE,
 	},
 #endif
+#ifdef CONFIG_MEMCG
+	{
+		.procname	= "cgroup_memory_ksoftlimd_for_all",
+		.data		= &cgroup_memory_ksoftlimd_for_all,
+		.maxlen		= sizeof(cgroup_memory_ksoftlimd_for_all),
+		.mode		= 0644,
+		.proc_handler	= mem_cgroup_ksoftlimd_sysctl_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+#endif
 	{ }
 };
 

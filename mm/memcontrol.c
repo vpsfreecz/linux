@@ -51,6 +51,7 @@
 #include <linux/eventfd.h>
 #include <linux/poll.h>
 #include <linux/sort.h>
+#include <linux/freezer.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 #include <linux/vmpressure.h>
@@ -85,6 +86,8 @@ static bool cgroup_memory_nosocket;
 
 /* Kernel memory accounting disabled? */
 static bool cgroup_memory_nokmem;
+
+int cgroup_memory_ksoftlimd_for_all = 0;
 
 /* Whether the swap controller is active */
 #ifdef CONFIG_MEMCG_SWAP
@@ -203,6 +206,7 @@ static struct move_charge_struct {
  */
 #define	MEM_CGROUP_MAX_RECLAIM_LOOPS		100
 #define	MEM_CGROUP_MAX_SOFT_LIMIT_RECLAIM_LOOPS	2
+#define	MEM_CGROUP_MAX_KSOFTLIMD_RECLAIM_LOOPS	128
 
 /* for encoding cft->private value on file */
 enum res_type {
@@ -211,6 +215,7 @@ enum res_type {
 	_OOM_TYPE,
 	_KMEM,
 	_TCP,
+	_KSOFTLIMD_TYPE,
 };
 
 #define MEMFILE_PRIVATE(x, val)	((x) << 16 | (val))
@@ -218,6 +223,8 @@ enum res_type {
 #define MEMFILE_ATTR(val)	((val) & 0xffff)
 /* Used for OOM nofiier */
 #define OOM_CONTROL		(0)
+/* Used for ksoftlimd */
+#define KSOFTLIMD_CONTROL	(0)
 
 /*
  * Iteration constructs for visiting all cgroups (under a tree).  If
@@ -1752,6 +1759,10 @@ static int mem_cgroup_soft_reclaim(struct mem_cgroup *root_memcg,
 	struct mem_cgroup_reclaim_cookie reclaim = {
 		.pgdat = pgdat,
 	};
+	int max_loops = MEM_CGROUP_MAX_RECLAIM_LOOPS;
+
+	if (mem_cgroup_ksoftlimd_running(root_memcg))
+		max_loops = MEM_CGROUP_MAX_KSOFTLIMD_RECLAIM_LOOPS;
 
 	excess = soft_limit_excess(root_memcg);
 
@@ -1774,7 +1785,7 @@ static int mem_cgroup_soft_reclaim(struct mem_cgroup *root_memcg,
 				 * coming back to reclaim from this cgroup
 				 */
 				if (total >= (excess >> 2) ||
-					(loop > MEM_CGROUP_MAX_RECLAIM_LOOPS))
+					(loop > max_loops))
 					break;
 			}
 			continue;
@@ -1787,6 +1798,208 @@ static int mem_cgroup_soft_reclaim(struct mem_cgroup *root_memcg,
 	}
 	mem_cgroup_iter_break(root_memcg, victim);
 	return total;
+}
+
+static int ksoftlimd(void *p)
+{
+	int ret = 0;
+	struct mem_cgroup_per_node *mcpn = (struct mem_cgroup_per_node *)p;
+	struct mem_cgroup *memcg = mcpn->memcg;
+	pg_data_t *pgdat = mcpn->ksoftlimd_pgdat;
+	const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
+	struct task_struct *tsk = current;
+	long sleep_msec = 10;
+	DEFINE_WAIT(wait);
+
+	pr_debug("ksoftlimd: launching %s\n", tsk->comm);
+
+	if (!cpumask_empty(cpumask))
+		set_cpus_allowed_ptr(tsk, cpumask);
+
+	set_freezable();
+	allow_signal(SIGSTOP);
+	allow_signal(SIGKILL);
+
+	// See comment in mm/vmscan.c kswapd() for the reasoning here
+	tsk->flags |= PF_MEMALLOC | PF_SWAPWRITE | PF_KSWAPD;
+
+	atomic_long_add(1, &memcg->ksoftlimd_threads_running);
+	for ( ; ; ) {
+		unsigned long soft_limit = memcg->soft_limit;
+		unsigned long scanned = 0;
+		unsigned long reclaimed = 0;
+		unsigned long excess = 0;
+		long remaining = 0;
+
+		prepare_to_wait(&mcpn->ksoftlimd_wait, &wait, TASK_INTERRUPTIBLE);
+		remaining = schedule_timeout(HZ*sleep_msec/1000);
+		finish_wait(&mcpn->ksoftlimd_wait, &wait);
+
+		/*
+		 * If we're supposed to stop, do that before next reclaim.
+		 */
+		ret = try_to_freeze();
+		if (kthread_should_stop())
+			break;
+
+		reclaimed = mem_cgroup_soft_reclaim(mcpn->memcg,
+		    mcpn->ksoftlimd_pgdat, GFP_KERNEL, &scanned);
+		excess = soft_limit_excess(memcg);
+
+		if (remaining)
+			/*
+			 * Were woken up prematurely, that most likely means
+			 * we're tight on memory, go really fast.
+			 */
+			sleep_msec = 10;
+		else if (scanned < 128)
+			/*
+			 * We've scanned too little and didn't wake up
+			 * prematurely, we should slow down.
+			 */
+			sleep_msec += 50;
+		else if (reclaimed > 256)
+			/*
+			 * We're reclaiming, might want to speed up a little.
+			 */
+			sleep_msec -= 100;
+		else if (excess && (sleep_msec > 250))
+			/*
+			 * We're over soft_limit, and other rule didn't match,
+			 * default to 250 msec.
+			 */
+			sleep_msec = 250;
+
+		/*
+		 * The sleep_msec adjustment above can cause it to go out of our
+		 * desired time bounds, so enforce them here.
+		 */
+		if (sleep_msec < 10)
+			sleep_msec = 10;
+		if (sleep_msec > 500)
+			sleep_msec = 500;
+
+		if (scanned)
+			atomic_long_add(scanned, &memcg->ksoftlimd_total_scanned);
+		if (reclaimed)
+			atomic_long_add(reclaimed, &memcg->ksoftlimd_total_reclaimed);
+		atomic_long_add(1, &memcg->ksoftlimd_total_runs);
+
+		pr_debug("ksoftlimd run for memcg %d soft_limit %li excess %li sleep_msec %li scanned %lu reclaimed %lu remaining %li \n",
+		    memcg->css.id, soft_limit, excess, sleep_msec, scanned, reclaimed, remaining);
+
+	}
+	atomic_long_sub(1, &memcg->ksoftlimd_threads_running);
+	pr_debug("ksoftlimd: stopped %s\n", tsk->comm);
+
+	return ret;
+}
+
+int mem_cgroup_ksoftlimd_run_node(struct mem_cgroup *memcg, int nid)
+{
+	struct mem_cgroup_per_node *mcpn = memcg->nodeinfo[nid];
+
+	pg_data_t *pgdat = NODE_DATA(nid);
+
+	if (mcpn->ksoftlimd_task)
+		return 0;
+
+	init_waitqueue_head(&mcpn->ksoftlimd_wait);
+	mcpn->ksoftlimd_pgdat = pgdat;
+
+	mcpn->ksoftlimd_task = kthread_run(ksoftlimd, mcpn,
+	    "ksoftlimd%d/%d", nid, memcg->css.id);
+
+	if (IS_ERR(mcpn->ksoftlimd_task)) {
+		mcpn->ksoftlimd_task = NULL;
+		mcpn->ksoftlimd_pgdat = NULL;
+		pr_err("Failed to start ksoftlimd for memcg %d on node %d\n",
+		    memcg->css.id, nid);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+void mem_cgroup_ksoftlimd_stop_node(struct mem_cgroup *memcg, int nid)
+{
+	struct mem_cgroup_per_node *mcpn = memcg->nodeinfo[nid];
+
+	if (mcpn->ksoftlimd_task) {
+		kthread_stop(mcpn->ksoftlimd_task);
+		mcpn->ksoftlimd_task = NULL;
+	}
+}
+
+int mem_cgroup_ksoftlimd_run(struct mem_cgroup *memcg)
+{
+	int nid;
+
+	for_each_node_state(nid, N_MEMORY)
+		mem_cgroup_ksoftlimd_run_node(memcg, nid);
+	return 0;
+}
+
+void mem_cgroup_ksoftlimd_stop(struct mem_cgroup *memcg)
+{
+	int nid;
+
+	for_each_node_state(nid, N_MEMORY)
+		mem_cgroup_ksoftlimd_stop_node(memcg, nid);
+}
+
+int mem_cgroup_ksoftlimd_node_run(int nid)
+{
+	struct mem_cgroup *memcg = NULL;
+	int ret = 0;
+
+	for_each_mem_cgroup(memcg) {
+		if (mem_cgroup_ksoftlimd_running(memcg)) {
+			ret = mem_cgroup_ksoftlimd_run_node(memcg, nid);
+			if (ret < 0)
+				return ret;
+		}
+	}
+	return 0;
+}
+
+void mem_cgroup_ksoftlimd_node_stop(int nid)
+{
+	struct mem_cgroup *memcg = NULL;
+
+	for_each_mem_cgroup(memcg)
+		if (mem_cgroup_ksoftlimd_running(memcg))
+			mem_cgroup_ksoftlimd_stop_node(memcg, nid);
+}
+
+int mem_cgroup_ksoftlimd_sysctl_handler(struct ctl_table *table, int write,
+	void __user *buffer, size_t *length, loff_t *ppos)
+{
+	int ret, newval;
+	int oldval = cgroup_memory_ksoftlimd_for_all;
+	struct mem_cgroup *memcg;
+
+	ret = proc_dointvec_minmax(table, write, buffer, length, ppos);
+
+	if (!write)
+		return ret;
+
+	newval = cgroup_memory_ksoftlimd_for_all;
+	if ((oldval == 0) && (newval == 1)) {
+		pr_info("ksoftlimd: launching for all soft-limited memory cgroups\n");
+		for_each_mem_cgroup(memcg) {
+			if ((memcg->soft_limit < PAGE_COUNTER_MAX) &&
+			    !mem_cgroup_ksoftlimd_running(memcg))
+				mem_cgroup_ksoftlimd_run(memcg);
+		}
+	} else if ((oldval == 1) && (newval == 0)) {
+		pr_info("ksoftlimd: stopping for all soft-limited memory cgroups\n");
+		for_each_mem_cgroup(memcg) {
+			if (mem_cgroup_ksoftlimd_running(memcg))
+				mem_cgroup_ksoftlimd_stop(memcg);
+		}
+	}
+	return ret;
 }
 
 #ifdef CONFIG_LOCKDEP
@@ -3853,6 +4066,9 @@ static ssize_t mem_cgroup_write(struct kernfs_open_file *of,
 		break;
 	case RES_SOFT_LIMIT:
 		memcg->soft_limit = nr_pages;
+		if (cgroup_memory_ksoftlimd_for_all &&
+		    !mem_cgroup_ksoftlimd_running(memcg))
+			mem_cgroup_ksoftlimd_run(memcg);
 		ret = 0;
 		break;
 	}
@@ -4506,6 +4722,47 @@ static int mem_cgroup_oom_control_write(struct cgroup_subsys_state *css,
 	return 0;
 }
 
+static int mem_cgroup_ksoftlimd_control_read(struct seq_file *sf, void *v)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_seq(sf);
+	long nthreads = atomic_long_read(&memcg->ksoftlimd_threads_running);
+
+	seq_printf(sf, "enabled %s\n",
+	    (nthreads > 0) ? "yes" : "no");
+	seq_printf(sf, "running_threads %ld\n", nthreads);
+	seq_printf(sf, "total_runs %li\n", atomic_long_read(&memcg->ksoftlimd_total_runs));
+	seq_printf(sf, "total_scanned %li\n", atomic_long_read(&memcg->ksoftlimd_total_scanned));
+	seq_printf(sf, "total_reclaimed %li\n", atomic_long_read(&memcg->ksoftlimd_total_reclaimed));
+	return 0;
+}
+
+static int mem_cgroup_ksoftlimd_control_write(struct cgroup_subsys_state *css,
+	struct cftype *cft, u64 val)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+	bool running = mem_cgroup_ksoftlimd_running(memcg);
+
+	if (!ns_capable(current_user_ns(), CAP_SYS_ADMIN))
+		return -EPERM;
+
+	/* cannot set to root cgroup and only 0 and 1 are allowed */
+	if (!css->parent || !((val == 0) || (val == 1)))
+		return -EINVAL;
+
+	if ((val == 0) && running)
+		if (cgroup_memory_ksoftlimd_for_all) {
+			pr_warn_once("error: cgroup_memory_ksoftlimd_for_all "
+				     "set, can't stop any running ksoftlimd\n");
+			return -EINVAL;
+		} else
+			mem_cgroup_ksoftlimd_stop(memcg);
+	else if ((val == 1) && !running)
+		mem_cgroup_ksoftlimd_run(memcg);
+	else
+		return -EINVAL;
+	return 0;
+}
+
 #ifdef CONFIG_CGROUP_WRITEBACK
 
 #include <trace/events/writeback.h>
@@ -5022,6 +5279,13 @@ static struct cftype mem_cgroup_legacy_files[] = {
 		.private = MEMFILE_PRIVATE(_OOM_TYPE, OOM_CONTROL),
 	},
 	{
+		.name = "ksoftlimd_control",
+		.seq_show = mem_cgroup_ksoftlimd_control_read,
+		.write_u64 = mem_cgroup_ksoftlimd_control_write,
+		.private = MEMFILE_PRIVATE(_KSOFTLIMD_TYPE, KSOFTLIMD_CONTROL),
+		.flags = CFTYPE_NS_DELEGATABLE,
+	},
+	{
 		.name = "pressure_level",
 	},
 #ifdef CONFIG_NUMA
@@ -5387,6 +5651,7 @@ static int mem_cgroup_css_online(struct cgroup_subsys_state *css)
 	/* Online state pins memcg ID, memcg ID pins CSS */
 	refcount_set(&memcg->id.ref, 1);
 	css_get(css);
+
 	return 0;
 }
 
@@ -5414,6 +5679,9 @@ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 	wb_memcg_offline(memcg);
 
 	drain_all_stock(memcg);
+
+	if (mem_cgroup_ksoftlimd_running(memcg))
+		mem_cgroup_ksoftlimd_stop(memcg);
 
 	mem_cgroup_id_put(memcg);
 }
@@ -6529,6 +6797,11 @@ static struct cftype memory_files[] = {
 		.seq_show = memory_oom_group_show,
 		.write = memory_oom_group_write,
 	},
+//	{
+//		.name = "ksoftlimd",
+//		.seq_show TODO
+//		.write TODO
+//	},
 	{ }	/* terminate */
 };
 
@@ -7073,6 +7346,8 @@ static int __init cgroup_memory(char *s)
 			cgroup_memory_nosocket = true;
 		if (!strcmp(token, "nokmem"))
 			cgroup_memory_nokmem = true;
+		if (!strcmp(token, "ksoftlimd_for_all"))
+			cgroup_memory_ksoftlimd_for_all = 1;
 	}
 	return 0;
 }
