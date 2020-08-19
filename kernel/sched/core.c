@@ -6887,6 +6887,7 @@ static long tg_get_cfs_period(struct task_group *tg);
 
 long sched_getaffinity(pid_t pid, struct cpumask *mask)
 {
+	struct task_group *tg;
 	struct task_struct *p;
 	unsigned long flags;
 	int retval;
@@ -6907,14 +6908,20 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 		goto out_unlock;
 
 #ifdef CONFIG_CFS_BANDWIDTH
-	quota = tg_get_cfs_quota(p->sched_task_group);
-	period = tg_get_cfs_period(p->sched_task_group);
+	tg = p->sched_task_group;
+
+tg_loop:
+	quota = tg_get_cfs_quota(tg);
+	period = tg_get_cfs_period(tg);
 
 	if (quota > 0 && period > 0) {
 		cpus = quota / period;
 
 		if ((quota % period) > 0)
 			cpus++;
+	} else if (tg->parent && (tg->parent != &root_task_group)) {
+		tg = tg->parent;
+		goto tg_loop;
 	}
 #endif
 
