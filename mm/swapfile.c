@@ -50,6 +50,8 @@
 #include "internal.h"
 #include "swap.h"
 
+#include <linux/vpsadminos.h>
+
 static bool swap_count_continued(struct swap_info_struct *, pgoff_t,
 				 unsigned char);
 static void free_swap_count_continuations(struct swap_info_struct *);
@@ -2670,10 +2672,62 @@ static const struct seq_operations swaps_op = {
 	.show =		swap_show
 };
 
+static int fake_swap_show(struct seq_file *swap, void *v)
+{
+	struct mem_cgroup *memcg = swap->private;
+	unsigned long memsw = PAGE_COUNTER_MAX;
+	unsigned long memsw_usage = 0;
+	unsigned long totalram = (u64)READ_ONCE(memcg->memory.max);
+	unsigned long memusage = page_counter_read(&memcg->memory);
+	unsigned long totalswap, usedswap;
+	struct sysinfo i;
+
+	si_swapinfo(&i);
+
+	seq_puts(swap,"Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+
+	memsw = READ_ONCE(memcg->memsw.max);
+	memsw_usage = page_counter_read(&memcg->memsw);
+	mem_cgroup_put(memcg);
+
+	if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
+		if (!memsw || (memsw == totalram))
+			return 0;
+
+		if (memsw == PAGE_COUNTER_MAX)
+			totalswap = i.totalswap * PAGE_SIZE;
+		else
+			totalswap = (memsw - totalram) * PAGE_SIZE;
+		usedswap = (memsw_usage - memusage) * PAGE_SIZE;
+	} else { // v2
+		if (!memsw)
+			return 0;
+
+		if (memsw == PAGE_COUNTER_MAX)
+			totalswap = i.totalswap * PAGE_SIZE;
+		else
+			totalswap = memsw * PAGE_SIZE;
+		usedswap = memsw_usage * PAGE_SIZE;
+	}
+
+	seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+			"virtual",
+			"virtual\t",
+			totalswap, totalswap < 10000000 ? "\t" : "",
+			usedswap, usedswap < 10000000 ? "\t" : "",
+			-1);
+	return 0;
+}
+
 static int swaps_open(struct inode *inode, struct file *file)
 {
 	struct seq_file *seq;
 	int ret;
+	struct mem_cgroup *memcg;
+
+	memcg = get_current_most_limited_memcg();
+	if (memcg)
+		return single_open(file, fake_swap_show, memcg);
 
 	ret = seq_open(file, &swaps_op);
 	if (ret)
