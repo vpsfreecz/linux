@@ -65,6 +65,8 @@
 #include <linux/uidgid.h>
 #include <linux/cred.h>
 
+#include <linux/vpsadminos.h>
+
 #include <linux/nospec.h>
 
 #include <linux/kmsg_dump.h>
@@ -2811,6 +2813,7 @@ static int do_sysinfo(struct sysinfo *info)
 	unsigned long mem_total, sav_total;
 	unsigned int mem_unit, bitcount;
 	struct timespec64 tp;
+	struct mem_cgroup *memcg;
 
 	memset(info, 0, sizeof(struct sysinfo));
 
@@ -2848,6 +2851,39 @@ static int do_sysinfo(struct sysinfo *info)
 			goto out;
 	}
 
+	memcg = get_current_most_limited_memcg();
+	if (memcg) {
+		unsigned long memsw = PAGE_COUNTER_MAX;
+		unsigned long memsw_usage = 0;
+		unsigned long memusage = page_counter_read(&memcg->memory);
+		unsigned long totalram = (u64)READ_ONCE(memcg->memory.max);
+
+		memsw = READ_ONCE(memcg->memsw.max);
+		memsw_usage = page_counter_read(&memcg->memsw);
+
+		info->totalram = info->totalhigh = totalram;
+		info->freeram = info->freehigh = totalram - memusage;
+		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
+			if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
+				info->totalswap = 0;
+				info->freeswap = 0;
+			} else {
+				info->totalswap = memsw - totalram;
+				info->freeswap = info->totalswap - (memsw_usage - memusage);
+			}
+		} else { // v2
+			if (!memsw) {
+				info->totalswap = 0;
+				info->freeswap = 0;
+			} else {
+				info->totalswap = memsw;
+				info->freeswap = info->totalswap - memsw_usage;
+			}
+		}
+		info->bufferram = memcg_page_state(memcg, NR_FILE_PAGES);
+		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
+		mem_cgroup_put(memcg);
+	}
 	/*
 	 * If mem_total did not overflow, multiply all memory values by
 	 * info->mem_unit and set it to 1.  This leaves things compatible
