@@ -13,6 +13,7 @@
 #include <linux/vmstat.h>
 #include <linux/atomic.h>
 #include <linux/vmalloc.h>
+#include <linux/vpsadminos.h>
 #ifdef CONFIG_CMA
 #include <linux/cma.h>
 #endif
@@ -29,6 +30,11 @@ static void show_val_kb(struct seq_file *m, const char *s, unsigned long num)
 	seq_write(m, " kB\n", 4);
 }
 
+#define virtual_zone_page_state(x) (!memcg) ? \
+					global_zone_page_state(x) : 0
+#define virtual_node_page_state(x) (!memcg) ? \
+					global_node_page_state(x) : \
+					memcg_page_state(memcg, x)
 static int meminfo_proc_show(struct seq_file *m, void *v)
 {
 	struct sysinfo i;
@@ -38,22 +44,61 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	unsigned long pages[NR_LRU_LISTS];
 	unsigned long sreclaimable, sunreclaim;
 	int lru;
+	struct mem_cgroup *memcg;
+	unsigned long totalram;
 
 	si_meminfo(&i);
 	si_swapinfo(&i);
-	committed = vm_memory_committed();
 
-	cached = global_node_page_state(NR_FILE_PAGES) -
+	memcg = get_current_most_limited_memcg();
+	if (memcg) {
+		unsigned long memsw = PAGE_COUNTER_MAX;
+		unsigned long memsw_usage = 0;
+		unsigned long memusage = page_counter_read(&memcg->memory);
+
+		totalram = (u64)READ_ONCE(memcg->memory.max);
+
+		if (!cgroup_memory_noswap) {
+			memsw = READ_ONCE(memcg->memsw.max);
+			memsw_usage = page_counter_read(&memcg->memsw);
+		}
+
+		i.totalram = i.totalhigh = totalram;
+		i.freeram = i.freehigh = totalram - memusage;
+		if (memsw < PAGE_COUNTER_MAX) {
+			i.totalswap = memsw - totalram;
+			i.freeswap = i.totalswap - (memsw_usage - memusage);
+		}
+
+		for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
+			pages[lru] = memcg_page_state(memcg, NR_LRU_BASE + lru);
+
+		if (memcg_kmem_enabled()) {
+			sreclaimable = memcg_page_state(memcg, NR_SLAB_RECLAIMABLE_B);
+			sunreclaim = memcg_page_state(memcg, NR_SLAB_UNRECLAIMABLE_B);
+		} else {
+			sreclaimable = 0;
+			sunreclaim = 0;
+		}
+		cached = memcg_page_state(memcg, NR_FILE_PAGES);
+		available = i.freeram + sreclaimable;
+		committed = 0;
+		i.bufferram = sreclaimable;
+		i.sharedram = memcg_page_state(memcg, NR_SHMEM);
+	} else {
+		for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
+			pages[lru] = global_node_page_state(NR_LRU_BASE + lru);
+
+		cached = global_node_page_state(NR_FILE_PAGES) -
 			total_swapcache_pages() - i.bufferram;
-	if (cached < 0)
-		cached = 0;
+		if (cached < 0)
+			cached = 0;
+		available = si_mem_available();
+		sreclaimable = global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B);
+		sunreclaim = global_node_page_state_pages(NR_SLAB_UNRECLAIMABLE_B);
+		committed = vm_memory_committed();
+	}
 
-	for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
-		pages[lru] = global_node_page_state(NR_LRU_BASE + lru);
-
-	available = si_mem_available();
-	sreclaimable = global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B);
-	sunreclaim = global_node_page_state_pages(NR_SLAB_UNRECLAIMABLE_B);
 
 	show_val_kb(m, "MemTotal:       ", i.totalram);
 	show_val_kb(m, "MemFree:        ", i.freeram);
@@ -70,7 +115,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "Active(file):   ", pages[LRU_ACTIVE_FILE]);
 	show_val_kb(m, "Inactive(file): ", pages[LRU_INACTIVE_FILE]);
 	show_val_kb(m, "Unevictable:    ", pages[LRU_UNEVICTABLE]);
-	show_val_kb(m, "Mlocked:        ", global_zone_page_state(NR_MLOCK));
+	show_val_kb(m, "Mlocked:        ", virtual_zone_page_state(NR_MLOCK));
 
 #ifdef CONFIG_HIGHMEM
 	show_val_kb(m, "HighTotal:      ", i.totalhigh);
@@ -87,69 +132,77 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "SwapTotal:      ", i.totalswap);
 	show_val_kb(m, "SwapFree:       ", i.freeswap);
 	show_val_kb(m, "Dirty:          ",
-		    global_node_page_state(NR_FILE_DIRTY));
+		    virtual_node_page_state(NR_FILE_DIRTY));
 	show_val_kb(m, "Writeback:      ",
-		    global_node_page_state(NR_WRITEBACK));
+		    virtual_node_page_state(NR_WRITEBACK));
 	show_val_kb(m, "AnonPages:      ",
-		    global_node_page_state(NR_ANON_MAPPED));
+		    virtual_node_page_state(NR_ANON_MAPPED));
 	show_val_kb(m, "Mapped:         ",
-		    global_node_page_state(NR_FILE_MAPPED));
+		    virtual_node_page_state(NR_FILE_MAPPED));
 	show_val_kb(m, "Shmem:          ", i.sharedram);
 	show_val_kb(m, "KReclaimable:   ", sreclaimable +
-		    global_node_page_state(NR_KERNEL_MISC_RECLAIMABLE));
+		    virtual_node_page_state(NR_KERNEL_MISC_RECLAIMABLE));
 	show_val_kb(m, "Slab:           ", sreclaimable + sunreclaim);
 	show_val_kb(m, "SReclaimable:   ", sreclaimable);
 	show_val_kb(m, "SUnreclaim:     ", sunreclaim);
+
 	seq_printf(m, "KernelStack:    %8lu kB\n",
-		   global_node_page_state(NR_KERNEL_STACK_KB));
+		   virtual_node_page_state(NR_KERNEL_STACK_KB));
 #ifdef CONFIG_SHADOW_CALL_STACK
 	seq_printf(m, "ShadowCallStack:%8lu kB\n",
-		   global_node_page_state(NR_KERNEL_SCS_KB));
+		   virtual_node_page_state(NR_KERNEL_SCS_KB));
 #endif
 	show_val_kb(m, "PageTables:     ",
-		    global_node_page_state(NR_PAGETABLE));
+		    virtual_node_page_state(NR_PAGETABLE));
 
 	show_val_kb(m, "NFS_Unstable:   ", 0);
 	show_val_kb(m, "Bounce:         ",
-		    global_zone_page_state(NR_BOUNCE));
+		    virtual_zone_page_state(NR_BOUNCE));
 	show_val_kb(m, "WritebackTmp:   ",
-		    global_node_page_state(NR_WRITEBACK_TEMP));
-	show_val_kb(m, "CommitLimit:    ", vm_commit_limit());
-	show_val_kb(m, "Committed_AS:   ", committed);
-	seq_printf(m, "VmallocTotal:   %8lu kB\n",
+		    virtual_node_page_state(NR_WRITEBACK_TEMP));
+
+	if (!memcg) {
+		show_val_kb(m, "CommitLimit:    ", vm_commit_limit());
+		show_val_kb(m, "Committed_AS:   ", committed);
+		seq_printf(m, "VmallocTotal:   %8lu kB\n",
 		   (unsigned long)VMALLOC_TOTAL >> 10);
-	show_val_kb(m, "VmallocUsed:    ", vmalloc_nr_pages());
-	show_val_kb(m, "VmallocChunk:   ", 0ul);
-	show_val_kb(m, "Percpu:         ", pcpu_nr_pages());
+		show_val_kb(m, "VmallocUsed:    ", vmalloc_nr_pages());
+		show_val_kb(m, "VmallocChunk:   ", 0ul);
+		show_val_kb(m, "Percpu:         ", pcpu_nr_pages());
 
 #ifdef CONFIG_MEMORY_FAILURE
-	seq_printf(m, "HardwareCorrupted: %5lu kB\n",
+		seq_printf(m, "HardwareCorrupted: %5lu kB\n",
 		   atomic_long_read(&num_poisoned_pages) << (PAGE_SHIFT - 10));
 #endif
+	}
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	show_val_kb(m, "AnonHugePages:  ",
-		    global_node_page_state(NR_ANON_THPS));
+		    virtual_node_page_state(NR_ANON_THPS));
 	show_val_kb(m, "ShmemHugePages: ",
-		    global_node_page_state(NR_SHMEM_THPS));
+		    virtual_node_page_state(NR_SHMEM_THPS));
 	show_val_kb(m, "ShmemPmdMapped: ",
-		    global_node_page_state(NR_SHMEM_PMDMAPPED));
+		    virtual_node_page_state(NR_SHMEM_PMDMAPPED));
 	show_val_kb(m, "FileHugePages:  ",
-		    global_node_page_state(NR_FILE_THPS));
+		    virtual_node_page_state(NR_FILE_THPS));
 	show_val_kb(m, "FilePmdMapped:  ",
-		    global_node_page_state(NR_FILE_PMDMAPPED));
+		    virtual_node_page_state(NR_FILE_PMDMAPPED));
 #endif
 
+	if (!memcg) {
 #ifdef CONFIG_CMA
-	show_val_kb(m, "CmaTotal:       ", totalcma_pages);
-	show_val_kb(m, "CmaFree:        ",
+		show_val_kb(m, "CmaTotal:       ", totalcma_pages);
+		show_val_kb(m, "CmaFree:        ",
 		    global_zone_page_state(NR_FREE_CMA_PAGES));
 #endif
 
-	hugetlb_report_meminfo(m);
+		hugetlb_report_meminfo(m);
 
-	arch_report_meminfo(m);
+		arch_report_meminfo(m);
+	}
 
+	if (memcg)
+		mem_cgroup_put(memcg);
 	return 0;
 }
 
