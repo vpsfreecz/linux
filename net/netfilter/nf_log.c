@@ -8,6 +8,7 @@
 #include <linux/seq_file.h>
 #include <net/protocol.h>
 #include <net/netfilter/nf_log.h>
+#include <linux/syslog.h>
 
 #include "nf_internals.h"
 
@@ -308,10 +309,10 @@ struct nf_log_buf *nf_log_buf_open(void)
 }
 EXPORT_SYMBOL_GPL(nf_log_buf_open);
 
-void nf_log_buf_close(struct nf_log_buf *m)
+void nf_log_buf_close(struct nf_log_buf *m, struct syslog_namespace *ns)
 {
 	m->buf[m->count] = 0;
-	printk("%s\n", m->buf);
+	ns_printk(ns, "%s\n", m->buf);
 
 	if (likely(m != &emergency))
 		kfree(m);
