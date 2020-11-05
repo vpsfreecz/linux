@@ -17,10 +17,13 @@
 #include <linux/if_arp.h>
 #include <linux/ip.h>
 #include <net/route.h>
+#include <linux/syslog.h>
 
 #include <linux/netfilter.h>
 #include <linux/netfilter/xt_LOG.h>
 #include <net/netfilter/nf_log.h>
+#include <net/net_namespace.h>
+#include <linux/syslog_namespace.h>
 
 static const struct nf_loginfo default_loginfo = {
 	.type	= NF_LOG_TYPE_LOG,
@@ -98,8 +101,7 @@ static void nf_log_arp_packet(struct net *net, u_int8_t pf,
 {
 	struct nf_log_buf *m;
 
-	/* FIXME: Disabled from containers until syslog ns is supported */
-	if (!net_eq(net, &init_net) && !sysctl_nf_log_all_netns)
+	if (!sysctl_nf_log_all_netns)
 		return;
 
 	m = nf_log_buf_open();
@@ -111,7 +113,8 @@ static void nf_log_arp_packet(struct net *net, u_int8_t pf,
 				  prefix);
 	dump_arp_packet(m, loginfo, skb, 0);
 
-	nf_log_buf_close(m);
+	/* link to respective syslog ns */
+	nf_log_buf_close(m, net->user_ns->syslog_ns);
 }
 
 static struct nf_logger nf_arp_logger __read_mostly = {
