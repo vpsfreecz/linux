@@ -16,6 +16,7 @@
 #include <linux/mutex.h>
 #include <linux/seq_file.h>
 #include <linux/mm.h>
+#include <linux/vpsadminos.h>
 
 #include "sysfs.h"
 
@@ -44,6 +45,7 @@ static int sysfs_kf_seq_show(struct seq_file *sf, void *v)
 	const struct sysfs_ops *ops = sysfs_file_ops(of->kn);
 	ssize_t count;
 	char *buf;
+	ssize_t fake_count;
 
 	if (WARN_ON_ONCE(!ops->show))
 		return -EINVAL;
@@ -55,6 +57,12 @@ static int sysfs_kf_seq_show(struct seq_file *sf, void *v)
 		return 0;
 	}
 	memset(buf, 0, PAGE_SIZE);
+
+	fake_count = fake_sysfs_kf_read(of, buf);
+	if (fake_count) {
+		seq_commit(sf, fake_count);
+		return 0;
+	}
 
 	count = ops->show(kobj, of->kn->priv, buf);
 	if (count < 0)
@@ -104,6 +112,10 @@ static ssize_t sysfs_kf_read(struct kernfs_open_file *of, char *buf,
 	const struct sysfs_ops *ops = sysfs_file_ops(of->kn);
 	struct kobject *kobj = of->kn->parent->priv;
 	ssize_t len;
+	ssize_t fake_count = fake_sysfs_kf_read(of, buf);
+
+	if (fake_count)
+		return fake_count;
 
 	/*
 	 * If buf != of->prealloc_buf, we don't know how
@@ -129,6 +141,10 @@ static ssize_t sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 {
 	const struct sysfs_ops *ops = sysfs_file_ops(of->kn);
 	struct kobject *kobj = of->kn->parent->priv;
+	ssize_t fake_count = fake_sysfs_kf_write(of, buf, count, pos);
+
+	if (fake_count)
+		return fake_count;
 
 	if (!count)
 		return 0;
