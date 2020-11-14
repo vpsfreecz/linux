@@ -21,6 +21,7 @@
 #include <linux/fs_struct.h>
 #include <linux/bsearch.h>
 #include <linux/sort.h>
+#include <linux/vpsadminos.h>
 
 static struct kmem_cache *user_ns_cachep __read_mostly;
 static DEFINE_MUTEX(userns_state_mutex);
@@ -140,6 +141,8 @@ int create_user_ns(struct cred *new)
 		goto fail_keyring;
 
 	set_cred_user_ns(new, ns);
+
+	fake_sysctl_bufs_init(ns);
 	return 0;
 fail_keyring:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
@@ -181,6 +184,7 @@ static void free_user_ns(struct work_struct *work)
 
 	do {
 		struct ucounts *ucounts = ns->ucounts;
+
 		parent = ns->parent;
 		if (ns->gid_map.nr_extents > UID_GID_MAP_MAX_BASE_EXTENTS) {
 			kfree(ns->gid_map.forward);
@@ -198,6 +202,7 @@ static void free_user_ns(struct work_struct *work)
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		ns_free_inum(&ns->ns);
+		fake_sysctl_bufs_free(ns);
 		kmem_cache_free(user_ns_cachep, ns);
 		dec_user_namespaces(ucounts);
 		ns = parent;
@@ -1381,6 +1386,7 @@ const struct proc_ns_operations userns_operations = {
 
 static __init int user_namespaces_init(void)
 {
+	fake_sysctl_bufs_init(&init_user_ns);
 	user_ns_cachep = KMEM_CACHE(user_namespace, SLAB_PANIC);
 	return 0;
 }
