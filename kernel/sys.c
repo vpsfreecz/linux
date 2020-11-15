@@ -2620,6 +2620,9 @@ static int do_sysinfo(struct sysinfo *info)
 		if (memsw < PAGE_COUNTER_MAX) {
 			info->totalswap = memsw - totalram;
 			info->freeswap = info->totalswap - (memsw_usage - memusage);
+		} else {
+			info->totalswap = 0;
+			info->freeswap = 0;
 		}
 		info->bufferram = memcg_page_state(memcg, NR_FILE_PAGES);
 		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
