@@ -68,6 +68,9 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		if (memsw < PAGE_COUNTER_MAX) {
 			i.totalswap = memsw - totalram;
 			i.freeswap = i.totalswap - (memsw_usage - memusage);
+		} else {
+			i.totalswap = 0;
+			i.freeswap = 0;
 		}
 
 		for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
