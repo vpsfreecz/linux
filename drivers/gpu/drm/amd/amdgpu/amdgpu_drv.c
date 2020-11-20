@@ -1509,6 +1509,51 @@ int amdgpu_file_to_fpriv(struct file *filp, struct amdgpu_fpriv **fpriv)
 	return 0;
 }
 
+#ifdef CONFIG_CGROUP_DRM
+
+static void amdgpu_drmcg_custom_init(struct drm_device *dev,
+	struct drmcg_props *props)
+{
+	struct amdgpu_device *adev = dev->dev_private;
+
+	props->lgpu_capacity = adev->gfx.cu_info.number;
+	bitmap_zero(props->lgpu_slots, MAX_DRMCG_LGPU_CAPACITY);
+	bitmap_fill(props->lgpu_slots, props->lgpu_capacity);
+
+	props->limit_enforced = true;
+}
+
+static void amdgpu_drmcg_limit_updated(struct drm_device *dev,
+		struct task_struct *task, struct drmcg_device_resource *ddr,
+		enum drmcg_res_type res_type)
+{
+	struct amdgpu_device *adev = dev->dev_private;
+
+	switch (res_type) {
+	case DRMCG_TYPE_LGPU:
+		amdgpu_amdkfd_update_cu_mask_for_process(task, adev,
+                        ddr->lgpu_eff, dev->drmcg_props.lgpu_capacity);
+		break;
+	default:
+		break;
+	}
+}
+
+#else
+
+static void amdgpu_drmcg_custom_init(struct drm_device *dev,
+	struct drmcg_props *props)
+{
+}
+
+static void amdgpu_drmcg_limit_updated(struct drm_device *dev,
+		struct task_struct *task, struct drmcg_device_resource *ddr,
+		enum drmcg_res_type res_type)
+{
+}
+
+#endif /* CONFIG_CGROUP_DRM */
+
 static struct drm_driver kms_driver = {
 	.driver_features =
 	    DRIVER_ATOMIC |
@@ -1534,6 +1579,9 @@ static struct drm_driver kms_driver = {
 	.gem_prime_vmap = amdgpu_gem_prime_vmap,
 	.gem_prime_vunmap = amdgpu_gem_prime_vunmap,
 	.gem_prime_mmap = amdgpu_gem_prime_mmap,
+
+	.drmcg_custom_init = amdgpu_drmcg_custom_init,
+	.drmcg_limit_updated = amdgpu_drmcg_limit_updated,
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,

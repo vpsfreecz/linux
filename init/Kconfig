@@ -1039,6 +1039,12 @@ config CGROUP_CGLIMIT
 	help
 	  Provides some shit to debug for snajpa
 
+config CGROUP_DRM
+	bool "DRM controller (EXPERIMENTAL)"
+	depends on HSA_AMD
+	help
+	  Provides accounting and enforcement of resources in the DRM subsystem.
+
 config CGROUP_FREEZER
 	bool "Freezer controller"
 	help
