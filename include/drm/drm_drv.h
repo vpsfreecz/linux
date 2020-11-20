@@ -523,6 +523,25 @@ struct drm_driver {
 			    uint32_t handle);
 
 	/**
+	 * @drmcg_custom_init
+	 *
+	 * Optional callback used to initialize drm cgroup per device properties
+	 * such as resource limit defaults.
+	 */
+	void (*drmcg_custom_init)(struct drm_device *dev,
+			struct drmcg_props *props);
+
+	/**
+	 * @drmcg_limit_updated
+	 *
+	 * Optional callback
+	 */
+	void (*drmcg_limit_updated)(struct drm_device *dev,
+			struct task_struct *task,
+			struct drmcg_device_resource *ddr,
+			enum drmcg_res_type res_type);
+
+	/**
 	 * @gem_vm_ops: Driver private ops for this object
 	 *
 	 * For GEM drivers this is deprecated in favour of
