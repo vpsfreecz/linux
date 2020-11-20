@@ -2149,6 +2149,196 @@ HugeTLB Interface Files
 	are local to the cgroup i.e. not hierarchical. The file modified event
 	generated on this file reflects only the local events.
 
+DRM
+---
+
+The "drm" controller regulates the distribution and accounting of
+of DRM (Direct Rendering Manager) and GPU-related resources.
+
+DRM Interface Files
+~~~~~~~~~~~~~~~~~~~~
+
+  drm.buffer.stats
+	A read-only flat-keyed file which exists on all cgroups.  Each
+	entry is keyed by the drm device's major:minor.
+
+	Total GEM buffer allocation in bytes.
+
+  drm.buffer.peak.stats
+	A read-only flat-keyed file which exists on all cgroups.  Each
+	entry is keyed by the drm device's major:minor.
+
+	Largest (high water mark) GEM buffer allocated in bytes.
+
+  drm.buffer.count.stats
+	A read-only flat-keyed file which exists on all cgroups.  Each
+	entry is keyed by the drm device's major:minor.
+
+	Total number of GEM buffer allocated.
+
+  drm.buffer.default
+	A read-only flat-keyed file which exists on the root cgroup.
+	Each entry is keyed by the drm device's major:minor.
+
+	Default limits on the total GEM buffer allocation in bytes.
+
+  drm.buffer.max
+	A read-write flat-keyed file which exists on all cgroups.  Each
+	entry is keyed by the drm device's major:minor.
+
+	Per device limits on the total GEM buffer allocation in byte.
+	This is a hard limit.  Attempts in allocating beyond the cgroup
+	limit will result in ENOMEM.  Shorthand understood by memparse
+	(such as k, m, g) can be used.
+
+	Set allocation limit for /dev/dri/card1 to 1GB
+	echo "226:1 1g" > drm.buffer.total.max
+
+	Set allocation limit for /dev/dri/card0 to 512MB
+	echo "226:0 512m" > drm.buffer.total.max
+
+  drm.buffer.peak.default
+	A read-only flat-keyed file which exists on the root cgroup.
+	Each entry is keyed by the drm device's major:minor.
+
+	Default limits on the largest GEM buffer allocation in bytes.
+
+  drm.buffer.peak.max
+	A read-write flat-keyed file which exists on all cgroups.  Each
+	entry is keyed by the drm device's major:minor.
+
+	Per device limits on the largest GEM buffer allocation in bytes.
+	This is a hard limit.  Attempts in allocating beyond the cgroup
+	limit will result in ENOMEM.  Shorthand understood by memparse
+	(such as k, m, g) can be used.
+
+	Set largest allocation for /dev/dri/card1 to 4MB
+	echo "226:1 4m" > drm.buffer.peak.max
+
+  drm.lgpu
+	A read-write nested-keyed file which exists on all cgroups.
+	Each entry is keyed by the DRM device's major:minor.
+
+	lgpu stands for logical GPU, it is an abstraction used to
+	subdivide a physical DRM device for the purpose of resource
+	management.  This file stores user configuration while the
+        drm.lgpu.effective reflects the actual allocation after
+        considering the relationship between the cgroups and their
+        configurations.
+
+	The lgpu is a discrete quantity that is device specific (i.e.
+	some DRM devices may have 64 lgpus while others may have 100
+	lgpus.)  The lgpu is a single quantity that can be allocated
+        in three different ways denoted by the following nested keys.
+
+	  =====     ==============================================
+	  weight    Allocate by proportion in relationship with
+                    active sibling cgroups
+	  count     Allocate by amount statically, treat lgpu as
+                    anonymous resources
+	  list      Allocate statically, treat lgpu as named
+                    resource
+	  =====     ==============================================
+
+	For example:
+	226:0 weight=100 count=256 list=0-255
+	226:1 weight=100 count=4 list=0,2,4,6
+	226:2 weight=100 count=32 list=32-63
+	226:3 weight=100 count=0 list=
+	226:4 weight=500 count=0 list=
+
+	lgpu is represented by a bitmap and uses the bitmap_parselist
+	kernel function so the list key input format is a
+	comma-separated list of decimal numbers and ranges.
+
+	Consecutively set bits are shown as two hyphen-separated decimal
+	numbers, the smallest and largest bit numbers set in the range.
+	Optionally each range can be postfixed to denote that only parts
+	of it should be set.  The range will divided to groups of
+	specific size.
+	Syntax: range:used_size/group_size
+	Example: 0-1023:2/256 ==> 0,1,256,257,512,513,768,769
+
+	The count key is the hamming weight / hweight of the bitmap.
+
+	Weight, count and list accept the max and default keywords.
+
+	Some DRM devices may only support lgpu as anonymous resources.
+	In such case, the significance of the position of the set bits
+	in list will be ignored.
+
+	The weight quantity is only in effect when static allocation
+	is not used (by setting count=0) for this cgroup.  The weight
+	quantity distributes lgpus that are not statically allocated by
+	the siblings.  For example, given siblings cgroupA, cgroupB and
+	cgroupC for a DRM device that has 64 lgpus, if cgroupA occupies
+	0-63, no lgpu is available to be distributed by weight.
+	Similarly, if cgroupA has list=0-31 and cgroupB has list=16-63,
+	cgroupC will be starved if it tries to allocate by weight.
+
+	On the other hand, if cgroupA has weight=100 count=0, cgroupB
+	has list=16-47, and cgroupC has weight=100 count=0, then 32
+	lgpus are available to be distributed evenly between cgroupA
+	and cgroupC.  In drm.lgpu.effective, cgroupA will have
+	list=0-15 and cgroupC will have list=48-63.
+
+	This lgpu resource supports the 'allocation' and 'weight'
+	resource distribution model.
+
+  drm.lgpu.effective
+	A read-only nested-keyed file which exists on all cgroups.
+	Each entry is keyed by the DRM device's major:minor.
+
+	lgpu stands for logical GPU, it is an abstraction used to
+	subdivide a physical DRM device for the purpose of resource
+	management.  This file reflects the actual allocation after
+        considering the relationship between the cgroups and their
+        configurations in drm.lgpu.
+
+GEM Buffer Ownership
+~~~~~~~~~~~~~~~~~~~~
+
+For the purpose of cgroup accounting and limiting, ownership of the
+buffer is deemed to be the cgroup for which the allocating process
+belongs to.  There is one cgroup stats per drm device.  Each allocation
+is charged to the owning cgroup as well as all its ancestors.
+
+Similar to the memory cgroup, migrating a process to a different cgroup
+does not move the GEM buffer usages that the process started while in
+previous cgroup, to the new cgroup.
+
+The following is an example to illustrate some of the operations.  Given
+the following cgroup hierarchy (The letters are cgroup names with R
+being the root cgroup.  The numbers in brackets are processes.  The
+processes are placed with cgroup's 'No Internal Process Constraint' in
+mind, so no process is placed in cgroup B.)
+
+R (4, 5) ------ A (6)
+ \
+  B ---- C (7,8)
+   \
+    D (9)
+
+Here is a list of operation and the associated effect on the size
+track by the cgroups (for simplicity, each buffer is 1 unit in size.)
+
+==  ==  ==  ==  ==  ===================================================
+R   A   B   C   D   Ops
+==  ==  ==  ==  ==  ===================================================
+1   0   0   0   0   4 allocated a buffer
+1   0   0   0   0   4 shared a buffer with 5
+1   0   0   0   0   4 shared a buffer with 9
+2   0   1   0   1   9 allocated a buffer
+3   0   2   1   1   7 allocated a buffer
+3   0   2   1   1   7 shared a buffer with 8
+3   0   2   1   1   7 sharing with 9
+3   0   2   1   1   7 release a buffer
+3   0   2   1   1   7 migrate to cgroup D
+3   0   2   1   1   9 release a buffer from 7
+2   0   1   0   1   8 release a buffer from 7 (last ref to shared buf)
+==  ==  ==  ==  ==  ===================================================
+
+
 Misc
 ----
 

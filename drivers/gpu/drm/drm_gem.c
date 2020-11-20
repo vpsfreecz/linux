@@ -38,6 +38,7 @@
 #include <linux/dma-buf.h>
 #include <linux/mem_encrypt.h>
 #include <linux/pagevec.h>
+#include <linux/cgroup_drm.h>
 
 #include <drm/drm.h>
 #include <drm/drm_device.h>
@@ -47,6 +48,7 @@
 #include <drm/drm_managed.h>
 #include <drm/drm_print.h>
 #include <drm/drm_vma_manager.h>
+#include <drm/drm_cgroup.h>
 
 #include "drm_internal.h"
 
@@ -147,11 +149,17 @@ EXPORT_SYMBOL(drm_gem_object_init);
  * no GEM provided backing store. Instead the caller is responsible for
  * backing the object and handling it.
  */
-void drm_gem_private_object_init(struct drm_device *dev,
+bool drm_gem_private_object_init(struct drm_device *dev,
 				 struct drm_gem_object *obj, size_t size)
 {
 	BUG_ON((size & (PAGE_SIZE - 1)) != 0);
 
+	obj->drmcg = drmcg_get(current);
+	if (!drmcg_try_chg_bo_alloc(obj->drmcg, dev, size)) {
+		drmcg_put(obj->drmcg);
+		obj->drmcg = NULL;
+		return false;
+	}
 	obj->dev = dev;
 	obj->filp = NULL;
 
@@ -163,6 +171,8 @@ void drm_gem_private_object_init(struct drm_device *dev,
 		obj->resv = &obj->_resv;
 
 	drm_vma_node_reset(&obj->vma_node);
+
+	return true;
 }
 EXPORT_SYMBOL(drm_gem_private_object_init);
 
@@ -965,6 +975,10 @@ drm_gem_object_release(struct drm_gem_object *obj)
 		fput(obj->filp);
 
 	dma_resv_fini(&obj->_resv);
+
+	drmcg_unchg_bo_alloc(obj->drmcg, obj->dev, obj->size);
+	drmcg_put(obj->drmcg);
+
 	drm_gem_free_mmap_offset(obj);
 }
 EXPORT_SYMBOL(drm_gem_object_release);
