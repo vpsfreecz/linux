@@ -84,6 +84,8 @@
 #include <trace/events/ipi.h>
 #undef CREATE_TRACE_POINTS
 
+#include <linux/user_namespace.h>
+
 #include "sched.h"
 #include "stats.h"
 
@@ -7324,9 +7326,14 @@ static bool is_nice_reduction(const struct task_struct *p, const int nice)
  * @p: task
  * @nice: nice value
  */
-int can_nice(const struct task_struct *p, const int nice)
+int can_nice(struct task_struct *p, const int nice)
 {
-	return is_nice_reduction(p, nice) || capable(CAP_SYS_NICE);
+	struct user_namespace *ns;
+
+	ns = task_cred_xxx(p, user_ns);
+	return is_nice_reduction(p, nice) ||
+		(ns_capable(ns, CAP_SYS_NICE) &&
+		 ((ns == &init_user_ns) || (ns->parent == &init_user_ns)));
 }
 
 #ifdef __ARCH_WANT_SYS_NICE
