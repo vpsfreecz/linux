@@ -72,6 +72,7 @@
 #endif
 
 #include <uapi/linux/sched/types.h>
+#include <linux/user_namespace.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
@@ -7058,9 +7059,17 @@ static bool is_nice_reduction(const struct task_struct *p, const int nice)
  * @p: task
  * @nice: nice value
  */
-int can_nice(const struct task_struct *p, const int nice)
+int can_nice(struct task_struct *p, const int nice)
 {
-	return is_nice_reduction(p, nice) || capable(CAP_SYS_NICE);
+	struct user_namespace *ns;
+	/* Convert nice value [19,-20] to rlimit style value [1,40]: */
+	int nice_rlim = nice_to_rlimit(nice);
+
+	ns = task_cred_xxx(p, user_ns);
+	return (is_nice_reduction(p, nice) || (
+	      ns_capable(ns, CAP_SYS_NICE) &&
+	      ((ns == &init_user_ns) || (ns->parent == &init_user_ns))
+	    ));
 }
 
 #ifdef __ARCH_WANT_SYS_NICE
