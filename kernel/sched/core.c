@@ -16,6 +16,7 @@
 
 #include <linux/kcov.h>
 #include <linux/scs.h>
+#include <linux/user_namespace.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
@@ -5757,13 +5758,16 @@ EXPORT_SYMBOL(set_user_nice);
  * @p: task
  * @nice: nice value
  */
-int can_nice(const struct task_struct *p, const int nice)
+int can_nice(struct task_struct *p, const int nice)
 {
+	struct user_namespace *ns;
 	/* Convert nice value [19,-20] to rlimit style value [1,40]: */
 	int nice_rlim = nice_to_rlimit(nice);
 
-	return (nice_rlim <= task_rlimit(p, RLIMIT_NICE) ||
-		capable(CAP_SYS_NICE));
+	ns = task_cred_xxx(p, user_ns);
+	return (nice_rlim <= task_rlimit(p, RLIMIT_NICE)) ||
+		(ns_capable(ns, CAP_SYS_NICE) &&
+		 ((ns == &init_user_ns) || (ns->parent == &init_user_ns)));
 }
 
 #ifdef __ARCH_WANT_SYS_NICE
