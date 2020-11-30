@@ -345,13 +345,14 @@ int copy_creds(struct task_struct *p, unsigned long clone_flags)
 #endif
 		clone_flags & CLONE_THREAD
 	    ) {
+		if (!inc_rlimit_counter(task_cred_xxx(p, user_ns), task_euid(p), UCOUNT_RLIMIT_NPROC))
+			return -EACCES;
 		p->real_cred = get_cred(p->cred);
 		get_cred(p->cred);
 		alter_cred_subscribers(p->cred, 2);
 		kdebug("share_creds(%p{%d,%d})",
 		       p->cred, atomic_read(&p->cred->usage),
 		       read_cred_subscribers(p->cred));
-		atomic_inc(&p->cred->user->processes);
 		return 0;
 	}
 
@@ -384,7 +385,8 @@ int copy_creds(struct task_struct *p, unsigned long clone_flags)
 	}
 #endif
 
-	atomic_inc(&new->user->processes);
+	if (!inc_rlimit_counter(new->user_ns, new->euid, UCOUNT_RLIMIT_NPROC))
+		return -EACCES;
 	p->cred = p->real_cred = get_cred(new);
 	alter_cred_subscribers(new, 2);
 	validate_creds(new);
@@ -480,17 +482,18 @@ int commit_creds(struct cred *new)
 	if (!gid_eq(new->fsgid, old->fsgid))
 		key_fsgid_changed(new);
 
-	/* do it
-	 * RLIMIT_NPROC limits on user->processes have already been checked
-	 * in set_user().
+	/*
+	 * The RLIMIT_NPROC limits have already been checked in set_user(), but
+	 * perhaps this limit is exceeded in the parent user namespace.
 	 */
 	alter_cred_subscribers(new, 2);
-	if (new->user != old->user)
-		atomic_inc(&new->user->processes);
+	if ((new->user != old->user || new->user_ns != old->user_ns) &&
+	    !inc_rlimit_counter(new->user_ns, new->euid, UCOUNT_RLIMIT_NPROC))
+		task->flags |= PF_NPROC_UNS_EXCEEDED;
 	rcu_assign_pointer(task->real_cred, new);
 	rcu_assign_pointer(task->cred, new);
-	if (new->user != old->user)
-		atomic_dec(&old->user->processes);
+	if (new->user != old->user || new->user_ns != old->user_ns)
+		dec_rlimit_counter(old->user_ns, old->euid, UCOUNT_RLIMIT_NPROC);
 	alter_cred_subscribers(old, -2);
 
 	/* send notifications */
