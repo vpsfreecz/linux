@@ -53,8 +53,12 @@ enum ucount_type {
 	UCOUNT_INOTIFY_INSTANCES,
 	UCOUNT_INOTIFY_WATCHES,
 #endif
+	UCOUNT_RLIMIT_NPROC,
 	UCOUNT_COUNTS,
 };
+
+#define UCOUNT_MIN_RLIMIT UCOUNT_RLIMIT_NPROC
+#define UCOUNT_MAX_RLIMIT UCOUNT_RLIMIT_NPROC
 
 struct user_namespace {
 	struct uid_gid_map	uid_map;
@@ -90,7 +94,7 @@ struct user_namespace {
 	struct ctl_table_header *sysctls;
 #endif
 	struct ucounts		*ucounts;
-	int ucount_max[UCOUNT_COUNTS];
+	long ucount_max[UCOUNT_COUNTS];
 
 	struct xarray		fake_sysctl_bufs;
 } __randomize_layout;
@@ -100,7 +104,7 @@ struct ucounts {
 	struct user_namespace *ns;
 	kuid_t uid;
 	int count;
-	atomic_t ucount[UCOUNT_COUNTS];
+	atomic_long_t ucount[UCOUNT_COUNTS];
 };
 
 extern struct user_namespace init_user_ns;
@@ -109,6 +113,10 @@ bool setup_userns_sysctls(struct user_namespace *ns);
 void retire_userns_sysctls(struct user_namespace *ns);
 struct ucounts *inc_ucount(struct user_namespace *ns, kuid_t uid, enum ucount_type type);
 void dec_ucount(struct ucounts *ucounts, enum ucount_type type);
+
+long get_rlimit_counter(struct user_namespace *ns, kuid_t uid, enum ucount_type type);
+struct ucounts *inc_rlimit_counter(struct user_namespace *ns, kuid_t uid, enum ucount_type type);
+void dec_rlimit_counter(struct user_namespace *ns, kuid_t uid, enum ucount_type type);
 
 #ifdef CONFIG_USER_NS
 

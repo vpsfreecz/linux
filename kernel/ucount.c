@@ -75,6 +75,7 @@ static struct ctl_table user_table[] = {
 	UCOUNT_ENTRY("max_inotify_instances"),
 	UCOUNT_ENTRY("max_inotify_watches"),
 #endif
+	{ },
 	{ }
 };
 #endif /* CONFIG_SYSCTL */
@@ -176,14 +177,14 @@ static void put_ucounts(struct ucounts *ucounts)
 	kfree(ucounts);
 }
 
-static inline bool atomic_inc_below(atomic_t *v, int u)
+static inline bool atomic_long_inc_below(atomic_long_t *v, int u)
 {
-	int c, old;
-	c = atomic_read(v);
+	long c, old;
+	c = atomic_long_read(v);
 	for (;;) {
 		if (unlikely(c >= u))
 			return false;
-		old = atomic_cmpxchg(v, c, c+1);
+		old = atomic_long_cmpxchg(v, c, c+1);
 		if (likely(old == c))
 			return true;
 		c = old;
@@ -200,14 +201,14 @@ struct ucounts *inc_ucount(struct user_namespace *ns, kuid_t uid,
 		int max;
 		tns = iter->ns;
 		max = READ_ONCE(tns->ucount_max[type]);
-		if (!atomic_inc_below(&iter->ucount[type], max))
+		if (!atomic_long_inc_below(&iter->ucount[type], max))
 			goto fail;
 	}
 	return ucounts;
 fail:
 	bad = iter;
 	for (iter = ucounts; iter != bad; iter = iter->ns->ucounts)
-		atomic_dec(&iter->ucount[type]);
+		atomic_long_dec(&iter->ucount[type]);
 
 	put_ucounts(ucounts);
 	return NULL;
@@ -217,10 +218,43 @@ void dec_ucount(struct ucounts *ucounts, enum ucount_type type)
 {
 	struct ucounts *iter;
 	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
-		int dec = atomic_dec_if_positive(&iter->ucount[type]);
+		int dec = atomic_long_dec_if_positive(&iter->ucount[type]);
 		WARN_ON_ONCE(dec < 0);
 	}
 	put_ucounts(ucounts);
+}
+
+long get_rlimit_counter(struct user_namespace *ns, kuid_t uid, enum ucount_type type)
+{
+	long v;
+	struct ucounts *ucounts = get_ucounts(ns, uid);
+	if (!ucounts)
+		return LONG_MAX;
+	v = atomic_long_read(&ucounts->ucount[type]);
+	put_ucounts(ucounts);
+	return v;
+}
+
+struct ucounts *inc_rlimit_counter(struct user_namespace *ns, kuid_t uid,
+		enum ucount_type type)
+{
+	if (type < UCOUNT_MIN_RLIMIT || type > UCOUNT_MAX_RLIMIT)
+		return NULL;
+
+	return inc_ucount(ns, uid, type);
+}
+
+void dec_rlimit_counter(struct user_namespace *ns, kuid_t uid, enum ucount_type type)
+{
+	struct ucounts *ucounts;
+
+	if (type < UCOUNT_MIN_RLIMIT || type > UCOUNT_MAX_RLIMIT)
+		return;
+
+	ucounts = get_ucounts(ns, uid);
+
+	if (ucounts)
+		dec_ucount(ucounts, type);
 }
 
 static __init int user_namespace_sysctl_init(void)
