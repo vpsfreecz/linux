@@ -100,7 +100,6 @@ static DEFINE_SPINLOCK(uidhash_lock);
 /* root_user.__count is 1, for init task cred */
 struct user_struct root_user = {
 	.__count	= REFCOUNT_INIT(1),
-	.processes	= ATOMIC_INIT(1),
 	.sigpending	= ATOMIC_INIT(0),
 	.locked_shm     = 0,
 	.uid		= GLOBAL_ROOT_UID,
@@ -225,6 +224,8 @@ static int __init uid_cache_init(void)
 	spin_lock_irq(&uidhash_lock);
 	uid_hash_insert(&root_user, uidhashentry(GLOBAL_ROOT_UID));
 	spin_unlock_irq(&uidhash_lock);
+
+	inc_rlimit_counter(&init_user_ns, GLOBAL_ROOT_UID, UCOUNT_RLIMIT_NPROC);
 
 	return 0;
 }

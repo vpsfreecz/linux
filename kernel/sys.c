@@ -463,10 +463,13 @@ SYSCALL_DEFINE1(setgid, gid_t, gid)
 static int set_user(struct cred *new)
 {
 	struct user_struct *new_user;
+	int processes;
 
 	new_user = alloc_uid(new->uid);
 	if (!new_user)
 		return -EAGAIN;
+
+	processes = get_rlimit_counter(new->user_ns, new_user->uid, UCOUNT_RLIMIT_NPROC);
 
 	/*
 	 * We don't fail in case of NPROC limit excess here because too many
@@ -475,8 +478,7 @@ static int set_user(struct cred *new)
 	 * for programs doing set*uid()+execve() by harmlessly deferring the
 	 * failure to the execve() stage.
 	 */
-	if (atomic_read(&new_user->processes) >= rlimit(RLIMIT_NPROC) &&
-			new_user != INIT_USER)
+	if (processes >= rlimit(RLIMIT_NPROC) && new_user != INIT_USER)
 		current->flags |= PF_NPROC_EXCEEDED;
 	else
 		current->flags &= ~PF_NPROC_EXCEEDED;
