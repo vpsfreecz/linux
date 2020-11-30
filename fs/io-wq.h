@@ -107,6 +107,7 @@ typedef struct io_wq_work *(io_wq_work_fn)(struct io_wq_work *);
 
 struct io_wq_data {
 	struct user_struct *user;
+	const struct cred *creds;
 
 	io_wq_work_fn *do_work;
 	free_work_fn *free_work;

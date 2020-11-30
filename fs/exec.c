@@ -1996,10 +1996,18 @@ static int do_execveat_common(int fd, struct filename *filename,
 			      int flags)
 {
 	struct linux_binprm *bprm;
-	int retval;
+	int retval, processes;
 
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
+
+	if (current->flags & PF_NPROC_UNS_EXCEEDED) {
+		current->flags &= ~PF_NPROC_UNS_EXCEEDED;
+		retval = -EAGAIN;
+		goto out_ret;
+	}
+
+	processes = get_rlimit_counter(current_user_ns(), current_euid(), UCOUNT_RLIMIT_NPROC);
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
@@ -2007,8 +2015,7 @@ static int do_execveat_common(int fd, struct filename *filename,
 	 * don't check setuid() return code.  Here we additionally recheck
 	 * whether NPROC limit is still exceeded.
 	 */
-	if ((current->flags & PF_NPROC_EXCEEDED) &&
-	    atomic_read(&current_user()->processes) > rlimit(RLIMIT_NPROC)) {
+	if ((current->flags & PF_NPROC_EXCEEDED) && processes > rlimit(RLIMIT_NPROC)) {
 		retval = -EAGAIN;
 		goto out_ret;
 	}

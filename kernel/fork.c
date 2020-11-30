@@ -1845,7 +1845,7 @@ static __latent_entropy struct task_struct *copy_process(
 					int node,
 					struct kernel_clone_args *args)
 {
-	int pidfd = -1, retval;
+	int pidfd = -1, retval, processes;
 	struct task_struct *p;
 	struct multiprocess_signals delayed;
 	struct file *pidfile = NULL;
@@ -1960,8 +1960,13 @@ static __latent_entropy struct task_struct *copy_process(
 	DEBUG_LOCKS_WARN_ON(!p->softirqs_enabled);
 #endif
 	retval = -EAGAIN;
-	if (atomic_read(&p->real_cred->user->processes) >=
-			task_rlimit(p, RLIMIT_NPROC)) {
+	if (current->flags & PF_NPROC_UNS_EXCEEDED) {
+		current->flags &= ~PF_NPROC_UNS_EXCEEDED;
+		goto bad_fork_free;
+	}
+	processes = get_rlimit_counter(task_cred_xxx(p, user_ns), task_euid(p),
+			UCOUNT_RLIMIT_NPROC);
+	if (processes >= task_rlimit(p, RLIMIT_NPROC)) {
 		if (p->real_cred->user != INIT_USER &&
 		    !capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN))
 			goto bad_fork_free;
@@ -2360,7 +2365,7 @@ bad_fork_cleanup_threadgroup_lock:
 #endif
 	delayacct_tsk_free(p);
 bad_fork_cleanup_count:
-	atomic_dec(&p->cred->user->processes);
+	dec_rlimit_counter(task_cred_xxx(p, user_ns), task_euid(p), UCOUNT_RLIMIT_NPROC);
 	exit_creds(p);
 bad_fork_free:
 	p->state = TASK_DEAD;
