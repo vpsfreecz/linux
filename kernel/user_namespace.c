@@ -123,6 +123,7 @@ int create_user_ns(struct cred *new)
 	for (i = 0; i < UCOUNT_COUNTS; i++) {
 		ns->ucount_max[i] = INT_MAX;
 	}
+	ns->ucount_max[UCOUNT_RLIMIT_NPROC] = rlimit(RLIMIT_NPROC);
 	ns->ucounts = ucounts;
 	ns->syslog_ns = get_syslog_ns(parent_ns->syslog_ns);
 
