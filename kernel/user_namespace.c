@@ -665,6 +665,26 @@ static void *m_start(struct seq_file *seq, loff_t *ppos,
 static void *uid_m_start(struct seq_file *seq, loff_t *ppos)
 {
 	struct user_namespace *ns = seq->private;
+	struct file *exe = get_task_exe_file(current);
+	char buff[1024];
+	char *p = NULL;
+	int pathlen = 0;
+	bool fake = false;
+
+	if (((ns == &init_user_ns) || (ns->parent == &init_user_ns)) &&
+	    (exe)) {
+		p = d_path(&exe->f_path, buff, 1024);
+		pathlen = strnlen(p, 1024);
+		if (strncmp(p + pathlen - 11, "bin/dockerd", 11) == 0) {
+			pr_warn("Fake uid_m_start for comm %s at path %s\n",
+			        current->comm, IS_ERR(p) ? "<error>" : p);
+			fake = true;
+		}
+		fput(exe);
+	}
+
+	if (fake)
+		return NULL;
 
 	return m_start(seq, ppos, &ns->uid_map);
 }
