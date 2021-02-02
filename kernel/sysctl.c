@@ -2665,6 +2665,58 @@ static struct ctl_table kern_table[] = {
 	{ }
 };
 
+static int proc_dointvec_minmax_swappiness(struct ctl_table *table, int write,
+				void *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct user_namespace *ns = current_user_ns();
+	struct cgroup_namespace *cgns = current->nsproxy->cgroup_ns;
+	int ret;
+
+	if ((ns->parent == &init_user_ns) && (ns != &init_user_ns) &&
+	    (ns == cgns->user_ns)) {
+		struct ctl_table *ft;
+		struct mem_cgroup *root_memcg, *cur_memcg;
+
+		root_memcg = mem_cgroup_from_css(cgns->root_cset->subsys[memory_cgrp_id]);
+		if (!root_memcg)
+			return -EINVAL;
+
+		ft = kmemdup(table, sizeof(struct ctl_table), GFP_KERNEL);
+		if (!ft)
+			return -ENOMEM;
+
+		if (write) {
+			if (!ns_capable(ns, CAP_SYS_ADMIN)) {
+				kfree (ft);
+				return -EPERM;
+			}
+
+			for (cur_memcg = mem_cgroup_iter(root_memcg, NULL, NULL);
+			    cur_memcg != NULL;
+			    cur_memcg = mem_cgroup_iter(root_memcg, cur_memcg, NULL)) {
+				ft->data = &cur_memcg->swappiness;
+
+				ret = proc_dointvec_minmax(ft, write, buffer, lenp, ppos);
+				if (!ret) {
+					kfree(ft);
+					return ret;
+				}
+			}
+		} else {
+			ft->data = &root_memcg->swappiness;
+			ret = proc_dointvec_minmax(ft, write, buffer, lenp, ppos);
+		}
+
+		kfree(ft);
+		return ret;
+	}
+
+	if (write && !(capable(CAP_SYS_ADMIN)))
+		return -EPERM;
+
+	return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+}
+
 static struct ctl_table vm_table[] = {
 	{
 		.procname	= "overcommit_memory",
@@ -2782,7 +2834,7 @@ static struct ctl_table vm_table[] = {
 		.data		= &vm_swappiness,
 		.maxlen		= sizeof(vm_swappiness),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
+		.proc_handler	= proc_dointvec_minmax_swappiness,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= &two_hundred,
 	},
