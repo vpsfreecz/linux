@@ -14,11 +14,15 @@
 
 extern raw_spinlock_t logbuf_lock;
 
-__printf(4, 0)
-int vprintk_store(int facility, int level,
+struct syslog_namespace;
+
+__printf(5, 0)
+int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 		  const struct dev_printk_info *dev_info,
 		  const char *fmt, va_list args);
 
+__printf(2, 0) int vprintk_ns(struct syslog_namespace *ns,
+		  const char *fmt, va_list args);
 __printf(1, 0) int vprintk_default(const char *fmt, va_list args);
 __printf(1, 0) int vprintk_deferred(const char *fmt, va_list args);
 __printf(1, 0) int vprintk_func(const char *fmt, va_list args);
