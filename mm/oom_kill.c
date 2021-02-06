@@ -452,6 +452,13 @@ static void dump_tasks(struct oom_control *oc)
 		rcu_read_lock();
 		for_each_process(p)
 			dump_task(p, oc);
+			pr_info("[%7d] %5d %5d %8lu %8lu %8ld %8lu         %5hd %s\n",
+				pid_nr_ns(task_pid(p), task_active_pid_ns(p)),
+				from_kuid(&init_user_ns, task_uid(p)),
+				p->tgid, p->mm->total_vm, get_mm_rss(p->mm),
+				mm_pgtables_bytes(p->mm),
+				get_mm_counter(p->mm, MM_SWAPENTS),
+				p->signal->oom_score_adj, p->comm);
 		rcu_read_unlock();
 	}
 }

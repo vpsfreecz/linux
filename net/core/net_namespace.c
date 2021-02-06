@@ -25,6 +25,7 @@
 #include <net/netlink.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
+#include <linux/syslog_namespace.h>
 
 /*
  *	Our network namespace constructor/destructor lists
@@ -44,12 +45,15 @@ EXPORT_SYMBOL_GPL(net_rwsem);
 static struct key_tag init_net_key_domain = { .usage = REFCOUNT_INIT(1) };
 #endif
 
+extern struct nsproxy init_nsproxy;
+
 struct net init_net = {
 	.ns.count	= REFCOUNT_INIT(1),
 	.dev_base_head	= LIST_HEAD_INIT(init_net.dev_base_head),
 #ifdef CONFIG_KEYS
 	.key_domain	= &init_net_key_domain,
 #endif
+	.user_ns	= &init_user_ns,
 };
 EXPORT_SYMBOL(init_net);
 
