@@ -28,6 +28,7 @@
 #include <linux/page_counter.h>
 #include <linux/memcontrol.h>
 #include <linux/cgroup.h>
+#include <linux/cgroup_cglimit.h>
 #include <linux/pagewalk.h>
 #include <linux/sched/mm.h>
 #include <linux/shmem_fs.h>
@@ -5184,7 +5185,7 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
 		return ERR_PTR(error);
 
 	memcg->id.id = idr_alloc(&mem_cgroup_idr, NULL,
-				 1, MEM_CGROUP_ID_MAX + 1, GFP_KERNEL);
+				 1, MEM_CGROUP_ID_MAX, GFP_KERNEL);
 	if (memcg->id.id < 0) {
 		error = memcg->id.id;
 		goto fail;
@@ -5238,7 +5239,28 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 {
 	struct mem_cgroup *parent = mem_cgroup_from_css(parent_css);
 	struct mem_cgroup *memcg, *old_memcg;
+	struct cgroup_subsys_state *curr_cglimit_css;
 
+#ifdef CONFIG_CGROUP_CGLIMIT
+	if (cgroup_subsys_on_dfl(cglimit_cgrp_subsys))
+		goto skip;
+
+	curr_cglimit_css = task_css(current, cglimit_cgrp_id);
+
+	if (!curr_cglimit_css)
+		goto skip;
+
+	css_get(curr_cglimit_css);
+
+	if (!cglimit_try_charge(curr_cglimit_css, 1, CGLIMIT_MEMCG)) {
+		css_put(curr_cglimit_css);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	memcg->css.parent_cglimit_css = curr_cglimit_css;
+
+skip:
+#endif
 	old_memcg = set_active_memcg(parent);
 	memcg = mem_cgroup_alloc();
 	set_active_memcg(old_memcg);
@@ -5350,6 +5372,15 @@ static void mem_cgroup_css_free(struct cgroup_subsys_state *css)
 	for (i = 0; i < MEMCG_CGWB_FRN_CNT; i++)
 		wb_wait_for_completion(&memcg->cgwb_frn[i].done);
 #endif
+
+#ifdef CONFIG_CGROUP_CGLIMIT
+	if (!cgroup_subsys_on_dfl(cglimit_cgrp_subsys)) {
+		if (css->parent_cglimit_css)
+			css_put(css->parent_cglimit_css);
+		cglimit_uncharge(css->parent_cglimit_css, 1, CGLIMIT_MEMCG);
+	}
+#endif
+
 	if (cgroup_subsys_on_dfl(memory_cgrp_subsys) && !cgroup_memory_nosocket)
 		static_branch_dec(&memcg_sockets_enabled_key);
 
