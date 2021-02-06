@@ -18,6 +18,7 @@
 #include <linux/interrupt.h>
 #include <linux/export.h>
 #include <linux/user_namespace.h>
+#include <linux/syslog_namespace.h>
 #include <linux/proc_ns.h>
 
 /*
@@ -55,6 +56,7 @@ struct user_namespace init_user_ns = {
 			},
 		},
 	},
+	.syslog_ns = &init_syslog_ns,
 	.count = ATOMIC_INIT(3),
 	.owner = GLOBAL_ROOT_UID,
 	.group = GLOBAL_ROOT_GID,
