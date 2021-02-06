@@ -1042,6 +1042,11 @@ config CGROUP_RDMA
 	  Attaching processes with active RDMA resources to the cgroup
 	  hierarchy is allowed even if can cross the hierarchy's limit.
 
+config CGROUP_CGLIMIT
+	bool "CGLimit controller"
+	help
+	  Provides some shit to debug for snajpa
+
 config CGROUP_FREEZER
 	bool "Freezer controller"
 	help
