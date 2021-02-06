@@ -9,6 +9,7 @@
 #include <linux/workqueue.h>
 #include <linux/rwsem.h>
 #include <linux/sysctl.h>
+#include <linux/syslog_namespace.h>
 #include <linux/err.h>
 #include <linux/xarray.h>
 
@@ -47,6 +48,7 @@ enum ucount_type {
 	UCOUNT_MNT_NAMESPACES,
 	UCOUNT_CGROUP_NAMESPACES,
 	UCOUNT_TIME_NAMESPACES,
+	UCOUNT_SYSLOG_NAMESPACES,
 #ifdef CONFIG_INOTIFY_USER
 	UCOUNT_INOTIFY_INSTANCES,
 	UCOUNT_INOTIFY_WATCHES,
@@ -91,6 +93,7 @@ struct user_namespace {
 	struct rw_semaphore	keyring_sem;
 #endif
 
+	struct syslog_namespace *syslog_ns;
 	/* Register of per-UID persistent keyrings for this namespace */
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	struct key		*persistent_keyring_register;
