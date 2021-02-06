@@ -1044,6 +1044,11 @@ config CGROUP_DRM
 	help
 	  Provides accounting and enforcement of resources in the DRM subsystem.
 
+config CGROUP_CGLIMIT
+	bool "CGLimit controller"
+	help
+	  Provides some shit to debug for snajpa
+
 config CGROUP_FREEZER
 	bool "Freezer controller"
 	help

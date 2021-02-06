@@ -65,6 +65,10 @@ SUBSYS(rdma)
 SUBSYS(drm)
 #endif
 
+#if IS_ENABLED(CONFIG_CGROUP_CGLIMIT)
+SUBSYS(cglimit)
+#endif
+
 /*
  * The following subsystems are not supported on the default hierarchy.
  */
