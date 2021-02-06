@@ -58,6 +58,7 @@
 #include <linux/sched/cputime.h>
 #include <linux/psi.h>
 #include <net/sock.h>
+#include <linux/cgroup_cglimit.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/cgroup.h>
@@ -5023,6 +5024,9 @@ static void init_and_link_css(struct cgroup_subsys_state *css,
 	css->cgroup = cgrp;
 	css->ss = ss;
 	css->id = -1;
+#ifdef CONFIG_CGROUP_CGLIMIT
+	css->parent_cglimit_css = 0;
+#endif
 	INIT_LIST_HEAD(&css->sibling);
 	INIT_LIST_HEAD(&css->children);
 	INIT_LIST_HEAD(&css->rstat_css_node);
@@ -5094,7 +5098,7 @@ static struct cgroup_subsys_state *css_create(struct cgroup *cgrp,
 {
 	struct cgroup *parent = cgroup_parent(cgrp);
 	struct cgroup_subsys_state *parent_css = cgroup_css(parent, ss);
-	struct cgroup_subsys_state *css;
+	struct cgroup_subsys_state *css, *curr_cglimit_css;
 	int err;
 
 	lockdep_assert_held(&cgroup_mutex);
@@ -5120,6 +5124,28 @@ static struct cgroup_subsys_state *css_create(struct cgroup *cgrp,
 	list_add_tail_rcu(&css->sibling, &parent_css->children);
 	cgroup_idr_replace(&ss->css_idr, css, css->id);
 
+#ifdef CONFIG_CGROUP_CGLIMIT
+	if (!current)
+		goto online;
+	if (cgroup_subsys_on_dfl(cglimit_cgrp_subsys))
+		goto online;
+
+	curr_cglimit_css = task_css(current, cglimit_cgrp_id);
+		
+	if (!curr_cglimit_css)
+		goto online;
+
+	css_get(curr_cglimit_css);
+
+	if (!cglimit_try_charge(curr_cglimit_css, 1, CGLIMIT_CG)) {
+		err = -ENOMEM;
+		goto err_list_del;
+	}
+
+	css->parent_cglimit_css = curr_cglimit_css;
+
+online:
+#endif
 	err = online_css(css);
 	if (err)
 		goto err_list_del;
@@ -5388,6 +5414,14 @@ static void kill_css(struct cgroup_subsys_state *css)
 
 	if (css->flags & CSS_DYING)
 		return;
+
+#ifdef CONFIG_CGROUP_CGLIMIT
+	if (!cgroup_subsys_on_dfl(cglimit_cgrp_subsys)) {
+		if (css->parent_cglimit_css)
+			css_put(css->parent_cglimit_css);
+		cglimit_uncharge(css->parent_cglimit_css, 1, CGLIMIT_CG);
+	}
+#endif
 
 	css->flags |= CSS_DYING;
 
