@@ -899,6 +899,66 @@ static int proc_dointvec_minmax_sysadmin(struct ctl_table *table, int write,
 }
 #endif
 
+static int proc_dointvec_minmax_swappiness(struct ctl_table *table, int write,
+				void *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table *vtable;
+	struct user_namespace *ns = current_user_ns();
+	struct cgroup_namespace *cgns = current->nsproxy->cgroup_ns;
+	struct mem_cgroup *ns_root_memcg;
+	int ret = 0;
+	int *swappiness;
+	bool need_free = false;
+
+	ns_root_memcg = mem_cgroup_from_css(cgns->root_cset->subsys[memory_cgrp_id]);
+
+	if (write && !ns_capable(cgns->user_ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	/*
+	 * Virtualize swappiness if we're not in init namespaces;
+	 * use the cgroup namespace's root memory cgroup
+	 * if admin in current cgroup namespace, or use current memory
+	 * cgroup swappiness for read only access.
+	 */
+	if ((ns == &init_user_ns) &&
+	    (cgns == &init_cgroup_ns)) {
+		swappiness = &vm_swappiness;
+		vtable = table;
+	} else {
+		vtable = kmemdup(table, sizeof(struct ctl_table), GFP_KERNEL);
+		if (!vtable)
+			return -ENOMEM;
+		need_free = true;
+
+		if (ns_capable(cgns->user_ns, CAP_SYS_ADMIN))
+			swappiness = &ns_root_memcg->swappiness;
+		else
+			swappiness = &get_mem_cgroup_from_mm(current->mm)->swappiness;
+		vtable->data = swappiness;
+	}
+
+	ret = proc_dointvec_minmax(vtable, write, buffer, lenp, ppos);
+	if (ret)
+		goto out;
+
+	/*
+	 * Propagate new value to all memcgs in this cgroup namespace.
+	 */
+	if (write) {
+		struct mem_cgroup *tmp;
+		for (tmp = mem_cgroup_iter(ns_root_memcg, NULL, NULL);
+		     tmp != NULL;
+		     tmp = mem_cgroup_iter(ns_root_memcg, tmp, NULL)) {
+			tmp->swappiness = *swappiness;
+		}
+	}
+out:
+	if (need_free)
+		kfree(vtable);
+	return ret;
+}
+
 /**
  * struct do_proc_dointvec_minmax_conv_param - proc_dointvec_minmax() range checking structure
  * @min: pointer to minimum allowable value
@@ -2792,8 +2852,8 @@ static struct ctl_table vm_table[] = {
 		.procname	= "swappiness",
 		.data		= &vm_swappiness,
 		.maxlen		= sizeof(vm_swappiness),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
+		.mode		= 0666,
+		.proc_handler	= proc_dointvec_minmax_swappiness,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= &two_hundred,
 	},
