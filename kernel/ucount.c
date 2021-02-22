@@ -83,6 +83,7 @@ static struct ctl_table user_table[] = {
 #endif
 	{ },
 	{ },
+	{ },
 	{ }
 };
 #endif /* CONFIG_SYSCTL */
