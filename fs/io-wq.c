@@ -841,6 +841,7 @@ static bool io_wq_can_queue(struct io_wqe *wqe, struct io_wqe_acct *acct,
 			    struct io_wq_work *work)
 {
 	bool free_worker;
+	struct user_namespace *ns = current_user_ns();
 
 	if (!(work->flags & IO_WQ_WORK_UNBOUND))
 		return true;
@@ -853,8 +854,11 @@ static bool io_wq_can_queue(struct io_wqe *wqe, struct io_wqe_acct *acct,
 	if (free_worker)
 		return true;
 
-	if (atomic_read(&wqe->wq->user->processes) >= acct->max_workers &&
-	    !(capable(CAP_SYS_RESOURCE) || capable(CAP_SYS_ADMIN)))
+	if ((ns != &init_user_ns) && (ns->parent != &init_user_ns))
+		ns = &init_user_ns;
+
+	if (is_ucounts_overlimit(wqe->wq->cred->ucounts, UCOUNT_RLIMIT_NPROC, acct->max_workers) &&
+	    !ns_capable(ns, CAP_SYS_RESOURCE) && !ns_capable(ns, CAP_SYS_ADMIN))
 		return false;
 
 	return true;
