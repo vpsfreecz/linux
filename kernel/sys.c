@@ -1547,6 +1547,7 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
 {
 	struct rlimit *rlim;
 	int retval = 0;
+	struct user_namespace *ns = current_user_ns();
 
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
@@ -1568,10 +1569,10 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
 	rlim = tsk->signal->rlim + resource;
 	task_lock(tsk->group_leader);
 	if (new_rlim) {
-		/* Keep the capable check against init_user_ns until
-		   cgroups can contain all limits */
+		if ((ns != &init_user_ns) && (ns->parent != &init_user_ns))
+			ns = &init_user_ns;
 		if (new_rlim->rlim_max > rlim->rlim_max &&
-				!capable(CAP_SYS_RESOURCE))
+				!ns_capable(ns, CAP_SYS_RESOURCE))
 			retval = -EPERM;
 		if (!retval)
 			retval = security_task_setrlimit(tsk, resource, new_rlim);
