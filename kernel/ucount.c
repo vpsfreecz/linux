@@ -7,6 +7,7 @@
 #include <linux/hash.h>
 #include <linux/kmemleak.h>
 #include <linux/user_namespace.h>
+#include <linux/security.h>
 
 struct ucounts init_ucounts = {
 	.ns    = &init_user_ns,
@@ -80,6 +81,7 @@ static struct ctl_table user_table[] = {
 	UCOUNT_ENTRY("max_inotify_instances"),
 	UCOUNT_ENTRY("max_inotify_watches"),
 #endif
+	{ },
 	{ }
 };
 #endif /* CONFIG_SYSCTL */
@@ -207,6 +209,19 @@ static inline bool atomic_long_inc_below(atomic_long_t *v, int u)
 	}
 }
 
+static inline long atomic_long_dec_value(atomic_long_t *v, long n)
+{
+	long c, old;
+	c = atomic_long_read(v);
+	for (;;) {
+		old = atomic_long_cmpxchg(v, c, c - n);
+		if (likely(old == c))
+			return c;
+		c = old;
+	}
+	return c;
+}
+
 struct ucounts *inc_ucount(struct user_namespace *ns, kuid_t uid,
 			   enum ucount_type type)
 {
@@ -240,6 +255,51 @@ void dec_ucount(struct ucounts *ucounts, enum ucount_type type)
 	put_ucounts(ucounts);
 }
 
+bool inc_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v)
+{
+	struct ucounts *iter;
+	bool overlimit = false;
+
+	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
+		long max = READ_ONCE(iter->ns->ucount_max[type]);
+		if (atomic_long_add_return(v, &iter->ucount[type]) > max)
+			overlimit = true;
+	}
+
+	return overlimit;
+}
+
+bool inc_rlimit_ucounts_and_test(struct ucounts *ucounts, enum ucount_type type,
+		long v, long max)
+{
+	bool overlimit = inc_rlimit_ucounts(ucounts, type, v);
+	if (!overlimit && get_ucounts_value(ucounts, type) > max)
+		overlimit = true;
+	return overlimit;
+}
+
+void dec_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v)
+{
+	struct ucounts *iter;
+	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
+		long dec = atomic_long_dec_value(&iter->ucount[type], v);
+		WARN_ON_ONCE(dec < 0);
+	}
+}
+
+bool is_ucounts_overlimit(struct ucounts *ucounts, enum ucount_type type, unsigned long max)
+{
+	struct ucounts *iter;
+	if (get_ucounts_value(ucounts, type) > max)
+		return true;
+	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
+		max = READ_ONCE(iter->ns->ucount_max[type]);
+		if (get_ucounts_value(iter, type) > max)
+			return true;
+	}
+	return false;
+}
+
 static __init int user_namespace_sysctl_init(void)
 {
 #ifdef CONFIG_SYSCTL
@@ -256,6 +316,7 @@ static __init int user_namespace_sysctl_init(void)
 	BUG_ON(!setup_userns_sysctls(&init_user_ns));
 #endif
 	hlist_add_ucounts(&init_ucounts);
+	inc_rlimit_ucounts(&init_ucounts, UCOUNT_RLIMIT_NPROC, 1);
 	return 0;
 }
 subsys_initcall(user_namespace_sysctl_init);
