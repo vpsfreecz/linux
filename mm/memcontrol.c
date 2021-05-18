@@ -1629,6 +1629,32 @@ static char *memory_stat_format(struct mem_cgroup *memcg)
 	return s.buffer;
 }
 
+/**
+ * mem_cgroup_print_dump_stack_context: Print OOM information relevant to
+ * memory controller.
+ * @memcg: The memory cgroup that went over limit
+ * @p: Task that is going to be killed
+ *
+ * NOTE: @memcg and @p's mem_cgroup can be different when hierarchy is
+ * enabled
+ */
+void mem_cgroup_print_dump_stack_context(const char *log_lvl,
+					 struct task_struct *p)
+{
+	struct mem_cgroup *memcg;
+
+	rcu_read_lock();
+	memcg = mem_cgroup_from_task(p);
+
+	if (memcg) {
+		printk("%sIn memory cgroup ", log_lvl);
+		pr_cont_cgroup_path(memcg->css.cgroup);
+		pr_cont("\n");
+	}
+
+	rcu_read_unlock();
+}
+
 #define K(x) ((x) << (PAGE_SHIFT-10))
 /**
  * mem_cgroup_print_oom_context: Print OOM information relevant to
