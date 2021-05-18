@@ -14,6 +14,7 @@
 #include <linux/kexec.h>
 #include <linux/utsname.h>
 #include <linux/stop_machine.h>
+#include <linux/memcontrol.h>
 
 static char dump_stack_arch_desc_str[128];
 
