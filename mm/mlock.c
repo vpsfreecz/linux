@@ -850,7 +850,7 @@ static DEFINE_SPINLOCK(shmlock_user_lock);
 int user_shm_lock(size_t size, struct ucounts *ucounts)
 {
 	unsigned long lock_limit, locked;
-	bool overlimit;
+	long memlock;
 	int allowed = 0;
 
 	locked = (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
@@ -859,10 +859,9 @@ int user_shm_lock(size_t size, struct ucounts *ucounts)
 		allowed = 1;
 	lock_limit >>= PAGE_SHIFT;
 	spin_lock(&shmlock_user_lock);
-	overlimit = inc_rlimit_ucounts_and_test(ucounts, UCOUNT_RLIMIT_MEMLOCK,
-			locked, lock_limit);
+	memlock = inc_rlimit_ucounts(ucounts, UCOUNT_RLIMIT_MEMLOCK, locked);
 
-	if (!allowed && overlimit && !capable(CAP_IPC_LOCK)) {
+	if (!allowed && (memlock == LONG_MAX || memlock > lock_limit) && !capable(CAP_IPC_LOCK)) {
 		dec_rlimit_ucounts(ucounts, UCOUNT_RLIMIT_MEMLOCK, locked);
 		goto out;
 	}

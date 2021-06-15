@@ -372,12 +372,11 @@ static struct inode *mqueue_get_inode(struct super_block *sb,
 		mq_bytes += mq_treesize;
 		info->ucounts = get_ucounts(current_ucounts());
 		if (info->ucounts) {
-			bool overlimit;
+			long msgqueue;
 
 			spin_lock(&mq_lock);
-			overlimit = inc_rlimit_ucounts_and_test(info->ucounts, UCOUNT_RLIMIT_MSGQUEUE,
-					mq_bytes, rlimit(RLIMIT_MSGQUEUE));
-			if (overlimit) {
+			msgqueue = inc_rlimit_ucounts(info->ucounts, UCOUNT_RLIMIT_MSGQUEUE, mq_bytes);
+			if (msgqueue == LONG_MAX || msgqueue > rlimit(RLIMIT_MSGQUEUE)) {
 				dec_rlimit_ucounts(info->ucounts, UCOUNT_RLIMIT_MSGQUEUE, mq_bytes);
 				spin_unlock(&mq_lock);
 				put_ucounts(info->ucounts);
