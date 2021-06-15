@@ -122,9 +122,8 @@ static inline long get_ucounts_value(struct ucounts *ucounts, enum ucount_type t
 	return atomic_long_read(&ucounts->ucount[type]);
 }
 
-bool inc_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v);
-bool inc_rlimit_ucounts_and_test(struct ucounts *ucounts, enum ucount_type type, long v, long max);
-void dec_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v);
+long inc_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v);
+bool dec_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v);
 bool is_ucounts_overlimit(struct ucounts *ucounts, enum ucount_type type, unsigned long max);
 
 #ifdef CONFIG_USER_NS

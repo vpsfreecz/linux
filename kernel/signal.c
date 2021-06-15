@@ -412,43 +412,49 @@ void task_join_group_stop(struct task_struct *task)
 static struct sigqueue *
 __sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimit)
 {
-	struct sigqueue *q = kmem_cache_alloc(sigqueue_cachep, flags);
+	struct sigqueue *q = NULL;
+	struct ucounts *ucounts = NULL;
+	long sigpending;
 
-	if (likely(q != NULL)) {
-		bool overlimit;
+	/*
+	 * Protect access to @t credentials. This can go away when all
+	 * callers hold rcu read lock.
+	 *
+	 * NOTE! A pending signal will hold on to the user refcount,
+	 * and we get/put the refcount only when the sigpending count
+	 * changes from/to zero.
+	 */
+	rcu_read_lock();
+	ucounts = task_ucounts(t);
+	sigpending = inc_rlimit_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING, 1);
+	if (sigpending == 1)
+		ucounts = get_ucounts(ucounts);
+	rcu_read_unlock();
 
-		INIT_LIST_HEAD(&q->list);
-		q->flags = 0;
-
-		/*
-		 * Protect access to @t credentials. This can go away when all
-		 * callers hold rcu read lock.
-		 */
-		rcu_read_lock();
-		q->ucounts = get_ucounts(task_ucounts(t));
-		if (q->ucounts) {
-			overlimit = inc_rlimit_ucounts_and_test(q->ucounts, UCOUNT_RLIMIT_SIGPENDING,
-					1, task_rlimit(t, RLIMIT_SIGPENDING));
-
-			if (override_rlimit || likely(!overlimit)) {
-				rcu_read_unlock();
-				return q;
-			}
-		}
-		rcu_read_unlock();
+	if (override_rlimit || (sigpending < LONG_MAX && sigpending <= task_rlimit(t, RLIMIT_SIGPENDING))) {
+		q = kmem_cache_alloc(sigqueue_cachep, flags);
+	} else {
+		print_dropped_signal(sig);
 	}
 
-	print_dropped_signal(sig);
-	return NULL;
+	if (unlikely(q == NULL)) {
+		if (ucounts && dec_rlimit_ucounts(ucounts, UCOUNT_RLIMIT_SIGPENDING, 1))
+			put_ucounts(ucounts);
+	} else {
+		INIT_LIST_HEAD(&q->list);
+		q->flags = 0;
+		q->ucounts = ucounts;
+	}
+	return q;
 }
 
 static void __sigqueue_free(struct sigqueue *q)
 {
 	if (q->flags & SIGQUEUE_PREALLOC)
 		return;
-	if (q->ucounts) {
-		dec_rlimit_ucounts(q->ucounts, UCOUNT_RLIMIT_SIGPENDING, 1);
+	if (q->ucounts && dec_rlimit_ucounts(q->ucounts, UCOUNT_RLIMIT_SIGPENDING, 1)) {
 		put_ucounts(q->ucounts);
+		q->ucounts = NULL;
 	}
 	kmem_cache_free(sigqueue_cachep, q);
 }
