@@ -7,7 +7,6 @@
 #include <linux/hash.h>
 #include <linux/kmemleak.h>
 #include <linux/user_namespace.h>
-#include <linux/security.h>
 
 struct ucounts init_ucounts = {
 	.ns    = &init_user_ns,
@@ -147,7 +146,7 @@ static void hlist_add_ucounts(struct ucounts *ucounts)
 struct ucounts *get_ucounts(struct ucounts *ucounts)
 {
 	if (ucounts && atomic_add_negative(1, &ucounts->count)) {
-		atomic_dec(&ucounts->count);
+		put_ucounts(ucounts);
 		ucounts = NULL;
 	}
 	return ucounts;
@@ -167,7 +166,7 @@ struct ucounts *alloc_ucounts(struct user_namespace *ns, kuid_t uid)
 		if (!new)
 			return NULL;
 
-		new->ns = ns;
+		new->ns = get_user_ns(ns);
 		new->uid = uid;
 		atomic_set(&new->count, 1);
 
@@ -191,6 +190,7 @@ void put_ucounts(struct ucounts *ucounts)
 	unsigned long flags;
 
 	if (atomic_dec_and_test(&ucounts->count)) {
+		put_user_ns(ucounts->ns);
 		spin_lock_irqsave(&ucounts_lock, flags);
 		hlist_del_init(&ucounts->node);
 		spin_unlock_irqrestore(&ucounts_lock, flags);
@@ -210,19 +210,6 @@ static inline bool atomic_long_inc_below(atomic_long_t *v, int u)
 			return true;
 		c = old;
 	}
-}
-
-static inline long atomic_long_dec_value(atomic_long_t *v, long n)
-{
-	long c, old;
-	c = atomic_long_read(v);
-	for (;;) {
-		old = atomic_long_cmpxchg(v, c, c - n);
-		if (likely(old == c))
-			return c;
-		c = old;
-	}
-	return c;
 }
 
 struct ucounts *inc_ucount(struct user_namespace *ns, kuid_t uid,
@@ -258,36 +245,33 @@ void dec_ucount(struct ucounts *ucounts, enum ucount_type type)
 	put_ucounts(ucounts);
 }
 
-bool inc_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v)
+long inc_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v)
 {
 	struct ucounts *iter;
-	bool overlimit = false;
+	long ret = 0;
 
 	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
 		long max = READ_ONCE(iter->ns->ucount_max[type]);
-		if (atomic_long_add_return(v, &iter->ucount[type]) > max)
-			overlimit = true;
+		long new = atomic_long_add_return(v, &iter->ucount[type]);
+		if (new < 0 || new > max)
+			ret = LONG_MAX;
+		else if (iter == ucounts)
+			ret = new;
 	}
-
-	return overlimit;
+	return ret;
 }
 
-bool inc_rlimit_ucounts_and_test(struct ucounts *ucounts, enum ucount_type type,
-		long v, long max)
-{
-	bool overlimit = inc_rlimit_ucounts(ucounts, type, v);
-	if (!overlimit && get_ucounts_value(ucounts, type) > max)
-		overlimit = true;
-	return overlimit;
-}
-
-void dec_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v)
+bool dec_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v)
 {
 	struct ucounts *iter;
-	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
-		long dec = atomic_long_dec_value(&iter->ucount[type], v);
+	long new = -1; /* Silence compiler warning */
+	for (iter = ucounts; iter; iter = iter->ns->ucounts) { //SHIT
+		long dec = atomic_long_add_return(-v, &iter->ucount[type]);
 		WARN_ON_ONCE(dec < 0);
+		if (iter == ucounts)
+			new = dec;
 	}
+	return (new == 0);
 }
 
 bool is_ucounts_overlimit(struct ucounts *ucounts, enum ucount_type type, unsigned long max)
