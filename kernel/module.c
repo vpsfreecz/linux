@@ -4705,6 +4705,7 @@ void print_modules(void)
 	struct module *mod;
 	char buf[MODULE_FLAGS_BUF_SIZE];
 
+	return;
 	printk(KERN_DEFAULT "Modules linked in:");
 	/* Most callers should already have preempt disabled, but make sure */
 	preempt_disable();
