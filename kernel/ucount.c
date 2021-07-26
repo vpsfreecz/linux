@@ -166,7 +166,7 @@ struct ucounts *alloc_ucounts(struct user_namespace *ns, kuid_t uid)
 		if (!new)
 			return NULL;
 
-		new->ns = ns;
+		new->ns = get_user_ns(ns);
 		new->uid = uid;
 		atomic_set(&new->count, 1);
 
@@ -190,6 +190,7 @@ void put_ucounts(struct ucounts *ucounts)
 	unsigned long flags;
 
 	if (atomic_dec_and_test(&ucounts->count)) {
+		put_user_ns(ucounts->ns);
 		spin_lock_irqsave(&ucounts_lock, flags);
 		hlist_del_init(&ucounts->node);
 		spin_unlock_irqrestore(&ucounts_lock, flags);
@@ -264,7 +265,7 @@ bool dec_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v)
 {
 	struct ucounts *iter;
 	long new = -1; /* Silence compiler warning */
-	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
+	for (iter = ucounts; iter; iter = iter->ns->ucounts) { //SHIT
 		long dec = atomic_long_add_return(-v, &iter->ucount[type]);
 		WARN_ON_ONCE(dec < 0);
 		if (iter == ucounts)
