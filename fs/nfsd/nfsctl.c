@@ -1463,6 +1463,7 @@ static struct file_system_type nfsd_fs_type = {
 	.name		= "nfsd",
 	.init_fs_context = nfsd_init_fs_context,
 	.kill_sb	= nfsd_umount,
+	.fs_flags	= FS_USERNS_MOUNT,
 };
 MODULE_ALIAS_FS("nfsd");
 
