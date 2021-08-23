@@ -821,10 +821,10 @@ void __init fork_init(void)
 	for (i = 0; i < MAX_PER_NAMESPACE_UCOUNTS; i++)
 		init_user_ns.ucount_max[i] = max_threads/2;
 
-	init_user_ns.ucount_max[UCOUNT_RLIMIT_NPROC] = task_rlimit(&init_task, RLIMIT_NPROC);
-	init_user_ns.ucount_max[UCOUNT_RLIMIT_MSGQUEUE] = task_rlimit(&init_task, RLIMIT_MSGQUEUE);
-	init_user_ns.ucount_max[UCOUNT_RLIMIT_SIGPENDING] = task_rlimit(&init_task, RLIMIT_SIGPENDING);
-	init_user_ns.ucount_max[UCOUNT_RLIMIT_MEMLOCK] = task_rlimit(&init_task, RLIMIT_MEMLOCK);
+	init_user_ns.ucount_max[UCOUNT_RLIMIT_NPROC] = RLIM_INFINITY;
+	init_user_ns.ucount_max[UCOUNT_RLIMIT_MSGQUEUE] = RLIM_INFINITY;
+	init_user_ns.ucount_max[UCOUNT_RLIMIT_SIGPENDING] = RLIM_INFINITY;
+	init_user_ns.ucount_max[UCOUNT_RLIMIT_MEMLOCK] = RLIM_INFINITY;
 
 #ifdef CONFIG_VMAP_STACK
 	cpuhp_setup_state(CPUHP_BP_PREPARE_DYN, "fork:vm_stack_cache",
