@@ -7,8 +7,14 @@
 #include <linux/vmstat.h>
 #include <linux/atomic.h>
 #include <linux/memcontrol.h>
+#include <linux/user_namespace.h>
+#include <linux/xarray.h>
+#include <asm/page.h>
 
 struct user_namespace;
+
+extern int cfs_get_online_cpus(struct task_struct *p);
+extern int fake_cpumask(struct task_struct *p, struct cpumask *dstmask, const struct cpumask *srcmask);
 
 struct mem_cgroup *get_current_most_limited_memcg(void);
 

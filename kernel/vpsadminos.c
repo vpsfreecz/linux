@@ -7,6 +7,59 @@
 #include <linux/user_namespace.h>
 #include <linux/xarray.h>
 #include <asm/page.h>
+#include "sched/sched.h"
+
+int cfs_get_online_cpus(struct task_struct *p) {
+	struct task_group *tg;
+	long quota, period;
+	int cpus = 0;
+
+	tg = p->sched_task_group;
+tg_loop:
+	quota = tg_get_cfs_quota(tg);
+	period = tg_get_cfs_period(tg);
+
+	if (quota > 0 && period > 0) {
+		cpus = quota / period;
+
+		if ((quota % period) > 0)
+			cpus++;
+	} else if (tg->parent && (tg->parent != &root_task_group)) {
+		tg = tg->parent;
+		goto tg_loop;
+	}
+
+	return cpus;
+}
+
+int fake_cpumask(struct task_struct *p, struct cpumask *dstmask, const struct cpumask *srcmask)
+{
+	struct user_namespace *ns = current_user_ns();
+	int cpus = cfs_get_online_cpus(p);
+	int cpu, enabled = 0;
+
+	if (ns == &init_user_ns)
+		return 0;
+
+	
+	if (srcmask != NULL)
+		cpumask_copy(dstmask, srcmask);
+	//cpumask_clear(&ns->fake_cpumask);
+	//while (cpus--)
+	//	cpumask_set_cpu(cpus, &ns->fake_cpumask);
+	if (cpus > 0) {
+		for (cpu = nr_cpu_ids - 1; cpu >= 0; cpu--) {
+			if (cpumask_test_cpu(cpu, dstmask)) {
+				if (enabled == cpus)
+					cpumask_clear_cpu(cpu, dstmask);
+				else
+					enabled++;
+			}
+		}
+	}
+
+	return enabled;
+}
 
 struct mem_cgroup *get_current_most_limited_memcg(void)
 {

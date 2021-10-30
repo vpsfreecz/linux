@@ -2644,3 +2644,7 @@ static inline bool is_per_cpu_kthread(struct task_struct *p)
 
 void swake_up_all_locked(struct swait_queue_head *q);
 void __prepare_to_swait(struct swait_queue_head *q, struct swait_queue *wait);
+
+
+extern long tg_get_cfs_quota(struct task_group *tg);
+extern long tg_get_cfs_period(struct task_group *tg);

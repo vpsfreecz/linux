@@ -17,6 +17,7 @@
 #include <linux/kcov.h>
 #include <linux/scs.h>
 #include <linux/user_namespace.h>
+#include <linux/vpsadminos.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
@@ -6031,6 +6032,7 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
+	fake_cpumask(p, mask, mask);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 out_unlock:
@@ -7990,7 +7992,7 @@ static int tg_set_cfs_quota(struct task_group *tg, long cfs_quota_us)
 	return tg_set_cfs_bandwidth(tg, period, quota);
 }
 
-static long tg_get_cfs_quota(struct task_group *tg)
+long tg_get_cfs_quota(struct task_group *tg)
 {
 	u64 quota_us;
 
@@ -8016,7 +8018,7 @@ static int tg_set_cfs_period(struct task_group *tg, long cfs_period_us)
 	return tg_set_cfs_bandwidth(tg, period, quota);
 }
 
-static long tg_get_cfs_period(struct task_group *tg)
+long tg_get_cfs_period(struct task_group *tg)
 {
 	u64 cfs_period_us;
 
