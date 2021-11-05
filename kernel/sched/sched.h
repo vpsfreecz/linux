@@ -2645,6 +2645,13 @@ static inline bool is_per_cpu_kthread(struct task_struct *p)
 void swake_up_all_locked(struct swait_queue_head *q);
 void __prepare_to_swait(struct swait_queue_head *q, struct swait_queue *wait);
 
-
-extern long tg_get_cfs_quota(struct task_group *tg);
-extern long tg_get_cfs_period(struct task_group *tg);
+s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css, struct cftype *cft);
+u64 cpu_cfs_period_read_u64(struct cgroup_subsys_state *css, struct cftype *cft);
+u64 cpuacct_cpuusage_fake_set_timestamp(struct cgroup_subsys_state *css, u64 new);
+void cpuacct_cpuusage_fake_readout(struct cgroup_subsys_state *css, int cpu,
+				   u64 *user, u64 *system,
+				   u64 *user_old, u64 *system_old);
+void cpuacct_cpuusage_fake_readout_percpu(struct cgroup_subsys_state *css,
+					  int cpu, u64 *user, u64 *system);
+void cpuacct_cpuusage_fake_write(struct cgroup_subsys_state *css, int cpu,
+				 u64 user, u64 system);

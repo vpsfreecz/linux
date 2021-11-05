@@ -8028,7 +8028,7 @@ long tg_get_cfs_period(struct task_group *tg)
 	return cfs_period_us;
 }
 
-static s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css,
+s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css,
 				  struct cftype *cft)
 {
 	return tg_get_cfs_quota(css_tg(css));
@@ -8040,7 +8040,7 @@ static int cpu_cfs_quota_write_s64(struct cgroup_subsys_state *css,
 	return tg_set_cfs_quota(css_tg(css), cfs_quota_us);
 }
 
-static u64 cpu_cfs_period_read_u64(struct cgroup_subsys_state *css,
+u64 cpu_cfs_period_read_u64(struct cgroup_subsys_state *css,
 				   struct cftype *cft)
 {
 	return tg_get_cfs_period(css_tg(css));

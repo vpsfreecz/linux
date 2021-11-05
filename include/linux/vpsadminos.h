@@ -13,7 +13,9 @@
 
 struct user_namespace;
 
-extern int cfs_get_online_cpus(struct task_struct *p);
+extern int get_online_cpus_in_cpu_cgroup(struct task_struct *p);
+void fake_cpuacct_readout(struct task_struct *p, u64 timestamp, u64 *user, u64 *system, int *cpus);
+void fake_cpuacct_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 *system);
 extern int fake_cpumask(struct task_struct *p, struct cpumask *dstmask, const struct cpumask *srcmask);
 
 struct mem_cgroup *get_current_most_limited_memcg(void);

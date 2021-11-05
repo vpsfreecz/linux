@@ -1699,11 +1699,11 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 		kernfs_get(pos);
 
 		mutex_unlock(&kernfs_mutex);
-		if ((current_user_ns() != &init_user_ns) &&
+		if ((current->nsproxy->cgroup_ns != &init_cgroup_ns) &&
 		    (strncmp(pname, "cpu", 3) == 0) &&
 		    (strncmp(name, "cpu", 3) == 0)) {
 			int id = 0;
-			int maxcpus = cfs_get_online_cpus(current);
+			int maxcpus = get_online_cpus_in_cpu_cgroup(current);
 			sscanf(name, "cpu%d", &id);
 			if (id >= maxcpus)
 				continue;
