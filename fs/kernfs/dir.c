@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/security.h>
 #include <linux/hash.h>
+#include <linux/vpsadminos.h>
 
 #include "kernfs-internal.h"
 
@@ -1688,7 +1689,7 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 	for (pos = kernfs_dir_pos(ns, parent, ctx->pos, pos);
 	     pos;
 	     pos = kernfs_dir_next_pos(ns, parent, ctx->pos, pos)) {
-		const char *name = pos->name;
+		const char *name = pos->name, *pname = parent->name;
 		unsigned int type = dt_type(pos);
 		int len = strlen(name);
 		ino_t ino = kernfs_ino(pos);
@@ -1698,6 +1699,15 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 		kernfs_get(pos);
 
 		mutex_unlock(&kernfs_mutex);
+		if ((current->nsproxy->cgroup_ns != &init_cgroup_ns) &&
+		    (strncmp(pname, "cpu", 3) == 0) &&
+		    (strncmp(name, "cpu", 3) == 0)) {
+			int id = 0;
+			int maxcpus = get_online_cpus_in_cpu_cgroup(current);
+			sscanf(name, "cpu%d", &id);
+			if (id >= maxcpus)
+				continue;
+		}
 		if (!dir_emit(ctx, name, len, ino, type))
 			return 0;
 		mutex_lock(&kernfs_mutex);
