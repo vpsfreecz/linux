@@ -3,10 +3,123 @@
 #include <linux/mm.h>
 #include <linux/vmstat.h>
 #include <linux/atomic.h>
+#include <linux/cgroup.h>
 #include <linux/memcontrol.h>
 #include <linux/user_namespace.h>
 #include <linux/xarray.h>
 #include <asm/page.h>
+#include "sched/sched.h"
+
+int get_online_cpus_in_cpu_cgroup(struct task_struct *p)
+{
+	struct cgroup_subsys_state *css = p->nsproxy->cgroup_ns->root_cset->subsys[cpu_cgrp_id];
+	long quota, period;
+	int cpus = 0;
+
+	quota = cpu_cfs_quota_read_s64(css, NULL);
+	period = cpu_cfs_period_read_u64(css, NULL);
+
+	if (quota > 0 && period > 0) {
+		cpus = quota / period;
+
+		if ((quota % period) > 0)
+			cpus++;
+	}
+
+	return cpus;
+}
+
+void fake_cpuacct_readout(struct task_struct *p, u64 timestamp, u64 *user, u64 *system, int *cpus)
+{
+	struct cgroup_subsys_state *css = p->nsproxy->cgroup_ns->root_cset->subsys[cpuacct_cgrp_id];
+	int i;
+	u64 timestamp_old;
+	u64 elapsed, user_time, system_time, run_time;
+	u64 usr = 0, sys = 0, sys_old = 0, usr_old = 0;
+	u64 tmpusr, tmpusr_old, tmpsys, tmpsys_old;
+	u64 usr_frac, sys_frac;
+
+	timestamp_old = cpuacct_cpuusage_fake_set_timestamp(css, timestamp);
+	elapsed = timestamp - timestamp_old;
+	if (!elapsed)
+		return;
+
+	for_each_possible_cpu(i) {
+		cpuacct_cpuusage_fake_readout(css, i, &tmpusr, &tmpsys,
+						&tmpusr_old, &tmpsys_old);
+		usr += tmpusr;
+		sys += tmpsys;
+		usr_old += tmpusr_old;
+		sys_old += tmpsys_old;
+	}
+	*user = usr;
+	*system = sys;
+	*cpus = get_online_cpus_in_cpu_cgroup(p);
+
+	user_time = usr - usr_old;
+	system_time = sys - sys_old;
+	run_time = user_time + system_time;
+
+	usr_frac = 10000 * user_time / run_time;
+	sys_frac = 10000 - usr_frac;
+
+	if (!run_time)
+		return;
+
+	for (i = 0; i < *cpus; i++) {
+		pr_debug("CPU %d start, run_time %llu left\n", i, run_time);
+		if (run_time >= elapsed) {
+			usr = elapsed * usr_frac / 10000;
+			sys = elapsed - usr;
+			run_time -= elapsed;
+		} else if (run_time) {
+			usr = run_time * usr_frac / 10000;
+			sys = run_time - usr;
+			run_time = 0;
+		} else {
+			usr = 0;
+			sys = 0;
+		}
+		pr_debug("CPU %d saving, usr %llu, sys %llu\n", i, usr, sys);
+		cpuacct_cpuusage_fake_write(css, i, usr, sys);
+	}
+}
+
+void fake_cpuacct_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 *system)
+{
+	struct cgroup_subsys_state *css = p->nsproxy->cgroup_ns->root_cset->subsys[cpuacct_cgrp_id];
+
+	cpuacct_cpuusage_fake_readout_percpu(css, cpu, user, system);
+}
+
+int fake_cpumask(struct task_struct *p, struct cpumask *dstmask, const struct cpumask *srcmask)
+{
+	int cpus;
+	int cpu, enabled;
+
+	if (srcmask != NULL)
+		cpumask_copy(dstmask, srcmask);
+
+	if (current->nsproxy->cgroup_ns == &init_cgroup_ns)
+		return 0;
+
+	cpus = get_online_cpus_in_cpu_cgroup(p);
+
+	if (!cpus)
+		return 0;
+
+	enabled = 0;
+	for_each_possible_cpu(cpu) {
+		if (cpumask_test_cpu(cpu, dstmask)) {
+			if (enabled == cpus)
+				cpumask_clear_cpu(cpu, dstmask);
+			else
+				enabled++;
+		}
+	}
+
+	return enabled;
+}
 
 struct mem_cgroup *get_current_most_limited_memcg(void)
 {
