@@ -6036,7 +6036,7 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
-	fake_cpumask(p, mask, mask);
+	fake_cpumask(p, mask, NULL);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 out_unlock:

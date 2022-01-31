@@ -97,23 +97,24 @@ int fake_cpumask(struct task_struct *p, struct cpumask *dstmask, const struct cp
 	int cpus;
 	int cpu, enabled;
 
+	if (srcmask != NULL)
+		cpumask_copy(dstmask, srcmask);
+
 	if (current->nsproxy->cgroup_ns == &init_cgroup_ns)
 		return 0;
 
 	cpus = get_online_cpus_in_cpu_cgroup(p);
 
-	if (srcmask != NULL)
-		cpumask_copy(dstmask, srcmask);
+	if (!cpus)
+		return 0;
 
 	enabled = 0;
-	if (cpus > 0) {
-		for (cpu = nr_cpu_ids - 1; cpu >= 0; cpu--) {
-			if (cpumask_test_cpu(cpu, dstmask)) {
-				if (enabled == cpus)
-					cpumask_clear_cpu(cpu, dstmask);
-				else
-					enabled++;
-			}
+	for_each_possible_cpu(cpu) {
+		if (cpumask_test_cpu(cpu, dstmask)) {
+			if (enabled == cpus)
+				cpumask_clear_cpu(cpu, dstmask);
+			else
+				enabled++;
 		}
 	}
 
