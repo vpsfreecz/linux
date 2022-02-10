@@ -74,7 +74,7 @@ nfs_fattr_to_ino_t(struct nfs_fattr *fattr)
 
 static int nfs_wait_killable(int mode)
 {
-	freezable_schedule_unsafe();
+	freezable_schedule();
 	if (signal_pending_state(mode, current))
 		return -ERESTARTSYS;
 	return 0;

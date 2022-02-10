@@ -414,7 +414,7 @@ static int nfs4_delay_killable(long *timeout)
 {
 	might_sleep();
 
-	freezable_schedule_timeout_killable_unsafe(
+	freezable_schedule_timeout_killable(
 		nfs4_update_delay(timeout));
 	if (!__fatal_signal_pending(current))
 		return 0;
