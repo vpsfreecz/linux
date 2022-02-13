@@ -344,9 +344,7 @@ unwind:
 bool is_ucounts_overlimit(struct ucounts *ucounts, enum ucount_type type, unsigned long rlimit)
 {
 	struct ucounts *iter;
-	long max = rlimit;
-	if (rlimit > LONG_MAX)
-		max = LONG_MAX;
+	unsigned long max = rlimit;
 	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
 		if (get_ucounts_value(iter, type) > max)
 			return true;
