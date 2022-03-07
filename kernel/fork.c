@@ -2320,7 +2320,7 @@ static __latent_entropy struct task_struct *copy_process(
 	cgroup_post_fork(p, args);
 	perf_event_fork(p);
 
-	trace_task_newtask(p, clone_flags);
+	//trace_task_newtask(p, clone_flags);
 	uprobe_copy_process(p, clone_flags);
 
 	copy_oom_score_adj(clone_flags, p);

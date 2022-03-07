@@ -662,7 +662,7 @@ static int tipc_l2_device_event(struct notifier_block *nb, unsigned long evt,
 	if (!b)
 		return NOTIFY_DONE;
 
-	trace_tipc_l2_device_event(dev, b, evt);
+	//trace_tipc_l2_device_event(dev, b, evt);
 	switch (evt) {
 	case NETDEV_CHANGE:
 		if (netif_carrier_ok(dev) && netif_oper_up(dev)) {

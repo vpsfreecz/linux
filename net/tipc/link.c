@@ -371,11 +371,11 @@ void tipc_link_remove_bc_peer(struct tipc_link *snd_l,
 	rcv_l->bc_peer_is_up = true;
 	rcv_l->state = LINK_ESTABLISHED;
 	tipc_link_bc_ack_rcv(rcv_l, ack, 0, NULL, xmitq, NULL);
-	trace_tipc_link_reset(rcv_l, TIPC_DUMP_ALL, "bclink removed!");
+	//trace_tipc_link_reset(rcv_l, TIPC_DUMP_ALL, "bclink removed!");
 	tipc_link_reset(rcv_l);
 	rcv_l->state = LINK_RESET;
 	if (!snd_l->ackers) {
-		trace_tipc_link_reset(snd_l, TIPC_DUMP_ALL, "zero ackers!");
+		//trace_tipc_link_reset(snd_l, TIPC_DUMP_ALL, "zero ackers!");
 		tipc_link_reset(snd_l);
 		snd_l->state = LINK_RESET;
 		__skb_queue_purge(xmitq);
@@ -562,7 +562,7 @@ bool tipc_link_bc_create(struct net *net, u32 ownnode, u32 peer, u8 *peer_id,
 	} else {
 		strcpy(l->name, tipc_bclink_name);
 	}
-	trace_tipc_link_reset(l, TIPC_DUMP_ALL, "bclink created!");
+	//trace_tipc_link_reset(l, TIPC_DUMP_ALL, "bclink created!");
 	tipc_link_reset(l);
 	l->state = LINK_RESET;
 	l->ackers = 0;
@@ -734,12 +734,12 @@ int tipc_link_fsm_evt(struct tipc_link *l, int evt)
 	default:
 		pr_err("Unknown FSM state %x in %s\n", l->state, l->name);
 	}
-	trace_tipc_link_fsm(l->name, old_state, l->state, evt);
+	//trace_tipc_link_fsm(l->name, old_state, l->state, evt);
 	return rc;
 illegal_evt:
 	pr_err("Illegal FSM event %x in state %x on link %s\n",
 	       evt, l->state, l->name);
-	trace_tipc_link_fsm(l->name, old_state, l->state, evt);
+	//trace_tipc_link_fsm(l->name, old_state, l->state, evt);
 	return rc;
 }
 
@@ -809,8 +809,8 @@ int tipc_link_timeout(struct tipc_link *l, struct sk_buff_head *xmitq)
 	u16 bc_acked = l->bc_rcvlink->acked;
 	struct tipc_mon_state *mstate = &l->mon_state;
 
-	trace_tipc_link_timeout(l, TIPC_DUMP_NONE, " ");
-	trace_tipc_link_too_silent(l, TIPC_DUMP_ALL, " ");
+	//trace_tipc_link_timeout(l, TIPC_DUMP_NONE, " ");
+	//trace_tipc_link_too_silent(l, TIPC_DUMP_ALL, " ");
 	switch (l->state) {
 	case LINK_ESTABLISHED:
 	case LINK_SYNCHING:
@@ -878,7 +878,7 @@ static int link_schedule_user(struct tipc_link *l, struct tipc_msg *hdr)
 	TIPC_SKB_CB(skb)->chain_imp = msg_importance(hdr);
 	skb_queue_tail(&l->wakeupq, skb);
 	l->stats.link_congs++;
-	trace_tipc_link_conges(l, TIPC_DUMP_ALL, "wakeup scheduled!");
+	//trace_tipc_link_conges(l, TIPC_DUMP_ALL, "wakeup scheduled!");
 	return -ELINKCONG;
 }
 
@@ -1206,9 +1206,9 @@ static bool link_retransmit_failure(struct tipc_link *l, struct tipc_link *r,
 		jiffies_to_msecs(TIPC_SKB_CB(skb)->retr_stamp),
 		TIPC_SKB_CB(skb)->retr_cnt);
 
-	trace_tipc_list_dump(&l->transmq, true, "retrans failure!");
-	trace_tipc_link_dump(l, TIPC_DUMP_NONE, "retrans failure!");
-	trace_tipc_link_dump(r, TIPC_DUMP_NONE, "retrans failure!");
+	//trace_tipc_list_dump(&l->transmq, true, "retrans failure!");
+	//trace_tipc_link_dump(l, TIPC_DUMP_NONE, "retrans failure!");
+	//trace_tipc_link_dump(r, TIPC_DUMP_NONE, "retrans failure!");
 
 	if (link_is_bc_sndlink(l)) {
 		r->state = LINK_RESET;
@@ -1532,7 +1532,7 @@ static int tipc_link_advance_transmq(struct tipc_link *l, struct tipc_link *r,
 	bool is_uc = !link_is_bc_sndlink(l);
 	bool bc_has_acked = false;
 
-	trace_tipc_link_retrans(r, acked + 1, acked + gap, &l->transmq);
+	//trace_tipc_link_retrans(r, acked + 1, acked + gap, &l->transmq);
 
 	/* Determine Gap ACK blocks if any for the particular link */
 	if (ga && is_uc) {
@@ -1893,7 +1893,7 @@ static void tipc_link_build_proto_msg(struct tipc_link *l, int mtyp, bool probe,
 		bcl->stats.sent_nacks++;
 	skb->priority = TC_PRIO_CONTROL;
 	__skb_queue_tail(xmitq, skb);
-	trace_tipc_proto_build(skb, false, l->name);
+	//trace_tipc_proto_build(skb, false, l->name);
 }
 
 void tipc_link_create_dummy_tnl_msg(struct tipc_link *l,
@@ -2172,7 +2172,7 @@ static int tipc_link_proto_rcv(struct tipc_link *l, struct sk_buff *skb,
 	char *if_name;
 	void *data;
 
-	trace_tipc_proto_rcv(skb, false, l->name);
+	//trace_tipc_proto_rcv(skb, false, l->name);
 
 	if (dlen > U16_MAX)
 		goto exit;
@@ -2188,8 +2188,8 @@ static int tipc_link_proto_rcv(struct tipc_link *l, struct sk_buff *skb,
 	data = msg_data(hdr);
 
 	if (!tipc_link_validate_msg(l, hdr)) {
-		trace_tipc_skb_dump(skb, false, "PROTO invalid (1)!");
-		trace_tipc_link_dump(l, TIPC_DUMP_NONE, "PROTO invalid (1)!");
+		//trace_tipc_skb_dump(skb, false, "PROTO invalid (1)!");
+		//trace_tipc_link_dump(l, TIPC_DUMP_NONE, "PROTO invalid (1)!");
 		goto exit;
 	}
 
@@ -2454,7 +2454,7 @@ int tipc_link_bc_ack_rcv(struct tipc_link *r, u16 acked, u16 gap,
 	if (less(acked, r->acked) || (acked == r->acked && !gap && !ga))
 		return 0;
 
-	trace_tipc_link_bc_ack(r, acked, gap, &l->transmq);
+	//trace_tipc_link_bc_ack(r, acked, gap, &l->transmq);
 	tipc_link_advance_transmq(l, r, acked, gap, ga, retrq, &unused, &rc);
 
 	tipc_link_advance_backlog(l, xmitq);

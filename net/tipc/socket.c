@@ -266,7 +266,7 @@ static void tsk_set_nagle(struct tipc_sock *tsk)
  */
 static void tsk_advance_rx_queue(struct sock *sk)
 {
-	trace_tipc_sk_advance_rx(sk, NULL, TIPC_DUMP_SK_RCVQ, " ");
+	//trace_tipc_sk_advance_rx(sk, NULL, TIPC_DUMP_SK_RCVQ, " ");
 	kfree_skb(__skb_dequeue(&sk->sk_receive_queue));
 }
 
@@ -281,7 +281,7 @@ static void tipc_sk_respond(struct sock *sk, struct sk_buff *skb, int err)
 	if (!tipc_msg_reverse(onode, &skb, err))
 		return;
 
-	trace_tipc_sk_rej_msg(sk, skb, TIPC_DUMP_NONE, "@sk_respond!");
+	//trace_tipc_sk_rej_msg(sk, skb, TIPC_DUMP_NONE, "@sk_respond!");
 	dnode = msg_destnode(buf_msg(skb));
 	selector = msg_origport(buf_msg(skb));
 	tipc_node_xmit_skb(sock_net(sk), skb, dnode, selector);
@@ -521,7 +521,7 @@ static int tipc_sk_create(struct net *net, struct socket *sock,
 			tsk_set_unreliable(tsk, true);
 	}
 	__skb_queue_head_init(&tsk->mc_method.deferredq);
-	trace_tipc_sk_create(sk, NULL, TIPC_DUMP_NONE, " ");
+	//trace_tipc_sk_create(sk, NULL, TIPC_DUMP_NONE, " ");
 	return 0;
 }
 
@@ -624,7 +624,7 @@ static int tipc_release(struct socket *sock)
 	tsk = tipc_sk(sk);
 	lock_sock(sk);
 
-	trace_tipc_sk_release(sk, NULL, TIPC_DUMP_ALL, " ");
+	//trace_tipc_sk_release(sk, NULL, TIPC_DUMP_ALL, " ");
 	__tipc_shutdown(sock, TIPC_ERR_NO_PORT);
 	sk->sk_shutdown = SHUTDOWN_MASK;
 	tipc_sk_leave(tsk);
@@ -772,7 +772,7 @@ static __poll_t tipc_poll(struct file *file, struct socket *sock,
 	__poll_t revents = 0;
 
 	sock_poll_wait(file, sock, wait);
-	trace_tipc_sk_poll(sk, NULL, TIPC_DUMP_ALL, " ");
+	//trace_tipc_sk_poll(sk, NULL, TIPC_DUMP_ALL, " ");
 
 	if (sk->sk_shutdown & RCV_SHUTDOWN)
 		revents |= EPOLLRDHUP | EPOLLIN | EPOLLRDNORM;
@@ -860,8 +860,8 @@ static int tipc_sendmcast(struct  socket *sock, struct tipc_name_seq *seq,
 
 	/* Send message if build was successful */
 	if (unlikely(rc == dlen)) {
-		trace_tipc_sk_sendmcast(sk, skb_peek(&pkts),
-					TIPC_DUMP_SK_SNDQ, " ");
+		//trace_tipc_sk_sendmcast(sk, skb_peek(&pkts),
+		//			TIPC_DUMP_SK_SNDQ, " ");
 		rc = tipc_mcast_xmit(net, &pkts, method, &dsts,
 				     &tsk->cong_link_cnt);
 	}
@@ -1324,7 +1324,7 @@ static void tipc_sk_conn_proto_rcv(struct tipc_sock *tsk, struct sk_buff *skb,
 
 	/* Ignore if connection cannot be validated: */
 	if (!tsk_peer_msg(tsk, hdr)) {
-		trace_tipc_sk_drop_msg(sk, skb, TIPC_DUMP_NONE, "@proto_rcv!");
+		//trace_tipc_sk_drop_msg(sk, skb, TIPC_DUMP_NONE, "@proto_rcv!");
 		goto exit;
 	}
 
@@ -1501,7 +1501,7 @@ static int __tipc_sendmsg(struct socket *sock, struct msghdr *m, size_t dlen)
 		return -ENOMEM;
 	}
 
-	trace_tipc_sk_sendmsg(sk, skb_peek(&pkts), TIPC_DUMP_SK_SNDQ, " ");
+	//trace_tipc_sk_sendmsg(sk, skb_peek(&pkts), TIPC_DUMP_SK_SNDQ, " ");
 	rc = tipc_node_xmit(net, &pkts, dnode, tsk->portid);
 	if (unlikely(rc == -ELINKCONG)) {
 		tipc_dest_push(clinks, dnode, 0);
@@ -1611,8 +1611,8 @@ static int __tipc_sendstream(struct socket *sock, struct msghdr *m, size_t dlen)
 				break;
 			blocks += tsk_inc(tsk, send + MIN_H_SIZE);
 		}
-		trace_tipc_sk_sendstream(sk, skb_peek(txq),
-					 TIPC_DUMP_SK_SNDQ, " ");
+		//trace_tipc_sk_sendstream(sk, skb_peek(txq),
+		//			 TIPC_DUMP_SK_SNDQ, " ");
 		rc = tipc_node_xmit(net, txq, dnode, tsk->portid);
 		if (unlikely(rc == -ELINKCONG)) {
 			tsk->cong_link_cnt = 1;
@@ -2340,7 +2340,7 @@ static void tipc_sk_filter_rcv(struct sock *sk, struct sk_buff *skb,
 	int mtyp = msg_type(hdr);
 	int limit, err = TIPC_OK;
 
-	trace_tipc_sk_filter_rcv(sk, skb, TIPC_DUMP_ALL, " ");
+	//trace_tipc_sk_filter_rcv(sk, skb, TIPC_DUMP_ALL, " ");
 	TIPC_SKB_CB(skb)->bytes_read = 0;
 	__skb_queue_head_init(&inputq);
 	__skb_queue_tail(&inputq, skb);
@@ -2363,16 +2363,16 @@ static void tipc_sk_filter_rcv(struct sock *sk, struct sk_buff *skb,
 		    (!grp && msg_in_group(hdr)))
 			err = TIPC_ERR_NO_PORT;
 		else if (sk_rmem_alloc_get(sk) + skb->truesize >= limit) {
-			trace_tipc_sk_dump(sk, skb, TIPC_DUMP_ALL,
-					   "err_overload2!");
+			//trace_tipc_sk_dump(sk, skb, TIPC_DUMP_ALL,
+			//		   "err_overload2!");
 			atomic_inc(&sk->sk_drops);
 			err = TIPC_ERR_OVERLOAD;
 		}
 
 		if (unlikely(err)) {
 			if (tipc_msg_reverse(tipc_own_addr(net), &skb, err)) {
-				trace_tipc_sk_rej_msg(sk, skb, TIPC_DUMP_NONE,
-						      "@filter_rcv!");
+				//trace_tipc_sk_rej_msg(sk, skb, TIPC_DUMP_NONE,
+				//		      "@filter_rcv!");
 				__skb_queue_tail(xmitq, skb);
 			}
 			err = TIPC_OK;
@@ -2380,8 +2380,8 @@ static void tipc_sk_filter_rcv(struct sock *sk, struct sk_buff *skb,
 		}
 		__skb_queue_tail(&sk->sk_receive_queue, skb);
 		skb_set_owner_r(skb, sk);
-		trace_tipc_sk_overlimit2(sk, skb, TIPC_DUMP_ALL,
-					 "rcvq >90% allocated!");
+		//trace_tipc_sk_overlimit2(sk, skb, TIPC_DUMP_ALL,
+		//			 "rcvq >90% allocated!");
 		sk->sk_data_ready(sk);
 	}
 }
@@ -2448,18 +2448,18 @@ static void tipc_sk_enqueue(struct sk_buff_head *inputq, struct sock *sk,
 			atomic_set(dcnt, 0);
 		lim = rcvbuf_limit(sk, skb) + atomic_read(dcnt);
 		if (likely(!sk_add_backlog(sk, skb, lim))) {
-			trace_tipc_sk_overlimit1(sk, skb, TIPC_DUMP_ALL,
-						 "bklg & rcvq >90% allocated!");
+			//trace_tipc_sk_overlimit1(sk, skb, TIPC_DUMP_ALL,
+			//			 "bklg & rcvq >90% allocated!");
 			continue;
 		}
 
-		trace_tipc_sk_dump(sk, skb, TIPC_DUMP_ALL, "err_overload!");
+		//trace_tipc_sk_dump(sk, skb, TIPC_DUMP_ALL, "err_overload!");
 		/* Overload => reject message back to sender */
 		onode = tipc_own_addr(sock_net(sk));
 		atomic_inc(&sk->sk_drops);
 		if (tipc_msg_reverse(onode, &skb, TIPC_ERR_OVERLOAD)) {
-			trace_tipc_sk_rej_msg(sk, skb, TIPC_DUMP_ALL,
-					      "@sk_enqueue!");
+			//trace_tipc_sk_rej_msg(sk, skb, TIPC_DUMP_ALL,
+			//		      "@sk_enqueue!");
 			__skb_queue_tail(xmitq, skb);
 		}
 		break;
@@ -2511,7 +2511,7 @@ void tipc_sk_rcv(struct net *net, struct sk_buff_head *inputq)
 		if (!tipc_msg_reverse(tipc_own_addr(net), &skb, err))
 			continue;
 
-		trace_tipc_sk_rej_msg(NULL, skb, TIPC_DUMP_NONE, "@sk_rcv!");
+		//trace_tipc_sk_rej_msg(NULL, skb, TIPC_DUMP_NONE, "@sk_rcv!");
 xmit:
 		dnode = msg_destnode(buf_msg(skb));
 		tipc_node_xmit_skb(net, skb, dnode, dport);
@@ -2795,7 +2795,7 @@ static int tipc_shutdown(struct socket *sock, int how)
 
 	lock_sock(sk);
 
-	trace_tipc_sk_shutdown(sk, NULL, TIPC_DUMP_ALL, " ");
+	//trace_tipc_sk_shutdown(sk, NULL, TIPC_DUMP_ALL, " ");
 	__tipc_shutdown(sock, TIPC_CONN_SHUTDOWN);
 	sk->sk_shutdown = SHUTDOWN_MASK;
 
