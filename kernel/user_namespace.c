@@ -342,6 +342,28 @@ u32 map_id_down(struct uid_gid_map *map, u32 id)
 	return map_id_range_down(map, id, 1);
 }
 
+extern u32 get_map_highest_id(struct uid_gid_map *map);
+u32 get_map_highest_id(struct uid_gid_map *map)
+{
+	unsigned idx;
+	u32 high, highest = 0;
+	struct uid_gid_extent *walkmap, *extent;
+	smp_rmb();
+
+	if (map->nr_extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
+		walkmap = map->extent;
+	else
+		walkmap = map->forward;
+
+	for (idx = 0; idx < map->nr_extents; idx++) {
+		extent = &walkmap[idx];
+		high = extent->first + extent->count - 1;
+		if (high > highest)
+			highest = high;
+	}
+	return highest;
+}
+
 /*
  * map_id_up_base - Find idmap via binary search in static extent array.
  * Can only be called if number of mappings is equal or less than
