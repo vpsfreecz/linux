@@ -41,7 +41,7 @@ static inline void nft_trace_packet(struct nft_traceinfo *info,
 				    const struct nft_rule *rule,
 				    enum nft_trace_types type)
 {
-	if (static_branch_unlikely(&nft_trace_enabled)) {
+	if (static_key_enabled(&nft_trace_enabled)) {
 		info->rule = rule;
 		__nft_trace_packet(info, chain, type);
 	}
@@ -169,7 +169,7 @@ nft_do_chain(struct nft_pktinfo *pkt, void *priv)
 	struct nft_traceinfo info;
 
 	info.trace = false;
-	if (static_branch_unlikely(&nft_trace_enabled))
+	if (static_key_enabled(&nft_trace_enabled))
 		nft_trace_init(&info, pkt, &regs.verdict, basechain);
 do_chain:
 	if (genbit)
@@ -249,7 +249,7 @@ next_rule:
 
 	nft_trace_packet(&info, basechain, NULL, NFT_TRACETYPE_POLICY);
 
-	if (static_branch_unlikely(&nft_counters_enabled))
+	if (static_key_enabled(&nft_counters_enabled))
 		nft_update_chain_stats(basechain, pkt);
 
 	return nft_base_chain(basechain)->policy;
