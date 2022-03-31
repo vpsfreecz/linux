@@ -22,7 +22,7 @@
 
 struct iovec;
 
-#ifdef __KDEBUG
+#if 1
 #define kenter(FMT, ...) \
 	printk(KERN_DEBUG "==> %s("FMT")\n", __func__, ##__VA_ARGS__)
 #define kleave(FMT, ...) \
