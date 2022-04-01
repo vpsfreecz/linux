@@ -234,8 +234,6 @@ static void io_worker_exit(struct io_worker *worker)
 	current->flags &= ~PF_IO_WORKER;
 	if (worker->flags & IO_WORKER_F_RUNNING)
 		atomic_dec(&acct->nr_running);
-	if (!(worker->flags & IO_WORKER_F_BOUND))
-		atomic_dec(&wqe->wq->user->processes);
 	worker->flags = 0;
 	preempt_enable();
 
@@ -366,12 +364,10 @@ static void __io_worker_busy(struct io_wqe *wqe, struct io_worker *worker,
 			worker->flags |= IO_WORKER_F_BOUND;
 			wqe->acct[IO_WQ_ACCT_UNBOUND].nr_workers--;
 			wqe->acct[IO_WQ_ACCT_BOUND].nr_workers++;
-			atomic_dec(&wqe->wq->user->processes);
 		} else {
 			worker->flags &= ~IO_WORKER_F_BOUND;
 			wqe->acct[IO_WQ_ACCT_UNBOUND].nr_workers++;
 			wqe->acct[IO_WQ_ACCT_BOUND].nr_workers--;
-			atomic_inc(&wqe->wq->user->processes);
 		}
 		io_wqe_inc_running(wqe, worker);
 	 }
@@ -713,9 +709,6 @@ static bool create_io_worker(struct io_wq *wq, struct io_wqe *wqe, int index)
 		worker->flags |= IO_WORKER_F_FIXED;
 	acct->nr_workers++;
 	raw_spin_unlock_irq(&wqe->lock);
-
-	if (index == IO_WQ_ACCT_UNBOUND)
-		atomic_inc(&wq->user->processes);
 
 	refcount_inc(&wq->refs);
 	wake_up_process(worker->task);
