@@ -20,7 +20,6 @@
 #include <linux/blk-cgroup.h>
 #include <linux/audit.h>
 #include <linux/cpu.h>
-#include <linux/user_namespace.h>
 
 #include "../kernel/sched/sched.h"
 #include "io-wq.h"
@@ -122,7 +121,7 @@ struct io_wq {
 	io_wq_work_fn *do_work;
 
 	struct task_struct *manager;
-	const struct cred *cred;
+	struct user_struct *user;
 	refcount_t refs;
 	struct completion done;
 
@@ -235,8 +234,6 @@ static void io_worker_exit(struct io_worker *worker)
 	current->flags &= ~PF_IO_WORKER;
 	if (worker->flags & IO_WORKER_F_RUNNING)
 		atomic_dec(&acct->nr_running);
-	if (!(worker->flags & IO_WORKER_F_BOUND))
-		dec_rlimit_ucounts(wqe->wq->cred->ucounts, UCOUNT_RLIMIT_NPROC, 1);
 	worker->flags = 0;
 	preempt_enable();
 
@@ -367,15 +364,13 @@ static void __io_worker_busy(struct io_wqe *wqe, struct io_worker *worker,
 			worker->flags |= IO_WORKER_F_BOUND;
 			wqe->acct[IO_WQ_ACCT_UNBOUND].nr_workers--;
 			wqe->acct[IO_WQ_ACCT_BOUND].nr_workers++;
-			dec_rlimit_ucounts(wqe->wq->cred->ucounts, UCOUNT_RLIMIT_NPROC, 1);
 		} else {
 			worker->flags &= ~IO_WORKER_F_BOUND;
 			wqe->acct[IO_WQ_ACCT_UNBOUND].nr_workers++;
 			wqe->acct[IO_WQ_ACCT_BOUND].nr_workers--;
-			inc_rlimit_ucounts(wqe->wq->cred->ucounts, UCOUNT_RLIMIT_NPROC, 1);
 		}
 		io_wqe_inc_running(wqe, worker);
-	}
+	 }
 }
 
 /*
@@ -715,9 +710,6 @@ static bool create_io_worker(struct io_wq *wq, struct io_wqe *wqe, int index)
 	acct->nr_workers++;
 	raw_spin_unlock_irq(&wqe->lock);
 
-	if (index == IO_WQ_ACCT_UNBOUND)
-		inc_rlimit_ucounts(wq->cred->ucounts, UCOUNT_RLIMIT_NPROC, 1);
-
 	refcount_inc(&wq->refs);
 	wake_up_process(worker->task);
 	return true;
@@ -841,7 +833,6 @@ static bool io_wq_can_queue(struct io_wqe *wqe, struct io_wqe_acct *acct,
 			    struct io_wq_work *work)
 {
 	bool free_worker;
-	struct user_namespace *ns = current_user_ns();
 
 	if (!(work->flags & IO_WQ_WORK_UNBOUND))
 		return true;
@@ -853,13 +844,6 @@ static bool io_wq_can_queue(struct io_wqe *wqe, struct io_wqe_acct *acct,
 	rcu_read_unlock();
 	if (free_worker)
 		return true;
-
-	if ((ns != &init_user_ns) && (ns->parent != &init_user_ns))
-		ns = &init_user_ns;
-
-	if (is_ucounts_overlimit(wqe->wq->cred->ucounts, UCOUNT_RLIMIT_NPROC, acct->max_workers) &&
-	    !ns_capable(ns, CAP_SYS_RESOURCE) && !ns_capable(ns, CAP_SYS_ADMIN))
-		return false;
 
 	return true;
 }
@@ -1109,9 +1093,6 @@ struct io_wq *io_wq_create(unsigned bounded, struct io_wq_data *data)
 	wq->free_work = data->free_work;
 	wq->do_work = data->do_work;
 
-	/* caller must already hold a reference to this */
-	wq->cred = data->cred;
-
 	ret = -ENOMEM;
 	for_each_node(node) {
 		struct io_wqe *wqe;
@@ -1126,7 +1107,10 @@ struct io_wq *io_wq_create(unsigned bounded, struct io_wq_data *data)
 		wqe->node = alloc_node;
 		wqe->acct[IO_WQ_ACCT_BOUND].max_workers = bounded;
 		atomic_set(&wqe->acct[IO_WQ_ACCT_BOUND].nr_running, 0);
-		wqe->acct[IO_WQ_ACCT_UNBOUND].max_workers = task_rlimit(current, RLIMIT_NPROC);
+		if (wq->user) {
+			wqe->acct[IO_WQ_ACCT_UNBOUND].max_workers =
+					task_rlimit(current, RLIMIT_NPROC);
+		}
 		atomic_set(&wqe->acct[IO_WQ_ACCT_UNBOUND].nr_running, 0);
 		wqe->wq = wq;
 		raw_spin_lock_init(&wqe->lock);

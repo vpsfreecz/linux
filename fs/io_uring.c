@@ -7870,7 +7870,6 @@ static int io_init_wq_offload(struct io_ring_ctx *ctx,
 	unsigned int concurrency;
 	int ret = 0;
 
-	data.cred = ctx->creds;
 	data.free_work = io_free_work;
 	data.do_work = io_wq_submit_work;
 
@@ -9536,7 +9535,6 @@ static int io_uring_create(unsigned entries, struct io_uring_params *p,
 		return ret;
 	}
 
-	trace_io_uring_create(ret, ctx, p->sq_entries, p->cq_entries, p->flags);
 	return ret;
 err:
 	io_disable_sqo_submit(ctx);
