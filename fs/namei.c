@@ -3986,7 +3986,7 @@ int vfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
 		return error;
 
 	if ((S_ISCHR(mode) || S_ISBLK(mode)) && !is_whiteout &&
-	    !capable(CAP_MKNOD))
+	    !ns_capable(current_user_ns(), CAP_MKNOD))
 		return -EPERM;
 
 	if (!dir->i_op->mknod)
