@@ -10,6 +10,26 @@
 #include <asm/page.h>
 #include "sched/sched.h"
 
+#include <linux/vpsadminos-livepatch.h>
+#include "kpatch-macros.h"
+char old_uname[65];
+char new_uname[65];
+
+static int patch(patch_object *obj)
+{
+	scnprintf(new_uname, 64, "%s.%s", LIVEPATCH_ORIG_KERNEL_VERSION,
+	    LIVEPATCH_NAME);
+	scnprintf(old_uname, 64, "%s", init_uts_ns.name.release);
+	scnprintf(init_uts_ns.name.release, 64, "%s", new_uname);
+	return 0;
+}
+KPATCH_PRE_PATCH_CALLBACK(patch);
+static void unpatch(patch_object *obj)
+{
+	scnprintf(init_uts_ns.name.release, 64, "%s", old_uname);
+}
+KPATCH_POST_UNPATCH_CALLBACK(unpatch);
+
 int online_cpus_in_cpu_cgroup(struct task_struct *p)
 {
 	struct cgroup_subsys_state *css = p->nsproxy->cgroup_ns->root_cset->subsys[cpu_cgrp_id];
