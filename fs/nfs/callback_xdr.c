@@ -948,11 +948,11 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp)
 	if (hdr_arg.minorversion == 0) {
 		cps.clp = nfs4_find_client_ident(SVC_NET(rqstp), hdr_arg.cb_ident);
 		if (!cps.clp) {
-			trace_nfs_cb_no_clp(rqstp->rq_xid, hdr_arg.cb_ident);
+			//trace_nfs_cb_no_clp(rqstp->rq_xid, hdr_arg.cb_ident);
 			goto out_invalidcred;
 		}
 		if (!check_gss_callback_principal(cps.clp, rqstp)) {
-			trace_nfs_cb_badprinc(rqstp->rq_xid, hdr_arg.cb_ident);
+			//trace_nfs_cb_badprinc(rqstp->rq_xid, hdr_arg.cb_ident);
 			nfs_put_client(cps.clp);
 			goto out_invalidcred;
 		}

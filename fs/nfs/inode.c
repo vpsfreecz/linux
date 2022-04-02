@@ -309,7 +309,7 @@ static void nfs_set_inode_stale_locked(struct inode *inode)
 {
 	set_bit(NFS_INO_STALE, &NFS_I(inode)->flags);
 	nfs_zap_caches_locked(inode);
-	trace_nfs_set_inode_stale(inode);
+	//trace_nfs_set_inode_stale(inode);
 }
 
 void nfs_set_inode_stale(struct inode *inode)
@@ -641,7 +641,7 @@ nfs_setattr(struct dentry *dentry, struct iattr *attr)
 	if ((attr->ia_valid & ~(ATTR_FILE|ATTR_OPEN)) == 0)
 		return 0;
 
-	trace_nfs_setattr_enter(inode);
+	//trace_nfs_setattr_enter(inode);
 
 	/* Write all dirty data */
 	if (S_ISREG(inode->i_mode))
@@ -658,7 +658,7 @@ nfs_setattr(struct dentry *dentry, struct iattr *attr)
 		error = nfs_refresh_inode(inode, fattr);
 	nfs_free_fattr(fattr);
 out:
-	trace_nfs_setattr_exit(inode, error);
+	//trace_nfs_setattr_exit(inode, error);
 	return error;
 }
 EXPORT_SYMBOL_GPL(nfs_setattr);
@@ -816,7 +816,7 @@ int nfs_getattr(const struct path *path, struct kstat *stat,
 	bool force_sync = query_flags & AT_STATX_FORCE_SYNC;
 	bool do_update = false;
 
-	trace_nfs_getattr_enter(inode);
+	//trace_nfs_getattr_enter(inode);
 
 	if ((query_flags & AT_STATX_DONT_SYNC) && !force_sync) {
 		nfs_readdirplus_parent_cache_hit(path->dentry);
@@ -878,7 +878,7 @@ out_no_update:
 	if (S_ISDIR(inode->i_mode))
 		stat->blksize = NFS_SERVER(inode)->dtsize;
 out:
-	trace_nfs_getattr_exit(inode, err);
+	//trace_nfs_getattr_exit(inode, err);
 	return err;
 }
 EXPORT_SYMBOL_GPL(nfs_getattr);
@@ -1159,7 +1159,7 @@ __nfs_revalidate_inode(struct nfs_server *server, struct inode *inode)
 	dfprintk(PAGECACHE, "NFS: revalidating (%s/%Lu)\n",
 		inode->i_sb->s_id, (unsigned long long)NFS_FILEID(inode));
 
-	trace_nfs_revalidate_inode_enter(inode);
+	//trace_nfs_revalidate_inode_enter(inode);
 
 	if (is_bad_inode(inode))
 		goto out;
@@ -1228,7 +1228,7 @@ err_out:
 	nfs4_label_free(label);
 out:
 	nfs_free_fattr(fattr);
-	trace_nfs_revalidate_inode_exit(inode, status);
+	//trace_nfs_revalidate_inode_exit(inode, status);
 	return status;
 }
 
@@ -1365,9 +1365,9 @@ int nfs_revalidate_mapping(struct inode *inode,
 	nfsi->cache_validity &= ~(NFS_INO_INVALID_DATA|
 			NFS_INO_DATA_INVAL_DEFER);
 	spin_unlock(&inode->i_lock);
-	trace_nfs_invalidate_mapping_enter(inode);
+	//trace_nfs_invalidate_mapping_enter(inode);
 	ret = nfs_invalidate_mapping(inode, mapping);
-	trace_nfs_invalidate_mapping_exit(inode, ret);
+	//trace_nfs_invalidate_mapping_exit(inode, ret);
 
 	clear_bit_unlock(NFS_INO_INVALIDATING, bitlock);
 	smp_mb__after_atomic();
@@ -1671,14 +1671,14 @@ static int nfs_refresh_inode_locked(struct inode *inode, struct nfs_fattr *fattr
 {
 	int ret;
 
-	trace_nfs_refresh_inode_enter(inode);
+	//trace_nfs_refresh_inode_enter(inode);
 
 	if (nfs_inode_attrs_need_update(inode, fattr))
 		ret = nfs_update_inode(inode, fattr);
 	else
 		ret = nfs_check_inode_attributes(inode, fattr);
 
-	trace_nfs_refresh_inode_exit(inode, ret);
+	//trace_nfs_refresh_inode_exit(inode, ret);
 	return ret;
 }
 

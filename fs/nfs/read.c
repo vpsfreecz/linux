@@ -214,7 +214,7 @@ static void nfs_initiate_read(struct nfs_pgio_header *hdr,
 
 	task_setup_data->flags |= swap_flags;
 	rpc_ops->read_setup(hdr, msg);
-	trace_nfs_initiate_read(hdr);
+	//trace_nfs_initiate_read(hdr);
 }
 
 static void
@@ -247,7 +247,7 @@ static int nfs_readpage_done(struct rpc_task *task,
 		return status;
 
 	nfs_add_stats(inode, NFSIOS_SERVERREADBYTES, hdr->res.count);
-	trace_nfs_readpage_done(task, hdr);
+	//trace_nfs_readpage_done(task, hdr);
 
 	if (task->tk_status == -ESTALE) {
 		nfs_set_inode_stale(inode);
@@ -264,7 +264,7 @@ static void nfs_readpage_retry(struct rpc_task *task,
 
 	/* This is a short read! */
 	nfs_inc_stats(hdr->inode, NFSIOS_SHORTREAD);
-	trace_nfs_readpage_short(task, hdr);
+	//trace_nfs_readpage_short(task, hdr);
 
 	/* Has the server at least made some progress? */
 	if (resp->count == 0) {

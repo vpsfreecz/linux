@@ -878,7 +878,7 @@ out_nolseg:
 	if (pgio->pg_error < 0)
 		return;
 out_mds:
-	trace_pnfs_mds_fallback_pg_init_read(pgio->pg_inode,
+	//trace_pnfs_mds_fallback_pg_init_read(pgio->pg_inode,
 			0, NFS4_MAX_UINT64, IOMODE_READ,
 			NFS_I(pgio->pg_inode)->layout,
 			pgio->pg_lseg);
@@ -943,7 +943,7 @@ out_eagain:
 	pgio->pg_error = -EAGAIN;
 	return;
 out_mds:
-	trace_pnfs_mds_fallback_pg_init_write(pgio->pg_inode,
+	//trace_pnfs_mds_fallback_pg_init_write(pgio->pg_inode,
 			0, NFS4_MAX_UINT64, IOMODE_RW,
 			NFS_I(pgio->pg_inode)->layout,
 			pgio->pg_lseg);
@@ -973,7 +973,7 @@ ff_layout_pg_get_mirror_count_write(struct nfs_pageio_descriptor *pgio,
 	if (pgio->pg_lseg)
 		return FF_LAYOUT_MIRROR_COUNT(pgio->pg_lseg);
 
-	trace_pnfs_mds_fallback_pg_get_mirror_count(pgio->pg_inode,
+	//trace_pnfs_mds_fallback_pg_get_mirror_count(pgio->pg_inode,
 			0, NFS4_MAX_UINT64, IOMODE_RW,
 			NFS_I(pgio->pg_inode)->layout,
 			pgio->pg_lseg);
@@ -1043,7 +1043,7 @@ static void ff_layout_reset_write(struct nfs_pgio_header *hdr, bool retry_pnfs)
 			hdr->args.count,
 			(unsigned long long)hdr->args.offset);
 
-		trace_pnfs_mds_fallback_write_done(hdr->inode,
+		//trace_pnfs_mds_fallback_write_done(hdr->inode,
 				hdr->args.offset, hdr->args.count,
 				IOMODE_RW, NFS_I(hdr->inode)->layout,
 				hdr->lseg);
@@ -1079,7 +1079,7 @@ static void ff_layout_reset_read(struct nfs_pgio_header *hdr)
 			hdr->args.count,
 			(unsigned long long)hdr->args.offset);
 
-		trace_pnfs_mds_fallback_read_done(hdr->inode,
+		//trace_pnfs_mds_fallback_read_done(hdr->inode,
 				hdr->args.offset, hdr->args.count,
 				IOMODE_READ, NFS_I(hdr->inode)->layout,
 				hdr->lseg);
@@ -1296,14 +1296,14 @@ static int ff_layout_read_done_cb(struct rpc_task *task,
 					    hdr->args.offset, hdr->args.count,
 					    &hdr->res.op_status, OP_READ,
 					    task->tk_status);
-		trace_ff_layout_read_error(hdr);
+		//trace_ff_layout_read_error(hdr);
 	}
 
 	err = ff_layout_async_handle_error(task, hdr->args.context->state,
 					   hdr->ds_clp, hdr->lseg,
 					   hdr->pgio_mirror_idx);
 
-	trace_nfs4_pnfs_read(hdr, err);
+	//trace_nfs4_pnfs_read(hdr, err);
 	clear_bit(NFS_IOHDR_RESEND_PNFS, &hdr->flags);
 	clear_bit(NFS_IOHDR_RESEND_MDS, &hdr->flags);
 	switch (err) {
@@ -1463,14 +1463,14 @@ static int ff_layout_write_done_cb(struct rpc_task *task,
 					    hdr->args.offset, hdr->args.count,
 					    &hdr->res.op_status, OP_WRITE,
 					    task->tk_status);
-		trace_ff_layout_write_error(hdr);
+		//trace_ff_layout_write_error(hdr);
 	}
 
 	err = ff_layout_async_handle_error(task, hdr->args.context->state,
 					   hdr->ds_clp, hdr->lseg,
 					   hdr->pgio_mirror_idx);
 
-	trace_nfs4_pnfs_write(hdr, err);
+	//trace_nfs4_pnfs_write(hdr, err);
 	clear_bit(NFS_IOHDR_RESEND_PNFS, &hdr->flags);
 	clear_bit(NFS_IOHDR_RESEND_MDS, &hdr->flags);
 	switch (err) {
@@ -1509,13 +1509,13 @@ static int ff_layout_commit_done_cb(struct rpc_task *task,
 					    data->args.offset, data->args.count,
 					    &data->res.op_status, OP_COMMIT,
 					    task->tk_status);
-		trace_ff_layout_commit_error(data);
+		//trace_ff_layout_commit_error(data);
 	}
 
 	err = ff_layout_async_handle_error(task, NULL, data->ds_clp,
 					   data->lseg, data->ds_commit_index);
 
-	trace_nfs4_pnfs_commit_ds(data, err);
+	//trace_nfs4_pnfs_commit_ds(data, err);
 	switch (err) {
 	case -NFS4ERR_RESET_TO_PNFS:
 		pnfs_generic_prepare_to_resend_writes(data);
@@ -1807,7 +1807,7 @@ ff_layout_read_pagelist(struct nfs_pgio_header *hdr)
 out_failed:
 	if (ff_layout_avoid_mds_available_ds(lseg))
 		return PNFS_TRY_AGAIN;
-	trace_pnfs_mds_fallback_read_pagelist(hdr->inode,
+	//trace_pnfs_mds_fallback_read_pagelist(hdr->inode,
 			hdr->args.offset, hdr->args.count,
 			IOMODE_READ, NFS_I(hdr->inode)->layout, lseg);
 	return PNFS_NOT_ATTEMPTED;
@@ -1875,7 +1875,7 @@ ff_layout_write_pagelist(struct nfs_pgio_header *hdr, int sync)
 out_failed:
 	if (ff_layout_avoid_mds_available_ds(lseg))
 		return PNFS_TRY_AGAIN;
-	trace_pnfs_mds_fallback_write_pagelist(hdr->inode,
+	//trace_pnfs_mds_fallback_write_pagelist(hdr->inode,
 			hdr->args.offset, hdr->args.count,
 			IOMODE_RW, NFS_I(hdr->inode)->layout, lseg);
 	return PNFS_NOT_ATTEMPTED;

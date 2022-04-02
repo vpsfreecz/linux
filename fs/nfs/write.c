@@ -591,7 +591,7 @@ nfs_lock_and_join_requests(struct page *page)
 
 static void nfs_write_error(struct nfs_page *req, int error)
 {
-	trace_nfs_write_error(req, error);
+	//trace_nfs_write_error(req, error);
 	nfs_mapping_set_error(req->wb_page, error);
 	nfs_inode_remove_request(req);
 	nfs_end_page_writeback(req);
@@ -997,7 +997,7 @@ static void nfs_write_completion(struct nfs_pgio_header *hdr)
 		nfs_list_remove_request(req);
 		if (test_bit(NFS_IOHDR_ERROR, &hdr->flags) &&
 		    (hdr->good_bytes < bytes)) {
-			trace_nfs_comp_error(req, hdr->error);
+			//trace_nfs_comp_error(req, hdr->error);
 			nfs_mapping_set_error(req->wb_page, hdr->error);
 			goto remove_req;
 		}
@@ -1388,7 +1388,7 @@ static void nfs_initiate_write(struct nfs_pgio_header *hdr,
 
 	task_setup_data->priority = priority;
 	rpc_ops->write_setup(hdr, msg, &task_setup_data->rpc_client);
-	trace_nfs_initiate_write(hdr);
+	//trace_nfs_initiate_write(hdr);
 }
 
 /* If a nfs_flush_* function fails, it should remove reqs from @head and
@@ -1552,7 +1552,7 @@ static int nfs_writeback_done(struct rpc_task *task,
 		return status;
 
 	nfs_add_stats(inode, NFSIOS_SERVERWRITTENBYTES, hdr->res.count);
-	trace_nfs_writeback_done(task, hdr);
+	//trace_nfs_writeback_done(task, hdr);
 
 	if (hdr->res.verf->committed < hdr->args.stable &&
 	    task->tk_status >= 0) {
@@ -1689,7 +1689,7 @@ int nfs_initiate_commit(struct rpc_clnt *clnt, struct nfs_commit_data *data,
 	};
 	/* Set up the initial task struct.  */
 	nfs_ops->commit_setup(data, &msg, &task_setup_data.rpc_client);
-	trace_nfs_initiate_commit(data);
+	//trace_nfs_initiate_commit(data);
 
 	dprintk("NFS: initiated commit call\n");
 
@@ -1817,7 +1817,7 @@ static void nfs_commit_done(struct rpc_task *task, void *calldata)
 
 	/* Call the NFS version-specific code */
 	NFS_PROTO(data->inode)->commit_done(task, data);
-	trace_nfs_commit_done(task, data);
+	//trace_nfs_commit_done(task, data);
 }
 
 static void nfs_commit_release_pages(struct nfs_commit_data *data)
@@ -1841,7 +1841,7 @@ static void nfs_commit_release_pages(struct nfs_commit_data *data)
 			(long long)req_offset(req));
 		if (status < 0) {
 			if (req->wb_page) {
-				trace_nfs_commit_error(req, status);
+				//trace_nfs_commit_error(req, status);
 				nfs_mapping_set_error(req->wb_page, status);
 				nfs_inode_remove_request(req);
 			}
@@ -2008,7 +2008,7 @@ int nfs_wb_all(struct inode *inode)
 {
 	int ret;
 
-	trace_nfs_writeback_inode_enter(inode);
+	//trace_nfs_writeback_inode_enter(inode);
 
 	ret = filemap_write_and_wait(inode->i_mapping);
 	if (ret)
@@ -2020,7 +2020,7 @@ int nfs_wb_all(struct inode *inode)
 	ret = 0;
 
 out:
-	trace_nfs_writeback_inode_exit(inode, ret);
+	//trace_nfs_writeback_inode_exit(inode, ret);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(nfs_wb_all);
@@ -2065,7 +2065,7 @@ int nfs_wb_page(struct inode *inode, struct page *page)
 	};
 	int ret;
 
-	trace_nfs_writeback_page_enter(inode);
+	//trace_nfs_writeback_page_enter(inode);
 
 	for (;;) {
 		wait_on_page_writeback(page);
@@ -2083,7 +2083,7 @@ int nfs_wb_page(struct inode *inode, struct page *page)
 			goto out_error;
 	}
 out_error:
-	trace_nfs_writeback_page_exit(inode, ret);
+	//trace_nfs_writeback_page_exit(inode, ret);
 	return ret;
 }
 

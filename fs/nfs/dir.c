@@ -1391,9 +1391,9 @@ nfs_do_lookup_revalidate(struct inode *dir, struct dentry *dentry,
 	if (NFS_STALE(inode))
 		goto out_bad;
 
-	trace_nfs_lookup_revalidate_enter(dir, dentry, flags);
+	//trace_nfs_lookup_revalidate_enter(dir, dentry, flags);
 	error = nfs_lookup_revalidate_dentry(dir, dentry, inode);
-	trace_nfs_lookup_revalidate_exit(dir, dentry, flags, error);
+	//trace_nfs_lookup_revalidate_exit(dir, dentry, flags, error);
 	return error;
 out_valid:
 	return nfs_lookup_revalidate_done(dir, dentry, inode, 1);
@@ -1581,7 +1581,7 @@ struct dentry *nfs_lookup(struct inode *dir, struct dentry * dentry, unsigned in
 		goto out;
 
 	dir_verifier = nfs_save_change_attribute(dir);
-	trace_nfs_lookup_enter(dir, dentry, flags);
+	//trace_nfs_lookup_enter(dir, dentry, flags);
 	error = NFS_PROTO(dir)->lookup(dir, dentry, fhandle, fattr, label);
 	if (error == -ENOENT)
 		goto no_entry;
@@ -1606,7 +1606,7 @@ no_entry:
 	}
 	nfs_set_verifier(dentry, dir_verifier);
 out_label:
-	trace_nfs_lookup_exit(dir, dentry, flags, error);
+	//trace_nfs_lookup_exit(dir, dentry, flags, error);
 	nfs4_label_free(label);
 out:
 	nfs_free_fattr(fattr);
@@ -1737,13 +1737,13 @@ int nfs_atomic_open(struct inode *dir, struct dentry *dentry,
 	if (IS_ERR(ctx))
 		goto out;
 
-	trace_nfs_atomic_open_enter(dir, ctx, open_flags);
+	//trace_nfs_atomic_open_enter(dir, ctx, open_flags);
 	inode = NFS_PROTO(dir)->open_context(dir, ctx, open_flags, &attr, &created);
 	if (created)
 		file->f_mode |= FMODE_CREATED;
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
-		trace_nfs_atomic_open_exit(dir, ctx, open_flags, err);
+		//trace_nfs_atomic_open_exit(dir, ctx, open_flags, err);
 		put_nfs_open_context(ctx);
 		d_drop(dentry);
 		switch (err) {
@@ -1766,7 +1766,7 @@ int nfs_atomic_open(struct inode *dir, struct dentry *dentry,
 	}
 
 	err = nfs_finish_open(ctx, ctx->dentry, file, open_flags);
-	trace_nfs_atomic_open_exit(dir, ctx, open_flags, err);
+	//trace_nfs_atomic_open_exit(dir, ctx, open_flags, err);
 	put_nfs_open_context(ctx);
 out:
 	if (unlikely(switched)) {
@@ -1936,9 +1936,9 @@ int nfs_create(struct inode *dir, struct dentry *dentry,
 	attr.ia_mode = mode;
 	attr.ia_valid = ATTR_MODE;
 
-	trace_nfs_create_enter(dir, dentry, open_flags);
+	//trace_nfs_create_enter(dir, dentry, open_flags);
 	error = NFS_PROTO(dir)->create(dir, dentry, &attr, open_flags);
-	trace_nfs_create_exit(dir, dentry, open_flags, error);
+	//trace_nfs_create_exit(dir, dentry, open_flags, error);
 	if (error != 0)
 		goto out_err;
 	return 0;
@@ -1963,9 +1963,9 @@ nfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t rdev)
 	attr.ia_mode = mode;
 	attr.ia_valid = ATTR_MODE;
 
-	trace_nfs_mknod_enter(dir, dentry);
+	//trace_nfs_mknod_enter(dir, dentry);
 	status = NFS_PROTO(dir)->mknod(dir, dentry, &attr, rdev);
-	trace_nfs_mknod_exit(dir, dentry, status);
+	//trace_nfs_mknod_exit(dir, dentry, status);
 	if (status != 0)
 		goto out_err;
 	return 0;
@@ -1989,9 +1989,9 @@ int nfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	attr.ia_valid = ATTR_MODE;
 	attr.ia_mode = mode | S_IFDIR;
 
-	trace_nfs_mkdir_enter(dir, dentry);
+	//trace_nfs_mkdir_enter(dir, dentry);
 	error = NFS_PROTO(dir)->mkdir(dir, dentry, &attr);
-	trace_nfs_mkdir_exit(dir, dentry, error);
+	//trace_nfs_mkdir_exit(dir, dentry, error);
 	if (error != 0)
 		goto out_err;
 	return 0;
@@ -2014,7 +2014,7 @@ int nfs_rmdir(struct inode *dir, struct dentry *dentry)
 	dfprintk(VFS, "NFS: rmdir(%s/%lu), %pd\n",
 			dir->i_sb->s_id, dir->i_ino, dentry);
 
-	trace_nfs_rmdir_enter(dir, dentry);
+	//trace_nfs_rmdir_enter(dir, dentry);
 	if (d_really_is_positive(dentry)) {
 		down_write(&NFS_I(d_inode(dentry))->rmdir_sem);
 		error = NFS_PROTO(dir)->rmdir(dir, &dentry->d_name);
@@ -2029,7 +2029,7 @@ int nfs_rmdir(struct inode *dir, struct dentry *dentry)
 		up_write(&NFS_I(d_inode(dentry))->rmdir_sem);
 	} else
 		error = NFS_PROTO(dir)->rmdir(dir, &dentry->d_name);
-	trace_nfs_rmdir_exit(dir, dentry, error);
+	//trace_nfs_rmdir_exit(dir, dentry, error);
 
 	return error;
 }
@@ -2056,7 +2056,7 @@ static int nfs_safe_remove(struct dentry *dentry)
 		goto out;
 	}
 
-	trace_nfs_remove_enter(dir, dentry);
+	//trace_nfs_remove_enter(dir, dentry);
 	if (inode != NULL) {
 		error = NFS_PROTO(dir)->remove(dir, dentry);
 		if (error == 0)
@@ -2065,7 +2065,7 @@ static int nfs_safe_remove(struct dentry *dentry)
 		error = NFS_PROTO(dir)->remove(dir, dentry);
 	if (error == -ENOENT)
 		nfs_dentry_handle_enoent(dentry);
-	trace_nfs_remove_exit(dir, dentry, error);
+	//trace_nfs_remove_exit(dir, dentry, error);
 out:
 	return error;
 }
@@ -2083,7 +2083,7 @@ int nfs_unlink(struct inode *dir, struct dentry *dentry)
 	dfprintk(VFS, "NFS: unlink(%s/%lu, %pd)\n", dir->i_sb->s_id,
 		dir->i_ino, dentry);
 
-	trace_nfs_unlink_enter(dir, dentry);
+	//trace_nfs_unlink_enter(dir, dentry);
 	spin_lock(&dentry->d_lock);
 	if (d_count(dentry) > 1) {
 		spin_unlock(&dentry->d_lock);
@@ -2103,7 +2103,7 @@ int nfs_unlink(struct inode *dir, struct dentry *dentry)
 	} else if (need_rehash)
 		d_rehash(dentry);
 out:
-	trace_nfs_unlink_exit(dir, dentry, error);
+	//trace_nfs_unlink_exit(dir, dentry, error);
 	return error;
 }
 EXPORT_SYMBOL_GPL(nfs_unlink);
@@ -2149,9 +2149,9 @@ int nfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 	if (pathlen < PAGE_SIZE)
 		memset(kaddr + pathlen, 0, PAGE_SIZE - pathlen);
 
-	trace_nfs_symlink_enter(dir, dentry);
+	//trace_nfs_symlink_enter(dir, dentry);
 	error = NFS_PROTO(dir)->symlink(dir, dentry, page, pathlen, &attr);
-	trace_nfs_symlink_exit(dir, dentry, error);
+	//trace_nfs_symlink_exit(dir, dentry, error);
 	if (error != 0) {
 		dfprintk(VFS, "NFS: symlink(%s/%lu, %pd, %s) error %d\n",
 			dir->i_sb->s_id, dir->i_ino,
@@ -2190,7 +2190,7 @@ nfs_link(struct dentry *old_dentry, struct inode *dir, struct dentry *dentry)
 	dfprintk(VFS, "NFS: link(%pd2 -> %pd2)\n",
 		old_dentry, dentry);
 
-	trace_nfs_link_enter(inode, dir, dentry);
+	//trace_nfs_link_enter(inode, dir, dentry);
 	d_drop(dentry);
 	if (S_ISREG(inode->i_mode))
 		nfs_sync_inode(inode);
@@ -2199,7 +2199,7 @@ nfs_link(struct dentry *old_dentry, struct inode *dir, struct dentry *dentry)
 		ihold(inode);
 		d_add(dentry, inode);
 	}
-	trace_nfs_link_exit(inode, dir, dentry, error);
+	//trace_nfs_link_exit(inode, dir, dentry, error);
 	return error;
 }
 EXPORT_SYMBOL_GPL(nfs_link);
@@ -2245,7 +2245,7 @@ int nfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		 old_dentry, new_dentry,
 		 d_count(new_dentry));
 
-	trace_nfs_rename_enter(old_dir, old_dentry, new_dir, new_dentry);
+	//trace_nfs_rename_enter(old_dir, old_dentry, new_dir, new_dentry);
 	/*
 	 * For non-directories, check whether the target is busy and if so,
 	 * make a copy of the dentry and then do a silly-rename. If the
@@ -2310,8 +2310,8 @@ int nfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 out:
 	if (rehash)
 		d_rehash(rehash);
-	trace_nfs_rename_exit(old_dir, old_dentry,
-			new_dir, new_dentry, error);
+	//trace_nfs_rename_exit(old_dir, old_dentry,
+	//		new_dir, new_dentry, error);
 	if (!error) {
 		if (new_inode != NULL)
 			nfs_drop_nlink(new_inode);
@@ -2688,7 +2688,7 @@ static int nfs_do_access(struct inode *inode, const struct cred *cred, int mask)
 	int cache_mask = -1;
 	int status;
 
-	trace_nfs_access_enter(inode);
+	//trace_nfs_access_enter(inode);
 
 	status = nfs_access_get_cached(inode, cred, &cache, may_block);
 	if (status == 0)
@@ -2727,7 +2727,7 @@ out_cached:
 	if ((mask & ~cache_mask & (MAY_READ | MAY_WRITE | MAY_EXEC)) != 0)
 		status = -EACCES;
 out:
-	trace_nfs_access_exit(inode, mask, cache_mask, status);
+	//trace_nfs_access_exit(inode, mask, cache_mask, status);
 	return status;
 }
 

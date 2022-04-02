@@ -48,7 +48,7 @@ static void nfs_async_unlink_done(struct rpc_task *task, void *calldata)
 	struct nfs_unlinkdata *data = calldata;
 	struct inode *dir = d_inode(data->dentry->d_parent);
 
-	trace_nfs_sillyrename_unlink(data, task->tk_status);
+	//trace_nfs_sillyrename_unlink(data, task->tk_status);
 	if (!NFS_PROTO(dir)->unlink_done(task, dir))
 		rpc_restart_call_prepare(task);
 }
@@ -262,8 +262,8 @@ static void nfs_async_rename_done(struct rpc_task *task, void *calldata)
 	struct inode *new_dir = data->new_dir;
 	struct dentry *old_dentry = data->old_dentry;
 
-	trace_nfs_sillyrename_rename(old_dir, old_dentry,
-			new_dir, data->new_dentry, task->tk_status);
+	//trace_nfs_sillyrename_rename(old_dir, old_dentry,
+	//		new_dir, data->new_dentry, task->tk_status);
 	if (!NFS_PROTO(old_dir)->rename_done(task, old_dir, new_dir)) {
 		rpc_restart_call_prepare(task);
 		return;

@@ -782,7 +782,7 @@ nfs42_layoutstat_done(struct rpc_task *task, void *calldata)
 		NFS_SERVER(inode)->caps &= ~NFS_CAP_LAYOUTSTATS;
 	}
 
-	trace_nfs4_layoutstats(inode, &data->args.stateid, task->tk_status);
+	//trace_nfs4_layoutstats(inode, &data->args.stateid, task->tk_status);
 }
 
 static void
@@ -950,7 +950,7 @@ nfs42_layouterror_done(struct rpc_task *task, void *calldata)
 		NFS_SERVER(inode)->caps &= ~NFS_CAP_LAYOUTERROR;
 	}
 
-	trace_nfs4_layouterror(inode, &data->args.errors[0].stateid,
+	//trace_nfs4_layouterror(inode, &data->args.errors[0].stateid,
 			       task->tk_status);
 }
 

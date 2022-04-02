@@ -1584,7 +1584,7 @@ void pnfs_roc_release(struct nfs4_layoutreturn_args *args,
 	default:
 		arg_stateid = &args->stateid;
 	}
-	trace_nfs4_layoutreturn_on_close(args->inode, &args->stateid, ret);
+	//trace_nfs4_layoutreturn_on_close(args->inode, &args->stateid, ret);
 	pnfs_layoutreturn_free_lsegs(lo, arg_stateid, &args->range,
 			res_stateid);
 	if (ld_private && ld_private->ops && ld_private->ops->free)
@@ -1975,13 +1975,13 @@ pnfs_update_layout(struct inode *ino,
 	bool first;
 
 	if (!pnfs_enabled_sb(NFS_SERVER(ino))) {
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				 PNFS_UPDATE_LAYOUT_NO_PNFS);
 		goto out;
 	}
 
 	if (pnfs_within_mdsthreshold(ctx, ino, iomode)) {
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				 PNFS_UPDATE_LAYOUT_MDSTHRESH);
 		goto out;
 	}
@@ -1995,14 +1995,14 @@ lookup_again:
 	lo = pnfs_find_alloc_layout(ino, ctx, gfp_flags);
 	if (lo == NULL) {
 		spin_unlock(&ino->i_lock);
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				 PNFS_UPDATE_LAYOUT_NOMEM);
 		goto out;
 	}
 
 	/* Do we even need to bother with this? */
 	if (test_bit(NFS_LAYOUT_BULK_RECALL, &lo->plh_flags)) {
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				 PNFS_UPDATE_LAYOUT_BULK_RECALL);
 		dprintk("%s matches recall, use MDS\n", __func__);
 		goto out_unlock;
@@ -2010,7 +2010,7 @@ lookup_again:
 
 	/* if LAYOUTGET already failed once we don't try again */
 	if (pnfs_layout_io_test_failed(lo, iomode)) {
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				 PNFS_UPDATE_LAYOUT_IO_TEST_FAIL);
 		goto out_unlock;
 	}
@@ -2041,19 +2041,19 @@ lookup_again:
 		if (!IS_ERR(lseg)) {
 			pnfs_put_layout_hdr(lo);
 			dprintk("%s retrying\n", __func__);
-			trace_pnfs_update_layout(ino, pos, count, iomode, lo,
+			//trace_pnfs_update_layout(ino, pos, count, iomode, lo,
 						 lseg,
 						 PNFS_UPDATE_LAYOUT_RETRY);
 			goto lookup_again;
 		}
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 					 PNFS_UPDATE_LAYOUT_RETURN);
 		goto out_put_layout_hdr;
 	}
 
 	lseg = pnfs_find_lseg(lo, &arg, strict_iomode);
 	if (lseg) {
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				PNFS_UPDATE_LAYOUT_FOUND_CACHED);
 		goto out_unlock;
 	}
@@ -2090,7 +2090,7 @@ lookup_again:
 					NULL, &stateid, NULL);
 		if (status != 0) {
 			lseg = ERR_PTR(status);
-			trace_pnfs_update_layout(ino, pos, count,
+			//trace_pnfs_update_layout(ino, pos, count,
 					iomode, lo, lseg,
 					PNFS_UPDATE_LAYOUT_INVALID_OPEN);
 			nfs4_schedule_stateid_recovery(server, ctx->state);
@@ -2104,7 +2104,7 @@ lookup_again:
 	}
 
 	if (pnfs_layoutgets_blocked(lo)) {
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				PNFS_UPDATE_LAYOUT_BLOCKED);
 		goto out_unlock;
 	}
@@ -2123,14 +2123,14 @@ lookup_again:
 
 	lgp = pnfs_alloc_init_layoutget_args(ino, ctx, &stateid, &arg, gfp_flags);
 	if (!lgp) {
-		trace_pnfs_update_layout(ino, pos, count, iomode, lo, NULL,
+		//trace_pnfs_update_layout(ino, pos, count, iomode, lo, NULL,
 					 PNFS_UPDATE_LAYOUT_NOMEM);
 		nfs_layoutget_end(lo);
 		goto out_put_layout_hdr;
 	}
 
 	lseg = nfs4_proc_layoutget(lgp, &timeout);
-	trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+	//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				 PNFS_UPDATE_LAYOUT_SEND_LAYOUTGET);
 	nfs_layoutget_end(lo);
 	if (IS_ERR(lseg)) {
@@ -2152,7 +2152,7 @@ lookup_again:
 		if (lseg) {
 			if (first)
 				pnfs_clear_first_layoutget(lo);
-			trace_pnfs_update_layout(ino, pos, count,
+			//trace_pnfs_update_layout(ino, pos, count,
 				iomode, lo, lseg, PNFS_UPDATE_LAYOUT_RETRY);
 			pnfs_put_layout_hdr(lo);
 			goto lookup_again;
@@ -2164,7 +2164,7 @@ lookup_again:
 out_put_layout_hdr:
 	if (first)
 		pnfs_clear_first_layoutget(lo);
-	trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
+	//trace_pnfs_update_layout(ino, pos, count, iomode, lo, lseg,
 				 PNFS_UPDATE_LAYOUT_EXIT);
 	pnfs_put_layout_hdr(lo);
 out:
@@ -2831,7 +2831,7 @@ void pnfs_ld_write_done(struct nfs_pgio_header *hdr)
 				hdr->mds_offset + hdr->res.count);
 		hdr->mds_ops->rpc_call_done(&hdr->task, hdr);
 	}
-	trace_nfs4_pnfs_write(hdr, hdr->pnfs_error);
+	//trace_nfs4_pnfs_write(hdr, hdr->pnfs_error);
 	if (unlikely(hdr->pnfs_error))
 		pnfs_ld_handle_write_error(hdr);
 	hdr->mds_ops->rpc_release(hdr);
@@ -2954,7 +2954,7 @@ void pnfs_ld_read_done(struct nfs_pgio_header *hdr)
 {
 	if (likely(!hdr->pnfs_error))
 		hdr->mds_ops->rpc_call_done(&hdr->task, hdr);
-	trace_nfs4_pnfs_read(hdr, hdr->pnfs_error);
+	//trace_nfs4_pnfs_read(hdr, hdr->pnfs_error);
 	if (unlikely(hdr->pnfs_error))
 		pnfs_ld_handle_read_error(hdr);
 	hdr->mds_ops->rpc_release(hdr);

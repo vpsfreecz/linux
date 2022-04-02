@@ -42,8 +42,8 @@ __be32 nfs4_callback_getattr(void *argp, void *resp,
 	if (IS_ERR(inode)) {
 		if (inode == ERR_PTR(-EAGAIN))
 			res->status = htonl(NFS4ERR_DELAY);
-		trace_nfs4_cb_getattr(cps->clp, &args->fh, NULL,
-				-ntohl(res->status));
+		//trace_nfs4_cb_getattr(cps->clp, &args->fh, NULL,
+		//		-ntohl(res->status));
 		goto out;
 	}
 	rcu_read_lock();
@@ -63,7 +63,7 @@ __be32 nfs4_callback_getattr(void *argp, void *resp,
 	res->status = 0;
 out_iput:
 	rcu_read_unlock();
-	trace_nfs4_cb_getattr(cps->clp, &args->fh, inode, -ntohl(res->status));
+	//trace_nfs4_cb_getattr(cps->clp, &args->fh, inode, -ntohl(res->status));
 	nfs_iput_and_deactive(inode);
 out:
 	dprintk("%s: exit with status = %d\n", __func__, ntohl(res->status));
@@ -89,8 +89,8 @@ __be32 nfs4_callback_recall(void *argp, void *resp,
 	if (IS_ERR(inode)) {
 		if (inode == ERR_PTR(-EAGAIN))
 			res = htonl(NFS4ERR_DELAY);
-		trace_nfs4_cb_recall(cps->clp, &args->fh, NULL,
-				&args->stateid, -ntohl(res));
+		//trace_nfs4_cb_recall(cps->clp, &args->fh, NULL,
+		//		&args->stateid, -ntohl(res));
 		goto out;
 	}
 	/* Set up a helper thread to actually return the delegation */
@@ -104,8 +104,8 @@ __be32 nfs4_callback_recall(void *argp, void *resp,
 	default:
 		res = htonl(NFS4ERR_RESOURCE);
 	}
-	trace_nfs4_cb_recall(cps->clp, &args->fh, inode,
-			&args->stateid, -ntohl(res));
+	//trace_nfs4_cb_recall(cps->clp, &args->fh, inode,
+	//		&args->stateid, -ntohl(res));
 	nfs_iput_and_deactive(inode);
 out:
 	dprintk("%s: exit with status = %d\n", __func__, ntohl(res));
@@ -300,8 +300,8 @@ unlock:
 out:
 	nfs_iput_and_deactive(ino);
 out_noput:
-	trace_nfs4_cb_layoutrecall_file(clp, &args->cbl_fh, ino,
-			&args->cbl_stateid, -rv);
+	//trace_nfs4_cb_layoutrecall_file(clp, &args->cbl_fh, ino,
+	//		&args->cbl_stateid, -rv);
 	return rv;
 }
 
@@ -436,7 +436,7 @@ validate_seqid(const struct nfs4_slot_table *tbl, const struct nfs4_slot *slot,
 	return cpu_to_be32(NFS4_OK);
 
 out_err:
-	trace_nfs4_cb_seqid_err(args, ret);
+	//trace_nfs4_cb_seqid_err(args, ret);
 	return ret;
 }
 
@@ -582,7 +582,7 @@ out:
 	} else
 		res->csr_status = status;
 
-	trace_nfs4_cb_sequence(args, res, status);
+	//trace_nfs4_cb_sequence(args, res, status);
 	return status;
 }
 

@@ -250,7 +250,7 @@ void nfs_inode_reclaim_delegation(struct inode *inode, const struct cred *cred,
 			spin_unlock(&delegation->lock);
 			rcu_read_unlock();
 			put_cred(oldcred);
-			trace_nfs4_reclaim_delegation(inode, type);
+			//trace_nfs4_reclaim_delegation(inode, type);
 			return;
 		}
 		/* We appear to have raced with a delegation return. */
@@ -496,7 +496,7 @@ add_new:
 
 	atomic_long_inc(&nfs_active_delegations);
 
-	trace_nfs4_set_delegation(inode, type);
+	//trace_nfs4_set_delegation(inode, type);
 
 	spin_lock(&inode->i_lock);
 	if (NFS_I(inode)->cache_validity & (NFS_INO_INVALID_ATTR|NFS_INO_INVALID_ATIME))

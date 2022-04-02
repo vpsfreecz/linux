@@ -205,7 +205,7 @@ static int filelayout_read_done_cb(struct rpc_task *task,
 {
 	int err;
 
-	trace_nfs4_pnfs_read(hdr, task->tk_status);
+	//trace_nfs4_pnfs_read(hdr, task->tk_status);
 	err = filelayout_async_handle_error(task, hdr->args.context->state,
 					    hdr->ds_clp, hdr->lseg);
 
@@ -317,7 +317,7 @@ static int filelayout_write_done_cb(struct rpc_task *task,
 {
 	int err;
 
-	trace_nfs4_pnfs_write(hdr, task->tk_status);
+	//trace_nfs4_pnfs_write(hdr, task->tk_status);
 	err = filelayout_async_handle_error(task, hdr->args.context->state,
 					    hdr->ds_clp, hdr->lseg);
 
@@ -345,7 +345,7 @@ static int filelayout_commit_done_cb(struct rpc_task *task,
 {
 	int err;
 
-	trace_nfs4_pnfs_commit_ds(data, task->tk_status);
+	//trace_nfs4_pnfs_commit_ds(data, task->tk_status);
 	err = filelayout_async_handle_error(task, NULL, data->ds_clp,
 					    data->lseg);
 
