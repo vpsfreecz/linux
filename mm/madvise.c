@@ -1163,7 +1163,8 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 	return do_madvise(current->mm, start, len_in, behavior);
 }
 
-SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
+#include "kpatch-macros.h"
+KPATCH_SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
 		size_t, vlen, int, behavior, unsigned int, flags)
 {
 	ssize_t ret;
@@ -1242,3 +1243,5 @@ free_iov:
 out:
 	return ret;
 }
+
+

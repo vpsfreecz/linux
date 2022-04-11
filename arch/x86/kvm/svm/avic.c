@@ -892,12 +892,6 @@ int svm_update_pi_irte(struct kvm *kvm, unsigned int host_irq,
 			}
 		}
 
-		if (!ret && svm) {
-			trace_kvm_pi_irte_update(host_irq, svm->vcpu.vcpu_id,
-						 e->gsi, vcpu_info.vector,
-						 vcpu_info.pi_desc_addr, set);
-		}
-
 		if (ret < 0) {
 			pr_err("%s: failed to update PI IRTE\n", __func__);
 			goto out;
