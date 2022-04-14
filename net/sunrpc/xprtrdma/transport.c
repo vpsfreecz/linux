@@ -269,7 +269,7 @@ xprt_rdma_inject_disconnect(struct rpc_xprt *xprt)
 {
 	struct rpcrdma_xprt *r_xprt = rpcx_to_rdmax(xprt);
 
-	trace_xprtrdma_op_inject_dsc(r_xprt);
+	//trace_xprtrdma_op_inject_dsc(r_xprt);
 	rdma_disconnect(r_xprt->rx_ep->re_id);
 }
 
@@ -446,7 +446,7 @@ static void xprt_rdma_set_connect_timeout(struct rpc_xprt *xprt,
 {
 	struct rpcrdma_xprt *r_xprt = rpcx_to_rdmax(xprt);
 
-	trace_xprtrdma_op_set_cto(r_xprt, connect_timeout, reconnect_timeout);
+	//trace_xprtrdma_op_set_cto(r_xprt, connect_timeout, reconnect_timeout);
 
 	spin_lock(&xprt->transport_lock);
 
@@ -491,7 +491,7 @@ xprt_rdma_connect(struct rpc_xprt *xprt, struct rpc_task *task)
 		delay = xprt_reconnect_delay(xprt);
 		xprt_reconnect_backoff(xprt, RPCRDMA_INIT_REEST_TO);
 	}
-	trace_xprtrdma_op_connect(r_xprt, delay);
+	//trace_xprtrdma_op_connect(r_xprt, delay);
 	queue_delayed_work(xprtiod_workqueue, &r_xprt->rx_connect_worker,
 			   delay);
 }

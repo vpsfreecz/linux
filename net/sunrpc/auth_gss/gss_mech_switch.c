@@ -178,8 +178,8 @@ struct gss_api_mech *gss_mech_get_by_OID(struct rpcsec_gss_oid *obj)
 		}
 	}
 	rcu_read_unlock();
-	if (!gm)
-		trace_rpcgss_oid_to_mech(buf);
+	//if (!gm)
+	//	trace_rpcgss_oid_to_mech(buf);
 	return gm;
 }
 

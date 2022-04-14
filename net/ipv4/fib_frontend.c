@@ -1089,6 +1089,7 @@ static void fib_magic(int cmd, int type, __be32 dst, int dst_len,
 		fib_table_delete(net, tb, &cfg, NULL);
 }
 
+extern int arp_invalidate(struct net_device *dev, __be32 ip, bool force);
 void fib_add_ifaddr(struct in_ifaddr *ifa)
 {
 	struct in_device *in_dev = ifa->ifa_dev;

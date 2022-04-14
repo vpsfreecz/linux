@@ -59,8 +59,8 @@ void frwr_release_mr(struct rpcrdma_mr *mr)
 	int rc;
 
 	rc = ib_dereg_mr(mr->frwr.fr_mr);
-	if (rc)
-		trace_xprtrdma_frwr_dereg(mr, rc);
+	//if (rc)
+	//	trace_xprtrdma_frwr_dereg(mr, rc);
 	kfree(mr->mr_sg);
 	kfree(mr);
 }
@@ -69,10 +69,10 @@ static void frwr_mr_recycle(struct rpcrdma_mr *mr)
 {
 	struct rpcrdma_xprt *r_xprt = mr->mr_xprt;
 
-	trace_xprtrdma_mr_recycle(mr);
+	//trace_xprtrdma_mr_recycle(mr);
 
 	if (mr->mr_dir != DMA_NONE) {
-		trace_xprtrdma_mr_unmap(mr);
+		//trace_xprtrdma_mr_unmap(mr);
 		ib_dma_unmap_sg(r_xprt->rx_ep->re_id->device,
 				mr->mr_sg, mr->mr_nents, mr->mr_dir);
 		mr->mr_dir = DMA_NONE;
@@ -140,7 +140,7 @@ int frwr_mr_init(struct rpcrdma_xprt *r_xprt, struct rpcrdma_mr *mr)
 
 out_mr_err:
 	rc = PTR_ERR(frmr);
-	trace_xprtrdma_frwr_alloc(mr, rc);
+	//trace_xprtrdma_frwr_alloc(mr, rc);
 	return rc;
 
 out_list_err:
@@ -337,17 +337,17 @@ struct rpcrdma_mr_seg *frwr_map(struct rpcrdma_xprt *r_xprt,
 	mr->mr_handle = ibmr->rkey;
 	mr->mr_length = ibmr->length;
 	mr->mr_offset = ibmr->iova;
-	trace_xprtrdma_mr_map(mr);
+	//trace_xprtrdma_mr_map(mr);
 
 	return seg;
 
 out_dmamap_err:
 	mr->mr_dir = DMA_NONE;
-	trace_xprtrdma_frwr_sgerr(mr, i);
+	//trace_xprtrdma_frwr_sgerr(mr, i);
 	return ERR_PTR(-EIO);
 
 out_mapmr_err:
-	trace_xprtrdma_frwr_maperr(mr, n);
+	//trace_xprtrdma_frwr_maperr(mr, n);
 	return ERR_PTR(-EIO);
 }
 
@@ -364,7 +364,7 @@ static void frwr_wc_fastreg(struct ib_cq *cq, struct ib_wc *wc)
 		container_of(cqe, struct rpcrdma_frwr, fr_cqe);
 
 	/* WARNING: Only wr_cqe and status are reliable at this point */
-	trace_xprtrdma_wc_fastreg(wc, frwr);
+	//trace_xprtrdma_wc_fastreg(wc, frwr);
 	/* The MR will get recycled when the associated req is retransmitted */
 
 	rpcrdma_flush_disconnect(cq->cq_context, wc);
@@ -421,7 +421,7 @@ void frwr_reminv(struct rpcrdma_rep *rep, struct list_head *mrs)
 	list_for_each_entry(mr, mrs, mr_list)
 		if (mr->mr_handle == rep->rr_inv_rkey) {
 			list_del_init(&mr->mr_list);
-			trace_xprtrdma_mr_reminv(mr);
+			//trace_xprtrdma_mr_reminv(mr);
 			rpcrdma_mr_put(mr);
 			break;	/* only one invalidated MR per RPC */
 		}
@@ -449,7 +449,7 @@ static void frwr_wc_localinv(struct ib_cq *cq, struct ib_wc *wc)
 	struct rpcrdma_mr *mr = container_of(frwr, struct rpcrdma_mr, frwr);
 
 	/* WARNING: Only wr_cqe and status are reliable at this point */
-	trace_xprtrdma_wc_li(wc, frwr);
+	//trace_xprtrdma_wc_li(wc, frwr);
 	__frwr_release_mr(wc, mr);
 
 	rpcrdma_flush_disconnect(cq->cq_context, wc);
@@ -470,7 +470,7 @@ static void frwr_wc_localinv_wake(struct ib_cq *cq, struct ib_wc *wc)
 	struct rpcrdma_mr *mr = container_of(frwr, struct rpcrdma_mr, frwr);
 
 	/* WARNING: Only wr_cqe and status are reliable at this point */
-	trace_xprtrdma_wc_li_wake(wc, frwr);
+	//trace_xprtrdma_wc_li_wake(wc, frwr);
 	__frwr_release_mr(wc, mr);
 	complete(&frwr->fr_linv_done);
 
@@ -505,7 +505,7 @@ void frwr_unmap_sync(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
 	prev = &first;
 	while ((mr = rpcrdma_mr_pop(&req->rl_registered))) {
 
-		trace_xprtrdma_mr_localinv(mr);
+		//trace_xprtrdma_mr_localinv(mr);
 		r_xprt->rx_stats.local_inv_needed++;
 
 		frwr = &mr->frwr;
@@ -548,7 +548,7 @@ void frwr_unmap_sync(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
 
 	/* Recycle MRs in the LOCAL_INV chain that did not get posted.
 	 */
-	trace_xprtrdma_post_linv(req, rc);
+	//trace_xprtrdma_post_linv(req, rc);
 	while (bad_wr) {
 		frwr = container_of(bad_wr, struct rpcrdma_frwr,
 				    fr_invwr);
@@ -574,7 +574,7 @@ static void frwr_wc_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
 	struct rpcrdma_rep *rep = mr->mr_req->rl_reply;
 
 	/* WARNING: Only wr_cqe and status are reliable at this point */
-	trace_xprtrdma_wc_li_done(wc, frwr);
+	//trace_xprtrdma_wc_li_done(wc, frwr);
 	__frwr_release_mr(wc, mr);
 
 	/* Ensure @rep is generated before __frwr_release_mr */
@@ -609,7 +609,7 @@ void frwr_unmap_async(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
 	prev = &first;
 	while ((mr = rpcrdma_mr_pop(&req->rl_registered))) {
 
-		trace_xprtrdma_mr_localinv(mr);
+		//trace_xprtrdma_mr_localinv(mr);
 		r_xprt->rx_stats.local_inv_needed++;
 
 		frwr = &mr->frwr;
@@ -645,7 +645,7 @@ void frwr_unmap_async(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
 
 	/* Recycle MRs in the LOCAL_INV chain that did not get posted.
 	 */
-	trace_xprtrdma_post_linv(req, rc);
+	//trace_xprtrdma_post_linv(req, rc);
 	while (bad_wr) {
 		frwr = container_of(bad_wr, struct rpcrdma_frwr, fr_invwr);
 		mr = container_of(frwr, struct rpcrdma_mr, frwr);

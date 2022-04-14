@@ -247,7 +247,7 @@ int xprt_reserve_xprt(struct rpc_xprt *xprt, struct rpc_task *task)
 	xprt->snd_task = task;
 
 out_locked:
-	trace_xprt_reserve_xprt(xprt, task);
+	//trace_xprt_reserve_xprt(xprt, task);
 	return 1;
 
 out_unlock:
@@ -327,7 +327,7 @@ out_sleep:
 		rpc_sleep_on(&xprt->sending, task, NULL);
 	return 0;
 out_locked:
-	trace_xprt_reserve_cong(xprt, task);
+	//trace_xprt_reserve_cong(xprt, task);
 	return 1;
 }
 EXPORT_SYMBOL_GPL(xprt_reserve_xprt_cong);
@@ -393,7 +393,7 @@ void xprt_release_xprt(struct rpc_xprt *xprt, struct rpc_task *task)
 		xprt_clear_locked(xprt);
 		__xprt_lock_write_next(xprt);
 	}
-	trace_xprt_release_xprt(xprt, task);
+	//trace_xprt_release_xprt(xprt, task);
 }
 EXPORT_SYMBOL_GPL(xprt_release_xprt);
 
@@ -411,7 +411,7 @@ void xprt_release_xprt_cong(struct rpc_xprt *xprt, struct rpc_task *task)
 		xprt_clear_locked(xprt);
 		__xprt_lock_write_next_cong(xprt);
 	}
-	trace_xprt_release_cong(xprt, task);
+	//trace_xprt_release_cong(xprt, task);
 }
 EXPORT_SYMBOL_GPL(xprt_release_xprt_cong);
 
@@ -433,7 +433,7 @@ __xprt_get_cong(struct rpc_xprt *xprt, struct rpc_rqst *req)
 {
 	if (req->rq_cong)
 		return 1;
-	trace_xprt_get_cong(xprt, req->rq_task);
+	//trace_xprt_get_cong(xprt, req->rq_task);
 	if (RPCXPRT_CONGESTED(xprt)) {
 		xprt_set_congestion_window_wait(xprt);
 		return 0;
@@ -455,7 +455,7 @@ __xprt_put_cong(struct rpc_xprt *xprt, struct rpc_rqst *req)
 	req->rq_cong = 0;
 	xprt->cong -= RPC_CWNDSCALE;
 	xprt_test_and_clear_congestion_window_wait(xprt);
-	trace_xprt_put_cong(xprt, req->rq_task);
+	//trace_xprt_put_cong(xprt, req->rq_task);
 	__xprt_lock_write_next_cong(xprt);
 }
 
@@ -706,7 +706,7 @@ static void xprt_autoclose(struct work_struct *work)
 		container_of(work, struct rpc_xprt, task_cleanup);
 	unsigned int pflags = memalloc_nofs_save();
 
-	trace_xprt_disconnect_auto(xprt);
+	//trace_xprt_disconnect_auto(xprt);
 	clear_bit(XPRT_CLOSE_WAIT, &xprt->state);
 	xprt->ops->close(xprt);
 	xprt_release_write(xprt, NULL);
@@ -721,7 +721,7 @@ static void xprt_autoclose(struct work_struct *work)
  */
 void xprt_disconnect_done(struct rpc_xprt *xprt)
 {
-	trace_xprt_disconnect_done(xprt);
+	//trace_xprt_disconnect_done(xprt);
 	spin_lock(&xprt->transport_lock);
 	xprt_clear_connected(xprt);
 	xprt_clear_write_space_locked(xprt);
@@ -738,7 +738,7 @@ EXPORT_SYMBOL_GPL(xprt_disconnect_done);
  */
 void xprt_force_disconnect(struct rpc_xprt *xprt)
 {
-	trace_xprt_disconnect_force(xprt);
+	//trace_xprt_disconnect_force(xprt);
 
 	/* Don't race with the test_bit() in xprt_clear_locked() */
 	spin_lock(&xprt->transport_lock);
@@ -872,7 +872,7 @@ void xprt_connect(struct rpc_task *task)
 {
 	struct rpc_xprt	*xprt = task->tk_rqstp->rq_xprt;
 
-	trace_xprt_connect(xprt);
+	//trace_xprt_connect(xprt);
 
 	if (!xprt_bound(xprt)) {
 		task->tk_status = -EAGAIN;
@@ -882,7 +882,7 @@ void xprt_connect(struct rpc_task *task)
 		return;
 
 	if (test_and_clear_bit(XPRT_CLOSE_WAIT, &xprt->state)) {
-		trace_xprt_disconnect_cleanup(xprt);
+		//trace_xprt_disconnect_cleanup(xprt);
 		xprt->ops->close(xprt);
 	}
 
@@ -1022,14 +1022,14 @@ struct rpc_rqst *xprt_lookup_rqst(struct rpc_xprt *xprt, __be32 xid)
 
 	entry = xprt_request_rb_find(xprt, xid);
 	if (entry != NULL) {
-		trace_xprt_lookup_rqst(xprt, xid, 0);
+		//trace_xprt_lookup_rqst(xprt, xid, 0);
 		entry->rq_rtt = ktime_sub(ktime_get(), entry->rq_xtime);
 		return entry;
 	}
 
 	dprintk("RPC:       xprt_lookup_rqst did not find xid %08x\n",
 			ntohl(xid));
-	trace_xprt_lookup_rqst(xprt, xid, -ENOENT);
+	//trace_xprt_lookup_rqst(xprt, xid, -ENOENT);
 	xprt->stat.bad_xids++;
 	return NULL;
 }
@@ -1188,7 +1188,7 @@ static void xprt_timer(struct rpc_task *task)
 	if (task->tk_status != -ETIMEDOUT)
 		return;
 
-	trace_xprt_timer(xprt, req->rq_xid, task->tk_status);
+	//trace_xprt_timer(xprt, req->rq_xid, task->tk_status);
 	if (!req->rq_reply_bytes_recvd) {
 		if (xprt->ops->timer)
 			xprt->ops->timer(xprt, task);
@@ -1495,12 +1495,12 @@ xprt_request_transmit(struct rpc_rqst *req, struct rpc_task *snd_task)
 	 */
 	req->rq_ntrans++;
 
-	trace_rpc_xdr_sendto(task, &req->rq_snd_buf);
+	//trace_rpc_xdr_sendto(task, &req->rq_snd_buf);
 	connect_cookie = xprt->connect_cookie;
 	status = xprt->ops->send_request(req);
 	if (status != 0) {
 		req->rq_ntrans--;
-		trace_xprt_transmit(req, status);
+		//trace_xprt_transmit(req, status);
 		return status;
 	}
 
@@ -1521,7 +1521,7 @@ xprt_request_transmit(struct rpc_rqst *req, struct rpc_task *snd_task)
 
 	req->rq_connect_cookie = connect_cookie;
 out_dequeue:
-	trace_xprt_transmit(req, status);
+	//trace_xprt_transmit(req, status);
 	xprt_request_dequeue_transmit(task);
 	rpc_wake_up_queued_task_set_status(&xprt->sending, task, status);
 	return status;
@@ -1799,7 +1799,7 @@ xprt_request_init(struct rpc_task *task)
 	req->rq_release_snd_buf = NULL;
 	xprt_init_majortimeo(task, req);
 
-	trace_xprt_reserve(req);
+	//trace_xprt_reserve(req);
 }
 
 static void
@@ -1988,7 +1988,7 @@ found:
 
 	rpc_xprt_debugfs_register(xprt);
 
-	trace_xprt_create(xprt);
+	//trace_xprt_create(xprt);
 out:
 	return xprt;
 }
@@ -1998,7 +1998,7 @@ static void xprt_destroy_cb(struct work_struct *work)
 	struct rpc_xprt *xprt =
 		container_of(work, struct rpc_xprt, task_cleanup);
 
-	trace_xprt_destroy(xprt);
+	//trace_xprt_destroy(xprt);
 
 	rpc_xprt_debugfs_unregister(xprt);
 	rpc_destroy_wait_queue(&xprt->binding);

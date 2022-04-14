@@ -210,7 +210,7 @@ gss_fill_context(const void *p, const void *end, struct gss_cl_ctx *ctx, struct 
 	}
 	ret = gss_import_sec_context(p, seclen, gm, &ctx->gc_gss_ctx, NULL, GFP_NOFS);
 	if (ret < 0) {
-		trace_rpcgss_import_ctx(ret);
+		//trace_rpcgss_import_ctx(ret);
 		p = ERR_PTR(ret);
 		goto err;
 	}
@@ -226,8 +226,8 @@ gss_fill_context(const void *p, const void *end, struct gss_cl_ctx *ctx, struct 
 	if (IS_ERR(p))
 		goto err;
 done:
-	trace_rpcgss_context(window_size, ctx->gc_expiry, now, timeout,
-			     ctx->gc_acceptor.len, ctx->gc_acceptor.data);
+	//trace_rpcgss_context(window_size, ctx->gc_expiry, now, timeout,
+	//		     ctx->gc_acceptor.len, ctx->gc_acceptor.data);
 err:
 	return p;
 }
@@ -471,7 +471,7 @@ static int gss_encode_v1_msg(struct gss_upcall_msg *gss_msg,
 		p += len;
 		gss_msg->msg.len += len;
 	}
-	trace_rpcgss_upcall_msg(gss_msg->databuf);
+	//trace_rpcgss_upcall_msg(gss_msg->databuf);
 	len = scnprintf(p, buflen, "\n");
 	if (len == 0)
 		goto out_overflow;
@@ -615,8 +615,8 @@ gss_refresh_upcall(struct rpc_task *task)
 	spin_unlock(&pipe->lock);
 	gss_release_msg(gss_msg);
 out:
-	trace_rpcgss_upcall_result(from_kuid(&init_user_ns,
-					     cred->cr_cred->fsuid), err);
+	//trace_rpcgss_upcall_result(from_kuid(&init_user_ns,
+	//				     cred->cr_cred->fsuid), err);
 	return err;
 }
 
@@ -670,7 +670,7 @@ retry:
 		schedule();
 	}
 	if (gss_msg->ctx) {
-		trace_rpcgss_ctx_init(gss_cred);
+		//trace_rpcgss_ctx_init(gss_cred);
 		gss_cred_set_ctx(cred, gss_msg->ctx);
 	} else {
 		err = gss_msg->msg.errno;
@@ -680,8 +680,8 @@ out_intr:
 	finish_wait(&gss_msg->waitqueue, &wait);
 	gss_release_msg(gss_msg);
 out:
-	trace_rpcgss_upcall_result(from_kuid(&init_user_ns,
-					     cred->cr_cred->fsuid), err);
+	//trace_rpcgss_upcall_result(from_kuid(&init_user_ns,
+	//				     cred->cr_cred->fsuid), err);
 	return err;
 }
 
@@ -1074,7 +1074,7 @@ err_free:
 	kfree(gss_auth);
 out_dec:
 	module_put(THIS_MODULE);
-	trace_rpcgss_createauth(flavor, err);
+	//trace_rpcgss_createauth(flavor, err);
 	return ERR_PTR(err);
 }
 
@@ -1258,7 +1258,7 @@ gss_send_destroy_context(struct rpc_cred *cred)
 	if (new) {
 		ctx->gc_proc = RPC_GSS_PROC_DESTROY;
 
-		trace_rpcgss_ctx_destroy(gss_cred);
+		//trace_rpcgss_ctx_destroy(gss_cred);
 		task = rpc_call_null(gss_auth->client, &new->gc_base,
 				     RPC_TASK_ASYNC);
 		if (!IS_ERR(task))
@@ -1525,7 +1525,7 @@ static int gss_marshal(struct rpc_task *task, struct xdr_stream *xdr)
 	spin_unlock(&ctx->gc_seq_lock);
 	if (req->rq_seqno == MAXSEQ)
 		goto expired;
-	trace_rpcgss_seqno(task);
+	//trace_rpcgss_seqno(task);
 
 	*p++ = cpu_to_be32(RPC_GSS_VERSION);
 	*p++ = cpu_to_be32(ctx->gc_proc);
@@ -1566,7 +1566,7 @@ marshal_failed:
 	status = -EMSGSIZE;
 	goto out;
 bad_mic:
-	trace_rpcgss_get_mic(task, maj_stat);
+	//trace_rpcgss_get_mic(task, maj_stat);
 	status = -EIO;
 	goto out;
 }
@@ -1696,7 +1696,7 @@ validate_failed:
 	status = -EIO;
 	goto out;
 bad_mic:
-	trace_rpcgss_verify_mic(task, maj_stat);
+	//trace_rpcgss_verify_mic(task, maj_stat);
 	status = -EACCES;
 	goto out;
 }
@@ -1742,7 +1742,7 @@ gss_wrap_req_integ(struct rpc_cred *cred, struct gss_cl_ctx *ctx,
 wrap_failed:
 	return -EMSGSIZE;
 bad_mic:
-	trace_rpcgss_get_mic(task, maj_stat);
+	//trace_rpcgss_get_mic(task, maj_stat);
 	return -EIO;
 }
 
@@ -1865,7 +1865,7 @@ gss_wrap_req_priv(struct rpc_cred *cred, struct gss_cl_ctx *ctx,
 wrap_failed:
 	return status;
 bad_wrap:
-	trace_rpcgss_wrap(task, maj_stat);
+	//trace_rpcgss_wrap(task, maj_stat);
 	return -EIO;
 }
 
@@ -1919,7 +1919,7 @@ static void gss_update_rslack(struct rpc_task *task, struct rpc_cred *cred,
 	if (test_and_clear_bit(RPCAUTH_AUTH_UPDATE_SLACK, &auth->au_flags)) {
 		auth->au_ralign = auth->au_verfsize + before;
 		auth->au_rslack = auth->au_verfsize + after;
-		trace_rpcgss_update_slack(task, auth);
+		//trace_rpcgss_update_slack(task, auth);
 	}
 }
 
@@ -2005,13 +2005,13 @@ out:
 	return ret;
 
 unwrap_failed:
-	trace_rpcgss_unwrap_failed(task);
+	//trace_rpcgss_unwrap_failed(task);
 	goto out;
 bad_seqno:
-	trace_rpcgss_bad_seqno(task, rqstp->rq_seqno, seqno);
+	//trace_rpcgss_bad_seqno(task, rqstp->rq_seqno, seqno);
 	goto out;
 bad_mic:
-	trace_rpcgss_verify_mic(task, maj_stat);
+	//trace_rpcgss_verify_mic(task, maj_stat);
 	goto out;
 }
 
@@ -2053,13 +2053,13 @@ gss_unwrap_resp_priv(struct rpc_task *task, struct rpc_cred *cred,
 
 	return 0;
 unwrap_failed:
-	trace_rpcgss_unwrap_failed(task);
+	//trace_rpcgss_unwrap_failed(task);
 	return -EIO;
 bad_seqno:
-	trace_rpcgss_bad_seqno(task, rqstp->rq_seqno, be32_to_cpup(--p));
+	//trace_rpcgss_bad_seqno(task, rqstp->rq_seqno, be32_to_cpup(--p));
 	return -EIO;
 bad_unwrap:
-	trace_rpcgss_unwrap(task, maj_stat);
+	//trace_rpcgss_unwrap(task, maj_stat);
 	return -EIO;
 }
 
@@ -2102,7 +2102,7 @@ gss_xmit_need_reencode(struct rpc_task *task)
 out_ctx:
 	gss_put_ctx(ctx);
 out:
-	trace_rpcgss_need_reencode(task, seq_xmit, ret);
+	//trace_rpcgss_need_reencode(task, seq_xmit, ret);
 	return ret;
 }
 

@@ -158,7 +158,7 @@ early_initcall(init_zero_pfn);
 
 void mm_trace_rss_stat(struct mm_struct *mm, int member, long count)
 {
-	trace_rss_stat(mm, member, count);
+	//trace_rss_stat(mm, member, count);
 }
 
 #if defined(SPLIT_RSS_COUNTING)

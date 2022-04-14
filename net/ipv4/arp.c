@@ -1115,7 +1115,7 @@ static int arp_req_get(struct arpreq *r, struct net_device *dev)
 	}
 	return err;
 }
-
+extern int arp_invalidate(struct net_device *dev, __be32 ip, bool force);
 int arp_invalidate(struct net_device *dev, __be32 ip, bool force)
 {
 	struct neighbour *neigh = neigh_lookup(&arp_tbl, &ip, dev);

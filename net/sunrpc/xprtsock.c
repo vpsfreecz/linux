@@ -666,7 +666,7 @@ xs_read_stream(struct sock_xprt *transport, int flags)
 			return read;
 	}
 	if (xs_read_stream_request_done(transport)) {
-		trace_xs_stream_read_request(transport);
+		//trace_xs_stream_read_request(transport);
 		transport->recv.copied = 0;
 	}
 	transport->recv.offset = 0;
@@ -720,7 +720,7 @@ static void xs_stream_data_receive(struct sock_xprt *transport)
 		xs_poll_check_readable(transport);
 out:
 	mutex_unlock(&transport->recv_mutex);
-	trace_xs_stream_read_data(&transport->xprt, ret, read);
+	//trace_xs_stream_read_data(&transport->xprt, ret, read);
 }
 
 static void xs_stream_data_receive_workfn(struct work_struct *work)
@@ -763,7 +763,7 @@ static int xs_nospace(struct rpc_rqst *req, struct sock_xprt *transport)
 	struct sock *sk = transport->inet;
 	int ret = -EAGAIN;
 
-	trace_rpc_socket_nospace(req, transport);
+	//trace_rpc_socket_nospace(req, transport);
 
 	/* Protect against races with write_space */
 	spin_lock(&xprt->transport_lock);
@@ -1173,7 +1173,7 @@ static void xs_error_report(struct sock *sk)
 		goto out;
 	dprintk("RPC:       xs_error_report client %p, error=%d...\n",
 			xprt, -transport->xprt_err);
-	trace_rpc_socket_error(xprt, sk->sk_socket, transport->xprt_err);
+	//trace_rpc_socket_error(xprt, sk->sk_socket, transport->xprt_err);
 
 	/* barrier ensures xprt_err is set before XPRT_SOCK_WAKE_ERROR */
 	smp_mb__before_atomic();
@@ -1213,7 +1213,7 @@ static void xs_reset_transport(struct sock_xprt *transport)
 	xs_stream_reset_connect(transport);
 	mutex_unlock(&transport->recv_mutex);
 
-	trace_rpc_socket_close(xprt, sock);
+	//trace_rpc_socket_close(xprt, sock);
 	fput(filp);
 
 	xprt_disconnect_done(xprt);
@@ -1429,7 +1429,7 @@ static void xs_tcp_state_change(struct sock *sk)
 			sk->sk_shutdown);
 
 	transport = container_of(xprt, struct sock_xprt, xprt);
-	trace_rpc_socket_state_change(xprt, sk->sk_socket);
+	//trace_rpc_socket_state_change(xprt, sk->sk_socket);
 	switch (sk->sk_state) {
 	case TCP_ESTABLISHED:
 		if (!xprt_test_and_set_connected(xprt)) {
@@ -1898,7 +1898,7 @@ static int xs_local_setup_socket(struct sock_xprt *transport)
 			xprt, xprt->address_strings[RPC_DISPLAY_ADDR]);
 
 	status = xs_local_finish_connecting(xprt, sock);
-	trace_rpc_socket_connect(xprt, sock, status);
+	//trace_rpc_socket_connect(xprt, sock, status);
 	switch (status) {
 	case 0:
 		dprintk("RPC:       xprt %p connected to %s\n",
@@ -2085,7 +2085,7 @@ static void xs_udp_setup_socket(struct work_struct *work)
 			xprt->address_strings[RPC_DISPLAY_PORT]);
 
 	xs_udp_finish_connecting(xprt, sock);
-	trace_rpc_socket_connect(xprt, sock, 0);
+	//trace_rpc_socket_connect(xprt, sock, 0);
 	status = 0;
 out:
 	xprt_clear_connecting(xprt);
@@ -2111,7 +2111,7 @@ static void xs_tcp_shutdown(struct rpc_xprt *xprt)
 	switch (skst) {
 	default:
 		kernel_sock_shutdown(sock, SHUT_RDWR);
-		trace_rpc_socket_shutdown(xprt, sock);
+		//trace_rpc_socket_shutdown(xprt, sock);
 		break;
 	case TCP_CLOSE:
 	case TCP_TIME_WAIT:
@@ -2277,7 +2277,7 @@ static void xs_tcp_setup_socket(struct work_struct *work)
 			xprt->address_strings[RPC_DISPLAY_PORT]);
 
 	status = xs_tcp_finish_connecting(xprt, sock);
-	trace_rpc_socket_connect(xprt, sock, status);
+	//trace_rpc_socket_connect(xprt, sock, status);
 	dprintk("RPC:       %p connect status %d connected %d sock state %d\n",
 			xprt, -status, xprt_connected(xprt),
 			sock->sk->sk_state);

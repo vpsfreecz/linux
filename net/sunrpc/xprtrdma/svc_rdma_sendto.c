@@ -252,9 +252,9 @@ void svc_rdma_send_ctxt_put(struct svcxprt_rdma *rdma,
 				  ctxt->sc_sges[i].addr,
 				  ctxt->sc_sges[i].length,
 				  DMA_TO_DEVICE);
-		trace_svcrdma_dma_unmap_page(rdma,
-					     ctxt->sc_sges[i].addr,
-					     ctxt->sc_sges[i].length);
+		//trace_svcrdma_dma_unmap_page(rdma,
+		//			     ctxt->sc_sges[i].addr,
+		//			     ctxt->sc_sges[i].length);
 	}
 
 	for (i = 0; i < ctxt->sc_page_count; ++i)
@@ -280,7 +280,7 @@ static void svc_rdma_wc_send(struct ib_cq *cq, struct ib_wc *wc)
 	struct svc_rdma_send_ctxt *ctxt =
 		container_of(cqe, struct svc_rdma_send_ctxt, sc_cqe);
 
-	trace_svcrdma_wc_send(wc, &ctxt->sc_cid);
+	//trace_svcrdma_wc_send(wc, &ctxt->sc_cid);
 
 	atomic_inc(&rdma->sc_sq_avail);
 	wake_up(&rdma->sc_send_wait);
@@ -318,24 +318,24 @@ int svc_rdma_send(struct svcxprt_rdma *rdma, struct svc_rdma_send_ctxt *ctxt)
 	while (1) {
 		if ((atomic_dec_return(&rdma->sc_sq_avail) < 0)) {
 			atomic_inc(&rdma_stat_sq_starve);
-			trace_svcrdma_sq_full(rdma);
+			//trace_svcrdma_sq_full(rdma);
 			atomic_inc(&rdma->sc_sq_avail);
 			wait_event(rdma->sc_send_wait,
 				   atomic_read(&rdma->sc_sq_avail) > 1);
 			if (test_bit(XPT_CLOSE, &rdma->sc_xprt.xpt_flags))
 				return -ENOTCONN;
-			trace_svcrdma_sq_retry(rdma);
+			//trace_svcrdma_sq_retry(rdma);
 			continue;
 		}
 
-		trace_svcrdma_post_send(ctxt);
+		//trace_svcrdma_post_send(ctxt);
 		ret = ib_post_send(rdma->sc_qp, wr, NULL);
 		if (ret)
 			break;
 		return 0;
 	}
 
-	trace_svcrdma_sq_post_err(rdma, ret);
+	//trace_svcrdma_sq_post_err(rdma, ret);
 	set_bit(XPT_CLOSE, &rdma->sc_xprt.xpt_flags);
 	wake_up(&rdma->sc_send_wait);
 	return ret;
@@ -392,7 +392,7 @@ static ssize_t svc_rdma_encode_write_segment(__be32 *src,
 	}
 	xdr_encode_rdma_segment(p, handle, length, offset);
 
-	trace_svcrdma_encode_wseg(handle, length, offset);
+	//trace_svcrdma_encode_wseg(handle, length, offset);
 	return len;
 }
 
@@ -419,7 +419,7 @@ static ssize_t svc_rdma_encode_write_chunk(__be32 *src,
 	ssize_t len, ret;
 
 	len = 0;
-	trace_svcrdma_encode_write_chunk(remaining);
+	//trace_svcrdma_encode_write_chunk(remaining);
 
 	src++;
 	ret = xdr_stream_encode_item_present(&sctxt->sc_stream);
@@ -516,7 +516,7 @@ static int svc_rdma_dma_map_page(struct svcxprt_rdma *rdma,
 	dma_addr_t dma_addr;
 
 	dma_addr = ib_dma_map_page(dev, page, offset, len, DMA_TO_DEVICE);
-	trace_svcrdma_dma_map_page(rdma, dma_addr, len);
+	//trace_svcrdma_dma_map_page(rdma, dma_addr, len);
 	if (ib_dma_mapping_error(dev, dma_addr))
 		goto out_maperr;
 
@@ -650,7 +650,7 @@ static int svc_rdma_pull_up_reply_msg(struct svcxprt_rdma *rdma,
 		memcpy(dst, tailbase, taillen);
 
 	sctxt->sc_sges[0].length += xdr->len;
-	trace_svcrdma_send_pullup(sctxt->sc_sges[0].length);
+	//trace_svcrdma_send_pullup(sctxt->sc_sges[0].length);
 	return 0;
 }
 
@@ -852,7 +852,7 @@ void svc_rdma_send_error_msg(struct svcxprt_rdma *rdma,
 		*p++ = err_vers;
 		*p++ = rpcrdma_version;
 		*p = rpcrdma_version;
-		trace_svcrdma_err_vers(*rdma_argp);
+		//trace_svcrdma_err_vers(*rdma_argp);
 		break;
 	default:
 		p = xdr_reserve_space(&sctxt->sc_stream, sizeof(*p));
@@ -860,7 +860,7 @@ void svc_rdma_send_error_msg(struct svcxprt_rdma *rdma,
 			goto put_ctxt;
 
 		*p = err_chunk;
-		trace_svcrdma_err_chunk(*rdma_argp);
+		//trace_svcrdma_err_chunk(*rdma_argp);
 	}
 
 	/* Remote Invalidation is skipped for simplicity. */
@@ -973,7 +973,7 @@ int svc_rdma_sendto(struct svc_rqst *rqstp)
  err1:
 	svc_rdma_send_ctxt_put(rdma, sctxt);
  err0:
-	trace_svcrdma_send_err(rqstp, ret);
+	//trace_svcrdma_send_err(rqstp, ret);
 	set_bit(XPT_CLOSE, &xprt->xpt_flags);
 	return -ENOTCONN;
 }

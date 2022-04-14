@@ -103,7 +103,7 @@ static void qp_event_handler(struct ib_event *event, void *context)
 {
 	struct svc_xprt *xprt = context;
 
-	trace_svcrdma_qp_error(event, (struct sockaddr *)&xprt->xpt_remote);
+	//trace_svcrdma_qp_error(event, (struct sockaddr *)&xprt->xpt_remote);
 	switch (event->event) {
 	/* These are considered benign events */
 	case IB_EVENT_PATH_MIG:
@@ -425,7 +425,7 @@ static struct svc_xprt *svc_rdma_accept(struct svc_xprt *xprt)
 
 	newxprt->sc_pd = ib_alloc_pd(dev, 0);
 	if (IS_ERR(newxprt->sc_pd)) {
-		trace_svcrdma_pd_err(newxprt, PTR_ERR(newxprt->sc_pd));
+		//trace_svcrdma_pd_err(newxprt, PTR_ERR(newxprt->sc_pd));
 		goto errout;
 	}
 	newxprt->sc_sq_cq = ib_alloc_cq_any(dev, newxprt, newxprt->sc_sq_depth,
@@ -459,7 +459,7 @@ static struct svc_xprt *svc_rdma_accept(struct svc_xprt *xprt)
 
 	ret = rdma_create_qp(newxprt->sc_cm_id, newxprt->sc_pd, &qp_attr);
 	if (ret) {
-		trace_svcrdma_qp_err(newxprt, ret);
+		//trace_svcrdma_qp_err(newxprt, ret);
 		goto errout;
 	}
 	newxprt->sc_qp = newxprt->sc_cm_id->qp;
@@ -468,7 +468,7 @@ static struct svc_xprt *svc_rdma_accept(struct svc_xprt *xprt)
 		newxprt->sc_snd_w_inv = false;
 	if (!rdma_protocol_iwarp(dev, newxprt->sc_port_num) &&
 	    !rdma_ib_or_roce(dev, newxprt->sc_port_num)) {
-		trace_svcrdma_fabric_err(newxprt, -EINVAL);
+		//trace_svcrdma_fabric_err(newxprt, -EINVAL);
 		goto errout;
 	}
 
@@ -490,7 +490,7 @@ static struct svc_xprt *svc_rdma_accept(struct svc_xprt *xprt)
 					   dev->attrs.max_qp_init_rd_atom);
 	if (!conn_param.initiator_depth) {
 		ret = -EINVAL;
-		trace_svcrdma_initdepth_err(newxprt, ret);
+		//trace_svcrdma_initdepth_err(newxprt, ret);
 		goto errout;
 	}
 	conn_param.private_data = &pmsg;
@@ -500,7 +500,7 @@ static struct svc_xprt *svc_rdma_accept(struct svc_xprt *xprt)
 	ret = rdma_accept(newxprt->sc_cm_id, &conn_param);
 	rdma_unlock_handler(newxprt->sc_cm_id);
 	if (ret) {
-		trace_svcrdma_accept_err(newxprt, ret);
+		//trace_svcrdma_accept_err(newxprt, ret);
 		goto errout;
 	}
 

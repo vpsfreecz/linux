@@ -153,7 +153,7 @@ static void svc_xprt_free(struct kref *kref)
 		xprt_put(xprt->xpt_bc_xprt);
 	if (xprt->xpt_bc_xps)
 		xprt_switch_put(xprt->xpt_bc_xps);
-	trace_svc_xprt_free(xprt);
+	//trace_svc_xprt_free(xprt);
 	xprt->xpt_ops->xpo_free(xprt);
 	module_put(owner);
 }
@@ -227,9 +227,9 @@ static struct svc_xprt *__svc_xpo_create(struct svc_xprt_class *xcl,
 	}
 
 	xprt = xcl->xcl_ops->xpo_create(serv, net, sap, len, flags);
-	if (IS_ERR(xprt))
-		trace_svc_xprt_create_err(serv->sv_program->pg_name,
-					  xcl->xcl_name, sap, xprt);
+	//if (IS_ERR(xprt))
+	//	trace_svc_xprt_create_err(serv->sv_program->pg_name,
+	//				  xcl->xcl_name, sap, xprt);
 	return xprt;
 }
 
@@ -399,7 +399,7 @@ static bool svc_xprt_ready(struct svc_xprt *xprt)
 		if (xprt->xpt_ops->xpo_has_wspace(xprt) &&
 		    svc_xprt_slots_in_range(xprt))
 			return true;
-		trace_svc_xprt_no_write_space(xprt);
+		//trace_svc_xprt_no_write_space(xprt);
 		return false;
 	}
 	return false;
@@ -447,7 +447,7 @@ void svc_xprt_do_enqueue(struct svc_xprt *xprt)
 out_unlock:
 	rcu_read_unlock();
 	put_cpu();
-	trace_svc_xprt_do_enqueue(xprt, rqstp);
+	//trace_svc_xprt_do_enqueue(xprt, rqstp);
 }
 EXPORT_SYMBOL_GPL(svc_xprt_do_enqueue);
 
@@ -562,7 +562,7 @@ void svc_wake_up(struct svc_serv *serv)
 			continue;
 		rcu_read_unlock();
 		wake_up_process(rqstp->rq_task);
-		trace_svc_wake_up(rqstp->rq_task->pid);
+		//trace_svc_wake_up(rqstp->rq_task->pid);
 		return;
 	}
 	rcu_read_unlock();
@@ -570,7 +570,7 @@ void svc_wake_up(struct svc_serv *serv)
 	/* No free entries available */
 	set_bit(SP_TASK_PENDING, &pool->sp_flags);
 	smp_wmb();
-	trace_svc_wake_up(0);
+	//trace_svc_wake_up(0);
 }
 EXPORT_SYMBOL_GPL(svc_wake_up);
 
@@ -756,7 +756,7 @@ out_found:
 		rqstp->rq_chandle.thread_wait = 5*HZ;
 	else
 		rqstp->rq_chandle.thread_wait = 1*HZ;
-	trace_svc_xprt_dequeue(rqstp);
+	//trace_svc_xprt_dequeue(rqstp);
 	return rqstp->rq_xprt;
 }
 
@@ -800,7 +800,7 @@ static int svc_handle_xprt(struct svc_rqst *rqstp, struct svc_xprt *xprt)
 		if (newxpt) {
 			newxpt->xpt_cred = get_cred(xprt->xpt_cred);
 			svc_add_new_temp_xprt(serv, newxpt);
-			trace_svc_xprt_accept(newxpt, serv->sv_name);
+			//trace_svc_xprt_accept(newxpt, serv->sv_name);
 		} else
 			module_put(xprt->xpt_class->xcl_owner);
 	} else if (svc_xprt_reserve_slot(rqstp, xprt)) {
@@ -813,8 +813,8 @@ static int svc_handle_xprt(struct svc_rqst *rqstp, struct svc_xprt *xprt)
 			len = svc_deferred_recv(rqstp);
 		else
 			len = xprt->xpt_ops->xpo_recvfrom(rqstp);
-		if (len > 0)
-			trace_svc_xdr_recvfrom(rqstp, &rqstp->rq_arg);
+		//if (len > 0)
+		//	trace_svc_xdr_recvfrom(rqstp, &rqstp->rq_arg);
 		rqstp->rq_stime = ktime_get();
 		rqstp->rq_reserved = serv->sv_max_mesg;
 		atomic_add(rqstp->rq_reserved, &xprt->xpt_reserved);
@@ -822,7 +822,7 @@ static int svc_handle_xprt(struct svc_rqst *rqstp, struct svc_xprt *xprt)
 	/* clear XPT_BUSY: */
 	svc_xprt_received(xprt);
 out:
-	trace_svc_handle_xprt(xprt, len);
+	//trace_svc_handle_xprt(xprt, len);
 	return len;
 }
 
@@ -868,7 +868,7 @@ int svc_recv(struct svc_rqst *rqstp, long timeout)
 
 	if (serv->sv_stats)
 		serv->sv_stats->netcnt++;
-	trace_svc_recv(rqstp, len);
+	//trace_svc_recv(rqstp, len);
 	return len;
 out_release:
 	rqstp->rq_res.len = 0;
@@ -883,7 +883,7 @@ EXPORT_SYMBOL_GPL(svc_recv);
  */
 void svc_drop(struct svc_rqst *rqstp)
 {
-	trace_svc_drop(rqstp);
+	//trace_svc_drop(rqstp);
 	svc_xprt_release(rqstp);
 }
 EXPORT_SYMBOL_GPL(svc_drop);
@@ -906,12 +906,12 @@ int svc_send(struct svc_rqst *rqstp)
 	xb->len = xb->head[0].iov_len +
 		xb->page_len +
 		xb->tail[0].iov_len;
-	trace_svc_xdr_sendto(rqstp, xb);
-	trace_svc_stats_latency(rqstp);
+	//trace_svc_xdr_sendto(rqstp, xb);
+	//trace_svc_stats_latency(rqstp);
 
 	len = xprt->xpt_ops->xpo_sendto(rqstp);
 
-	trace_svc_send(rqstp, len);
+	//trace_svc_send(rqstp, len);
 	svc_xprt_release(rqstp);
 
 	if (len == -ECONNREFUSED || len == -ENOTCONN || len == -EAGAIN)
@@ -1021,7 +1021,7 @@ static void svc_delete_xprt(struct svc_xprt *xprt)
 	if (test_and_set_bit(XPT_DEAD, &xprt->xpt_flags))
 		return;
 
-	trace_svc_xprt_detach(xprt);
+	//trace_svc_xprt_detach(xprt);
 	xprt->xpt_ops->xpo_detach(xprt);
 	if (xprt->xpt_bc_xprt)
 		xprt->xpt_bc_xprt->ops->close(xprt->xpt_bc_xprt);
@@ -1042,7 +1042,7 @@ static void svc_delete_xprt(struct svc_xprt *xprt)
 
 void svc_close_xprt(struct svc_xprt *xprt)
 {
-	trace_svc_xprt_close(xprt);
+	//trace_svc_xprt_close(xprt);
 	set_bit(XPT_CLOSE, &xprt->xpt_flags);
 	if (test_and_set_bit(XPT_BUSY, &xprt->xpt_flags))
 		/* someone else will have to effect the close */
@@ -1145,7 +1145,7 @@ static void svc_revisit(struct cache_deferred_req *dreq, int too_many)
 	set_bit(XPT_DEFERRED, &xprt->xpt_flags);
 	if (too_many || test_bit(XPT_DEAD, &xprt->xpt_flags)) {
 		spin_unlock(&xprt->xpt_lock);
-		trace_svc_defer_drop(dr);
+		//trace_svc_defer_drop(dr);
 		svc_xprt_put(xprt);
 		kfree(dr);
 		return;
@@ -1153,7 +1153,7 @@ static void svc_revisit(struct cache_deferred_req *dreq, int too_many)
 	dr->xprt = NULL;
 	list_add(&dr->handle.recent, &xprt->xpt_deferred);
 	spin_unlock(&xprt->xpt_lock);
-	trace_svc_defer_queue(dr);
+	//trace_svc_defer_queue(dr);
 	svc_xprt_enqueue(xprt);
 	svc_xprt_put(xprt);
 }
@@ -1199,7 +1199,7 @@ static struct cache_deferred_req *svc_defer(struct cache_req *req)
 		memcpy(dr->args, rqstp->rq_arg.head[0].iov_base - skip,
 		       dr->argslen << 2);
 	}
-	trace_svc_defer(rqstp);
+	//trace_svc_defer(rqstp);
 	svc_xprt_get(rqstp->rq_xprt);
 	dr->xprt = rqstp->rq_xprt;
 	set_bit(RQ_DROPME, &rqstp->rq_flags);
@@ -1215,7 +1215,7 @@ static noinline int svc_deferred_recv(struct svc_rqst *rqstp)
 {
 	struct svc_deferred_req *dr = rqstp->rq_deferred;
 
-	trace_svc_defer_recv(dr);
+	//trace_svc_defer_recv(dr);
 
 	/* setup iov_base past transport header */
 	rqstp->rq_arg.head[0].iov_base = dr->args + (dr->xprt_hlen>>2);

@@ -991,7 +991,7 @@ static int __svc_register(struct net *net, const char *progname,
 #endif
 	}
 
-	trace_svc_register(progname, version, protocol, port, family, error);
+	//trace_svc_register(progname, version, protocol, port, family, error);
 	return error;
 }
 
@@ -1020,8 +1020,8 @@ int svc_generic_rpcbind_set(struct net *net,
 		return 0;
 
 	if (vers->vs_hidden) {
-		trace_svc_noregister(progp->pg_name, version, proto,
-				     port, family, 0);
+		//trace_svc_noregister(progp->pg_name, version, proto,
+		//		     port, family, 0);
 		return 0;
 	}
 
@@ -1099,7 +1099,7 @@ static void __svc_unregister(struct net *net, const u32 program, const u32 versi
 	if (error == -EPROTONOSUPPORT)
 		error = rpcb_register(net, program, version, 0, 0);
 
-	trace_svc_unregister(progname, version, error);
+	//trace_svc_unregister(progname, version, error);
 }
 
 /*
@@ -1326,8 +1326,8 @@ svc_process_common(struct svc_rqst *rqstp, struct kvec *argv, struct kvec *resv)
 		auth_stat = rpc_autherr_badcred;
 		auth_res = progp->pg_authenticate(rqstp);
 	}
-	if (auth_res != SVC_OK)
-		trace_svc_authenticate(rqstp, auth_res, auth_stat);
+	//if (auth_res != SVC_OK)
+	//	trace_svc_authenticate(rqstp, auth_res, auth_stat);
 	switch (auth_res) {
 	case SVC_OK:
 		break;
@@ -1368,7 +1368,7 @@ svc_process_common(struct svc_rqst *rqstp, struct kvec *argv, struct kvec *resv)
 
 	/* Syntactic check complete */
 	serv->sv_stats->rpccnt++;
-	trace_svc_process(rqstp, progp->pg_name);
+	//trace_svc_process(rqstp, progp->pg_name);
 
 	/* Build the reply header. */
 	statp = resv->iov_base +resv->iov_len;

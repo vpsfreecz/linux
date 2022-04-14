@@ -181,7 +181,7 @@ void rpc_count_iostats_metrics(const struct rpc_task *task,
 
 	spin_unlock(&op_metrics->om_lock);
 
-	trace_rpc_stats_latency(req->rq_task, backlog, req->rq_rtt, execute);
+	//trace_rpc_stats_latency(req->rq_task, backlog, req->rq_rtt, execute);
 }
 EXPORT_SYMBOL_GPL(rpc_count_iostats_metrics);
 

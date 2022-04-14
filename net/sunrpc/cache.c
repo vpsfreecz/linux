@@ -121,7 +121,7 @@ static struct cache_head *sunrpc_cache_add_entry(struct cache_detail *detail,
 		if (test_bit(CACHE_VALID, &tmp->flags) &&
 		    cache_is_expired(detail, tmp)) {
 			sunrpc_begin_cache_remove_entry(tmp, detail);
-			trace_cache_entry_expired(detail, tmp);
+			//trace_cache_entry_expired(detail, tmp);
 			freeme = tmp;
 			break;
 		}
@@ -182,7 +182,7 @@ static void cache_make_negative(struct cache_detail *detail,
 				struct cache_head *h)
 {
 	set_bit(CACHE_NEGATIVE, &h->flags);
-	trace_cache_entry_make_negative(detail, h);
+	//trace_cache_entry_make_negative(detail, h);
 }
 
 static void cache_entry_update(struct cache_detail *detail,
@@ -191,7 +191,7 @@ static void cache_entry_update(struct cache_detail *detail,
 {
 	if (!test_bit(CACHE_NEGATIVE, &new->flags)) {
 		detail->update(h, new);
-		trace_cache_entry_update(detail, h);
+		//trace_cache_entry_update(detail, h);
 	} else {
 		cache_make_negative(detail, h);
 	}
@@ -475,7 +475,7 @@ static int cache_clean(void)
 				continue;
 
 			sunrpc_begin_cache_remove_entry(ch, current_detail);
-			trace_cache_entry_expired(current_detail, ch);
+			//trace_cache_entry_expired(current_detail, ch);
 			rv = 1;
 			break;
 		}
@@ -1233,7 +1233,7 @@ static int cache_pipe_upcall(struct cache_detail *detail, struct cache_head *h)
 	if (test_bit(CACHE_PENDING, &h->flags)) {
 		crq->item = cache_get(h);
 		list_add_tail(&crq->q.list, &detail->queue);
-		trace_cache_entry_upcall(detail, h);
+		//trace_cache_entry_upcall(detail, h);
 	} else
 		/* Lost a race, no longer PENDING, so don't enqueue */
 		ret = -EAGAIN;
@@ -1259,7 +1259,7 @@ int sunrpc_cache_pipe_upcall_timeout(struct cache_detail *detail,
 {
 	if (!cache_listeners_exist(detail)) {
 		warn_no_listener(detail);
-		trace_cache_entry_no_listener(detail, h);
+		//trace_cache_entry_no_listener(detail, h);
 		return -EINVAL;
 	}
 	return sunrpc_cache_pipe_upcall(detail, h);

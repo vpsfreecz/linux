@@ -656,12 +656,12 @@ out:
 	return result;
 
 toolow:
-	trace_rpcgss_svc_seqno_low(rqstp, seq_num,
-				   sd->sd_max - GSS_SEQ_WIN,
-				   sd->sd_max);
+	//trace_rpcgss_svc_seqno_low(rqstp, seq_num,
+	//			   sd->sd_max - GSS_SEQ_WIN,
+	//			   sd->sd_max);
 	goto out;
 alreadyseen:
-	trace_rpcgss_svc_seqno_seen(rqstp, seq_num);
+	//trace_rpcgss_svc_seqno_seen(rqstp, seq_num);
 	goto out;
 }
 
@@ -742,7 +742,7 @@ gss_verify_header(struct svc_rqst *rqstp, struct rsc *rsci,
 	}
 
 	if (gc->gc_seq > MAXSEQ) {
-		trace_rpcgss_svc_seqno_large(rqstp, gc->gc_seq);
+		//trace_rpcgss_svc_seqno_large(rqstp, gc->gc_seq);
 		*authp = rpcsec_gsserr_ctxproblem;
 		return SVC_DENIED;
 	}
@@ -936,13 +936,13 @@ out:
 	return stat;
 
 unwrap_failed:
-	trace_rpcgss_svc_unwrap_failed(rqstp);
+	//trace_rpcgss_svc_unwrap_failed(rqstp);
 	goto out;
 bad_seqno:
-	trace_rpcgss_svc_seqno_bad(rqstp, seq, rseqno);
+	//trace_rpcgss_svc_seqno_bad(rqstp, seq, rseqno);
 	goto out;
 bad_mic:
-	trace_rpcgss_svc_mic(rqstp, maj_stat);
+	//trace_rpcgss_svc_mic(rqstp, maj_stat);
 	goto out;
 }
 
@@ -1011,13 +1011,13 @@ out_seq:
 	return 0;
 
 unwrap_failed:
-	trace_rpcgss_svc_unwrap_failed(rqstp);
+	//trace_rpcgss_svc_unwrap_failed(rqstp);
 	return -EINVAL;
 bad_seqno:
-	trace_rpcgss_svc_seqno_bad(rqstp, seq, rseqno);
+	//trace_rpcgss_svc_seqno_bad(rqstp, seq, rseqno);
 	return -EINVAL;
 bad_unwrap:
-	trace_rpcgss_svc_unwrap(rqstp, maj_stat);
+	//trace_rpcgss_svc_unwrap(rqstp, maj_stat);
 	return -EINVAL;
 }
 
@@ -1363,7 +1363,7 @@ static int svcauth_gss_proxy_init(struct svc_rqst *rqstp,
 	if (status)
 		goto out;
 
-	trace_rpcgss_svc_accept_upcall(rqstp, ud.major_status, ud.minor_status);
+	//trace_rpcgss_svc_accept_upcall(rqstp, ud.major_status, ud.minor_status);
 
 	switch (ud.major_status) {
 	case GSS_S_CONTINUE_NEEDED:
@@ -1654,7 +1654,7 @@ svcauth_gss_accept(struct svc_rqst *rqstp, __be32 *authp)
 					GSS_C_QOP_DEFAULT,
 					gc->gc_svc);
 		ret = SVC_OK;
-		trace_rpcgss_svc_authenticate(rqstp, gc);
+		//trace_rpcgss_svc_authenticate(rqstp, gc);
 		goto out;
 	}
 garbage_args:

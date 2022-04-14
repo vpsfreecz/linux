@@ -31,7 +31,7 @@ int xprt_rdma_bc_setup(struct rpc_xprt *xprt, unsigned int reqs)
 	struct rpcrdma_xprt *r_xprt = rpcx_to_rdmax(xprt);
 
 	r_xprt->rx_buf.rb_bc_srv_max_requests = RPCRDMA_BACKWARD_WRS >> 1;
-	trace_xprtrdma_cb_setup(r_xprt, reqs);
+	//trace_xprtrdma_cb_setup(r_xprt, reqs);
 	return 0;
 }
 
@@ -82,7 +82,7 @@ static int rpcrdma_bc_marshal_reply(struct rpc_rqst *rqst)
 				      &rqst->rq_snd_buf, rpcrdma_noch_pullup))
 		return -EIO;
 
-	trace_xprtrdma_cb_reply(rqst);
+	//trace_xprtrdma_cb_reply(rqst);
 	return 0;
 }
 
@@ -260,7 +260,7 @@ void rpcrdma_bc_receive_call(struct rpcrdma_xprt *r_xprt,
 	 */
 	req = rpcr_to_rdmar(rqst);
 	req->rl_reply = rep;
-	trace_xprtrdma_cb_call(rqst);
+	//trace_xprtrdma_cb_call(rqst);
 
 	/* Queue rqst for ULP's callback service */
 	bc_serv = xprt->bc_serv;

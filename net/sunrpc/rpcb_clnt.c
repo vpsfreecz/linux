@@ -440,7 +440,7 @@ int rpcb_register(struct net *net, u32 prog, u32 vers, int prot, unsigned short 
 	struct sunrpc_net *sn = net_generic(net, sunrpc_net_id);
 	bool is_set = false;
 
-	trace_pmap_register(prog, vers, prot, port);
+	//trace_pmap_register(prog, vers, prot, port);
 
 	msg.rpc_proc = &rpcb_procedures2[RPCBPROC_UNSET];
 	if (port != 0) {
@@ -508,7 +508,7 @@ static int rpcb_unregister_all_protofamilies(struct sunrpc_net *sn,
 {
 	struct rpcbind_args *map = msg->rpc_argp;
 
-	trace_rpcb_unregister(map->r_prog, map->r_vers, map->r_netid);
+	//trace_rpcb_unregister(map->r_prog, map->r_vers, map->r_netid);
 
 	map->r_addr = "";
 	msg->rpc_proc = &rpcb_procedures4[RPCBPROC_UNSET];
@@ -580,7 +580,7 @@ int rpcb_v4_register(struct net *net, const u32 program, const u32 version,
 	if (address == NULL)
 		return rpcb_unregister_all_protofamilies(sn, &msg);
 
-	trace_rpcb_register(map.r_prog, map.r_vers, map.r_addr, map.r_netid);
+	//trace_rpcb_register(map.r_prog, map.r_vers, map.r_addr, map.r_netid);
 
 	switch (address->sa_family) {
 	case AF_INET:
@@ -699,7 +699,7 @@ void rpcb_getport_async(struct rpc_task *task)
 		goto bailout_nofree;
 	}
 
-	trace_rpcb_getport(clnt, task, bind_version);
+	//trace_rpcb_getport(clnt, task, bind_version);
 
 	rpcb_clnt = rpcb_create(xprt->xprt_net,
 				clnt->cl_nodename,
@@ -789,7 +789,7 @@ static void rpcb_getport_done(struct rpc_task *child, void *data)
 		map->r_status = 0;
 	}
 
-	trace_rpcb_setport(child, map->r_status, map->r_port);
+	//trace_rpcb_setport(child, map->r_status, map->r_port);
 	xprt->ops->set_port(xprt, map->r_port);
 	if (map->r_port)
 		xprt_set_bound(xprt);

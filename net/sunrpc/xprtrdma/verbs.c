@@ -127,7 +127,7 @@ static void rpcrdma_qp_event_handler(struct ib_event *event, void *context)
 {
 	struct rpcrdma_ep *ep = context;
 
-	trace_xprtrdma_qp_event(ep, event);
+	//trace_xprtrdma_qp_event(ep, event);
 }
 
 /* Ensure xprt_force_disconnect() is invoked exactly once when a
@@ -167,7 +167,7 @@ static void rpcrdma_wc_send(struct ib_cq *cq, struct ib_wc *wc)
 	struct rpcrdma_xprt *r_xprt = cq->cq_context;
 
 	/* WARNING: Only wr_cqe and status are reliable at this point */
-	trace_xprtrdma_wc_send(sc, wc);
+	//trace_xprtrdma_wc_send(sc, wc);
 	rpcrdma_sendctx_put_locked(r_xprt, sc);
 	rpcrdma_flush_disconnect(r_xprt, wc);
 }
@@ -186,7 +186,7 @@ static void rpcrdma_wc_receive(struct ib_cq *cq, struct ib_wc *wc)
 	struct rpcrdma_xprt *r_xprt = cq->cq_context;
 
 	/* WARNING: Only wr_cqe and status are reliable at this point */
-	trace_xprtrdma_wc_receive(wc);
+	//trace_xprtrdma_wc_receive(wc);
 	--r_xprt->rx_ep->re_receive_count;
 	if (wc->status != IB_WC_SUCCESS)
 		goto out_flushed;
@@ -276,7 +276,7 @@ rpcrdma_cm_event_handler(struct rdma_cm_id *id, struct rdma_cm_event *event)
 		rpcrdma_ep_get(ep);
 		ep->re_connect_status = 1;
 		rpcrdma_update_cm_private(ep, &event->param.conn);
-		trace_xprtrdma_inline_thresh(ep);
+		//trace_xprtrdma_inline_thresh(ep);
 		wake_up_all(&ep->re_connect_wait);
 		break;
 	case RDMA_CM_EVENT_CONNECT_ERROR:
@@ -564,7 +564,7 @@ int rpcrdma_xprt_connect(struct rpcrdma_xprt *r_xprt)
 	rpcrdma_mrs_create(r_xprt);
 
 out:
-	trace_xprtrdma_connect(r_xprt, rc);
+	//trace_xprtrdma_connect(r_xprt, rc);
 	return rc;
 }
 
@@ -589,7 +589,7 @@ void rpcrdma_xprt_disconnect(struct rpcrdma_xprt *r_xprt)
 
 	id = ep->re_id;
 	rc = rdma_disconnect(id);
-	trace_xprtrdma_disconnect(r_xprt, rc);
+	//trace_xprtrdma_disconnect(r_xprt, rc);
 
 	rpcrdma_xprt_drain(r_xprt);
 	rpcrdma_reps_unmap(r_xprt);
@@ -792,7 +792,7 @@ rpcrdma_mrs_create(struct rpcrdma_xprt *r_xprt)
 	}
 
 	r_xprt->rx_stats.mrs_allocated += count;
-	trace_xprtrdma_createmrs(r_xprt, count);
+	//trace_xprtrdma_createmrs(r_xprt, count);
 }
 
 static void
@@ -1188,7 +1188,7 @@ void rpcrdma_mr_put(struct rpcrdma_mr *mr)
 	struct rpcrdma_xprt *r_xprt = mr->mr_xprt;
 
 	if (mr->mr_dir != DMA_NONE) {
-		trace_xprtrdma_mr_unmap(mr);
+		//trace_xprtrdma_mr_unmap(mr);
 		ib_dma_unmap_sg(r_xprt->rx_ep->re_id->device,
 				mr->mr_sg, mr->mr_nents, mr->mr_dir);
 		mr->mr_dir = DMA_NONE;
@@ -1327,7 +1327,7 @@ bool __rpcrdma_regbuf_dma_map(struct rpcrdma_xprt *r_xprt,
 	rb->rg_iov.addr = ib_dma_map_single(device, rdmab_data(rb),
 					    rdmab_length(rb), rb->rg_direction);
 	if (ib_dma_mapping_error(device, rdmab_addr(rb))) {
-		trace_xprtrdma_dma_maperr(rdmab_addr(rb));
+		//trace_xprtrdma_dma_maperr(rdmab_addr(rb));
 		return false;
 	}
 
@@ -1379,7 +1379,7 @@ int rpcrdma_post_sends(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req)
 		--ep->re_send_count;
 	}
 
-	trace_xprtrdma_post_send(req);
+	//trace_xprtrdma_post_send(req);
 	rc = frwr_send(r_xprt, req);
 	if (rc)
 		return -ENOTCONN;
@@ -1423,7 +1423,7 @@ void rpcrdma_post_recvs(struct rpcrdma_xprt *r_xprt, int needed, bool temp)
 		if (!rep)
 			break;
 
-		trace_xprtrdma_post_recv(rep);
+		//trace_xprtrdma_post_recv(rep);
 		rep->rr_recv_wr.next = wr;
 		wr = &rep->rr_recv_wr;
 		--needed;
@@ -1435,7 +1435,7 @@ void rpcrdma_post_recvs(struct rpcrdma_xprt *r_xprt, int needed, bool temp)
 	rc = ib_post_recv(ep->re_id->qp, wr,
 			  (const struct ib_recv_wr **)&bad_wr);
 out:
-	trace_xprtrdma_post_recvs(r_xprt, count, rc);
+	//trace_xprtrdma_post_recvs(r_xprt, count, rc);
 	if (rc) {
 		for (wr = bad_wr; wr;) {
 			struct rpcrdma_rep *rep;

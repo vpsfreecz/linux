@@ -284,7 +284,7 @@ static void rpc_set_active(struct rpc_task *task)
 {
 	rpc_task_set_debuginfo(task);
 	set_bit(RPC_TASK_ACTIVE, &task->tk_runstate);
-	trace_rpc_task_begin(task, NULL);
+	//trace_rpc_task_begin(task, NULL);
 }
 
 /*
@@ -299,7 +299,7 @@ static int rpc_complete_task(struct rpc_task *task)
 	unsigned long flags;
 	int ret;
 
-	trace_rpc_task_complete(task, NULL);
+	//trace_rpc_task_complete(task, NULL);
 
 	spin_lock_irqsave(&wq->lock, flags);
 	clear_bit(RPC_TASK_ACTIVE, &task->tk_runstate);
@@ -362,7 +362,7 @@ static void __rpc_do_sleep_on_priority(struct rpc_wait_queue *q,
 		struct rpc_task *task,
 		unsigned char queue_priority)
 {
-	trace_rpc_task_sleep(task, q);
+	//trace_rpc_task_sleep(task, q);
 
 	__rpc_add_wait_queue(q, task, queue_priority);
 }
@@ -492,7 +492,7 @@ static void __rpc_do_wake_up_task_on_wq(struct workqueue_struct *wq,
 		return;
 	}
 
-	trace_rpc_task_wakeup(task, queue);
+	//trace_rpc_task_wakeup(task, queue);
 
 	__rpc_remove_wait_queue(queue, task);
 
@@ -754,7 +754,7 @@ static void __rpc_queue_timer_fn(struct work_struct *work)
 	list_for_each_entry_safe(task, n, &queue->timer_list.list, u.tk_wait.timer_list) {
 		timeo = task->tk_timeout;
 		if (time_after_eq(now, timeo)) {
-			trace_rpc_task_timeout(task, task->tk_action);
+			//trace_rpc_task_timeout(task, task->tk_action);
 			task->tk_status = -ETIMEDOUT;
 			rpc_wake_up_task_queue_locked(queue, task);
 			continue;
@@ -815,7 +815,7 @@ rpc_reset_task_statistics(struct rpc_task *task)
  */
 void rpc_exit_task(struct rpc_task *task)
 {
-	trace_rpc_task_end(task, task->tk_action);
+	//trace_rpc_task_end(task, task->tk_action);
 	task->tk_action = NULL;
 	if (task->tk_ops->rpc_count_stats)
 		task->tk_ops->rpc_count_stats(task, task->tk_calldata);
@@ -838,7 +838,7 @@ void rpc_signal_task(struct rpc_task *task)
 	if (!RPC_IS_ACTIVATED(task))
 		return;
 
-	trace_rpc_task_signalled(task, task->tk_action);
+	//trace_rpc_task_signalled(task, task->tk_action);
 	set_bit(RPC_TASK_SIGNALLED, &task->tk_runstate);
 	smp_mb__after_atomic();
 	queue = READ_ONCE(task->tk_waitqueue);
@@ -890,7 +890,7 @@ static void __rpc_execute(struct rpc_task *task)
 		}
 		if (!do_action)
 			break;
-		trace_rpc_task_run_action(task, do_action);
+		//trace_rpc_task_run_action(task, do_action);
 		do_action(task);
 
 		/*
@@ -928,7 +928,7 @@ static void __rpc_execute(struct rpc_task *task)
 			return;
 
 		/* sync task: sleep here */
-		trace_rpc_task_sync_sleep(task, task->tk_action);
+		//trace_rpc_task_sync_sleep(task, task->tk_action);
 		status = out_of_line_wait_on_bit(&task->tk_runstate,
 				RPC_TASK_QUEUED, rpc_wait_bit_killable,
 				TASK_KILLABLE);
@@ -939,12 +939,12 @@ static void __rpc_execute(struct rpc_task *task)
 			 * clean up after sleeping on some queue, we don't
 			 * break the loop here, but go around once more.
 			 */
-			trace_rpc_task_signalled(task, task->tk_action);
+			//trace_rpc_task_signalled(task, task->tk_action);
 			set_bit(RPC_TASK_SIGNALLED, &task->tk_runstate);
 			task->tk_rpc_status = -ERESTARTSYS;
 			rpc_exit(task, -ERESTARTSYS);
 		}
-		trace_rpc_task_sync_wake(task, task->tk_action);
+		//trace_rpc_task_sync_wake(task, task->tk_action);
 	}
 
 	/* Release all resources associated with the task */

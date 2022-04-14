@@ -257,14 +257,14 @@ static int __svc_rdma_post_recv(struct svcxprt_rdma *rdma,
 {
 	int ret;
 
-	trace_svcrdma_post_recv(ctxt);
+	//trace_svcrdma_post_recv(ctxt);
 	ret = ib_post_recv(rdma->sc_qp, &ctxt->rc_recv_wr, NULL);
 	if (ret)
 		goto err_post;
 	return 0;
 
 err_post:
-	trace_svcrdma_rq_post_err(rdma, ret);
+	//trace_svcrdma_rq_post_err(rdma, ret);
 	svc_rdma_recv_ctxt_put(rdma, ctxt);
 	return ret;
 }
@@ -322,7 +322,7 @@ static void svc_rdma_wc_receive(struct ib_cq *cq, struct ib_wc *wc)
 	/* WARNING: Only wc->wr_cqe and wc->status are reliable */
 	ctxt = container_of(cqe, struct svc_rdma_recv_ctxt, rc_cqe);
 
-	trace_svcrdma_wc_receive(wc, &ctxt->rc_cid);
+	//trace_svcrdma_wc_receive(wc, &ctxt->rc_cid);
 	if (wc->status != IB_WC_SUCCESS)
 		goto flushed;
 
@@ -474,7 +474,7 @@ static bool xdr_check_write_chunk(struct svc_rdma_recv_ctxt *rctxt, u32 maxlen)
 			return false;
 
 		xdr_decode_rdma_segment(p, &handle, &length, &offset);
-		trace_svcrdma_decode_wseg(handle, length, offset);
+		//trace_svcrdma_decode_wseg(handle, length, offset);
 
 		total += length;
 	}
@@ -665,27 +665,27 @@ static int svc_rdma_xdr_decode_req(struct xdr_buf *rq_arg,
 	hdr_len = xdr_stream_pos(&rctxt->rc_stream);
 	rq_arg->head[0].iov_len -= hdr_len;
 	rq_arg->len -= hdr_len;
-	trace_svcrdma_decode_rqst(rctxt, rdma_argp, hdr_len);
+	//trace_svcrdma_decode_rqst(rctxt, rdma_argp, hdr_len);
 	return hdr_len;
 
 out_short:
-	trace_svcrdma_decode_short_err(rctxt, rq_arg->len);
+	//trace_svcrdma_decode_short_err(rctxt, rq_arg->len);
 	return -EINVAL;
 
 out_version:
-	trace_svcrdma_decode_badvers_err(rctxt, rdma_argp);
+	//trace_svcrdma_decode_badvers_err(rctxt, rdma_argp);
 	return -EPROTONOSUPPORT;
 
 out_drop:
-	trace_svcrdma_decode_drop_err(rctxt, rdma_argp);
+	//trace_svcrdma_decode_drop_err(rctxt, rdma_argp);
 	return 0;
 
 out_proc:
-	trace_svcrdma_decode_badproc_err(rctxt, rdma_argp);
+	//trace_svcrdma_decode_badproc_err(rctxt, rdma_argp);
 	return -EINVAL;
 
 out_inval:
-	trace_svcrdma_decode_parse_err(rctxt, rdma_argp);
+	//trace_svcrdma_decode_parse_err(rctxt, rdma_argp);
 	return -EINVAL;
 }
 

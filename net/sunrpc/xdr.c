@@ -757,7 +757,7 @@ static __be32 *xdr_get_next_encode_buffer(struct xdr_stream *xdr,
 	xdr->buf->len += nbytes;
 	return p;
 out_overflow:
-	trace_rpc_xdr_overflow(xdr, nbytes);
+	//trace_rpc_xdr_overflow(xdr, nbytes);
 	return NULL;
 }
 
@@ -1141,7 +1141,7 @@ static __be32 *xdr_copy_to_scratch(struct xdr_stream *xdr, size_t nbytes)
 	memcpy(cpdest, p, nbytes);
 	return xdr->scratch.iov_base;
 out_overflow:
-	trace_rpc_xdr_overflow(xdr, nbytes);
+	//trace_rpc_xdr_overflow(xdr, nbytes);
 	return NULL;
 }
 
@@ -1168,7 +1168,7 @@ __be32 * xdr_inline_decode(struct xdr_stream *xdr, size_t nbytes)
 		return p;
 	return xdr_copy_to_scratch(xdr, nbytes);
 out_overflow:
-	trace_rpc_xdr_overflow(xdr, nbytes);
+	//trace_rpc_xdr_overflow(xdr, nbytes);
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(xdr_inline_decode);
@@ -1184,7 +1184,7 @@ static void xdr_realign_pages(struct xdr_stream *xdr)
 	if (iov->iov_len > cur) {
 		offset = iov->iov_len - cur;
 		copied = xdr_shrink_bufhead(buf, offset);
-		trace_rpc_xdr_alignment(xdr, offset, copied);
+		//trace_rpc_xdr_alignment(xdr, offset, copied);
 		xdr->nwords = XDR_QUADLEN(buf->len - cur);
 	}
 }
@@ -1210,7 +1210,7 @@ static unsigned int xdr_align_pages(struct xdr_stream *xdr, unsigned int len)
 		/* Truncate page data and move it into the tail */
 		offset = buf->page_len - len;
 		copied = xdr_shrink_pagelen(buf, offset);
-		trace_rpc_xdr_alignment(xdr, offset, copied);
+		//trace_rpc_xdr_alignment(xdr, offset, copied);
 		xdr->nwords = XDR_QUADLEN(buf->len - cur);
 	}
 	return len;
