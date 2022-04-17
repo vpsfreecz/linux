@@ -15,8 +15,18 @@
 char old_uname[65];
 char new_uname[65];
 
+static inline void set_rlimit_ucount_max(struct user_namespace *ns, enum ucount_type type, unsigned long max)
+{
+	ns->ucount_max[type] = max <= LONG_MAX ? max : LONG_MAX;
+}
+
 static int patch(patch_object *obj)
 {
+	set_rlimit_ucount_max(&init_user_ns, UCOUNT_RLIMIT_NPROC,      RLIM_INFINITY);
+	set_rlimit_ucount_max(&init_user_ns, UCOUNT_RLIMIT_MSGQUEUE,   RLIM_INFINITY);
+	set_rlimit_ucount_max(&init_user_ns, UCOUNT_RLIMIT_SIGPENDING, RLIM_INFINITY);
+	set_rlimit_ucount_max(&init_user_ns, UCOUNT_RLIMIT_MEMLOCK,    RLIM_INFINITY);
+
 	scnprintf(new_uname, 64, "%s.%s", LIVEPATCH_ORIG_KERNEL_VERSION,
 	    LIVEPATCH_NAME);
 	scnprintf(old_uname, 64, "%s", init_uts_ns.name.release);
@@ -26,6 +36,11 @@ static int patch(patch_object *obj)
 KPATCH_PRE_PATCH_CALLBACK(patch);
 static void unpatch(patch_object *obj)
 {
+	init_user_ns.ucount_max[UCOUNT_RLIMIT_NPROC] = RLIM_INFINITY;
+	init_user_ns.ucount_max[UCOUNT_RLIMIT_MSGQUEUE] = RLIM_INFINITY;
+	init_user_ns.ucount_max[UCOUNT_RLIMIT_SIGPENDING] = RLIM_INFINITY;
+	init_user_ns.ucount_max[UCOUNT_RLIMIT_MEMLOCK] = RLIM_INFINITY;
+
 	scnprintf(init_uts_ns.name.release, 64, "%s", old_uname);
 }
 KPATCH_POST_UNPATCH_CALLBACK(unpatch);

@@ -177,7 +177,7 @@ struct ucounts *alloc_ucounts(struct user_namespace *ns, kuid_t uid)
 		if (!new)
 			return NULL;
 
-		new->ns = get_user_ns(ns);
+		new->ns = ns;
 		new->uid = uid;
 		atomic_set(&new->count, 1);
 
@@ -206,7 +206,6 @@ void put_ucounts(struct ucounts *ucounts)
 	unsigned long flags;
 
 	if (atomic_dec_and_lock_irqsave(&ucounts->count, &ucounts_lock, flags)) {
-		put_user_ns(ucounts->ns);
 		hlist_del_init(&ucounts->node);
 		spin_unlock_irqrestore(&ucounts_lock, flags);
 		put_user_ns(ucounts->ns);
@@ -348,7 +347,8 @@ bool is_ucounts_overlimit(struct ucounts *ucounts, enum ucount_type type, unsign
 	if (rlimit > LONG_MAX)
 		max = LONG_MAX;
 	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
-		if (get_ucounts_value(iter, type) > max)
+		long val = get_ucounts_value(iter, type);
+		if (val < 0 || val > max)
 			return true;
 		max = READ_ONCE(iter->ns->ucount_max[type]);
 	}
