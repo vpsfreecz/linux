@@ -8,10 +8,13 @@
  *
  * Copyright (C) 2006 Qumranet, Inc.
  * Copyright 2010 Red Hat, Inc. and/or its affiliates.
+ * Copyright (C) 2018, Trusted Cloud Group, Shanghai Jiao Tong University.
  *
  * Authors:
  *   Yaniv Kamay  <yaniv@qumranet.com>
  *   Avi Kivity   <avi@qumranet.com>
+ *   Yubin Chen 	<binsschen@sjtu.edu.cn>
+ *   Zhuocheng Ding <tcbbd@sjtu.edu.cn>
  *
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
@@ -496,6 +499,7 @@ FNAME(prefetch_gpte)(struct kvm_vcpu *vcpu, struct kvm_mmu_page *sp,
 	 * we call mmu_set_spte() with host_writable = true because
 	 * pte_prefetch_gfn_to_pfn always gets a writable pfn.
 	 */
+	/* FIXME */
 	mmu_set_spte(vcpu, spte, pte_access, 0, PT_PAGE_TABLE_LEVEL, gfn, pfn,
 		     true, true);
 
@@ -643,6 +647,7 @@ static int FNAME(fetch)(struct kvm_vcpu *vcpu, gva_t addr,
 	}
 
 	clear_sp_write_flooding_count(it.sptep);
+	/* FIXME */	
 	emulate = mmu_set_spte(vcpu, it.sptep, gw->pte_access, write_fault,
 			       it.level, gw->gfn, pfn, prefault, map_writable);
 	FNAME(pte_prefetch)(vcpu, gw, it.sptep);
@@ -1001,6 +1006,7 @@ static int FNAME(sync_page)(struct kvm_vcpu *vcpu, struct kvm_mmu_page *sp)
 
 		host_writable = sp->spt[i] & SPTE_HOST_WRITEABLE;
 
+		/* FIXME */
 		set_spte(vcpu, &sp->spt[i], pte_access,
 			 PT_PAGE_TABLE_LEVEL, gfn,
 			 spte_to_pfn(sp->spt[i]), true, false,

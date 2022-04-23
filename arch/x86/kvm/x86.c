@@ -7,12 +7,14 @@
  * Copyright (C) 2008 Qumranet, Inc.
  * Copyright IBM Corporation, 2008
  * Copyright 2010 Red Hat, Inc. and/or its affiliates.
+ * Copyright (C) 2018, Trusted Cloud Group, Shanghai Jiao Tong University.
  *
  * Authors:
  *   Avi Kivity   <avi@qumranet.com>
  *   Yaniv Kamay  <yaniv@qumranet.com>
  *   Amit Shah    <amit.shah@qumranet.com>
  *   Ben-Ami Yassour <benami@il.ibm.com>
+ * 	 Zhuocheng Ding  <tcbbd@sjtu.edu.cn>
  *
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
@@ -22,6 +24,7 @@
 #include <linux/kvm_host.h>
 #include "irq.h"
 #include "mmu.h"
+#include "dsm.h"
 #include "i8254.h"
 #include "tss.h"
 #include "kvm_cache_regs.h"
@@ -513,8 +516,10 @@ int kvm_read_guest_page_mmu(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 			    u32 access)
 {
 	struct x86_exception exception;
+	struct kvm_memory_slot *slot;
 	gfn_t real_gfn;
 	gpa_t ngpa;
+	int ret;
 
 	ngpa     = gfn_to_gpa(ngfn);
 	real_gfn = mmu->translate_gpa(vcpu, ngpa, access, &exception);
@@ -523,7 +528,11 @@ int kvm_read_guest_page_mmu(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 
 	real_gfn = gpa_to_gfn(real_gfn);
 
-	return kvm_vcpu_read_guest_page(vcpu, real_gfn, data, offset, len);
+	if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, real_gfn, false) < 0)
+		return -EFAULT;
+	ret = kvm_vcpu_read_guest_page(vcpu, real_gfn, data, offset, len);
+	kvm_dsm_vcpu_release_page(vcpu, slot, real_gfn);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(kvm_read_guest_page_mmu);
 
@@ -1180,13 +1189,16 @@ static void kvm_write_wall_clock(struct kvm *kvm, gpa_t wall_clock)
 	int r;
 	struct pvclock_wall_clock wc;
 	struct timespec64 boot;
+	struct kvm_memslots *slots;
 
 	if (!wall_clock)
 		return;
 
+	if (kvm_dsm_acquire(kvm, &slots, wall_clock, sizeof(wc), true) < 0)
+		return;
 	r = kvm_read_guest(kvm, wall_clock, &version, sizeof(version));
 	if (r)
-		return;
+		goto out;
 
 	if (version & 1)
 		++version;  /* first time write, random junk */
@@ -1194,7 +1206,7 @@ static void kvm_write_wall_clock(struct kvm *kvm, gpa_t wall_clock)
 	++version;
 
 	if (kvm_write_guest(kvm, wall_clock, &version, sizeof(version)))
-		return;
+		goto out;
 
 	/*
 	 * The guest calculates current wall clock time by adding
@@ -1216,6 +1228,8 @@ static void kvm_write_wall_clock(struct kvm *kvm, gpa_t wall_clock)
 
 	version++;
 	kvm_write_guest(kvm, wall_clock, &version, sizeof(version));
+out:
+	kvm_dsm_release(kvm, slots, wall_clock, sizeof(wc));
 }
 
 static uint32_t div_frac(uint32_t dividend, uint32_t divisor)
@@ -1777,10 +1791,14 @@ static void kvm_setup_pvclock_page(struct kvm_vcpu *v)
 {
 	struct kvm_vcpu_arch *vcpu = &v->arch;
 	struct pvclock_vcpu_time_info guest_hv_clock;
+	struct kvm_memslots *slots;
 
+	if (kvm_dsm_vcpu_acquire(v, &slots, vcpu->pv_time.gpa,
+				sizeof(guest_hv_clock), true) < 0)
+		return;
 	if (unlikely(kvm_read_guest_cached(v->kvm, &vcpu->pv_time,
 		&guest_hv_clock, sizeof(guest_hv_clock))))
-		return;
+		goto out;
 
 	/* This VCPU is paused, but it's legal for a guest to read another
 	 * VCPU's kvmclock, so we really have to follow the specification where
@@ -1828,6 +1846,8 @@ static void kvm_setup_pvclock_page(struct kvm_vcpu *v)
 	kvm_write_guest_cached(v->kvm, &vcpu->pv_time,
 				&vcpu->hv_clock,
 				sizeof(vcpu->hv_clock.version));
+out:
+	kvm_dsm_vcpu_release(v, slots, vcpu->pv_time.gpa, sizeof(guest_hv_clock));
 }
 
 static int kvm_guest_time_update(struct kvm_vcpu *v)
@@ -2016,6 +2036,7 @@ static int set_msr_mce(struct kvm_vcpu *vcpu, u32 msr, u64 data)
 static int xen_hvm_config(struct kvm_vcpu *vcpu, u64 data)
 {
 	struct kvm *kvm = vcpu->kvm;
+	struct kvm_memory_slot *slot;
 	int lm = is_long_mode(vcpu);
 	u8 *blob_addr = lm ? (u8 *)(long)kvm->arch.xen_hvm_config.blob_addr_64
 		: (u8 *)(long)kvm->arch.xen_hvm_config.blob_addr_32;
@@ -2035,8 +2056,14 @@ static int xen_hvm_config(struct kvm_vcpu *vcpu, u64 data)
 		r = PTR_ERR(page);
 		goto out;
 	}
-	if (kvm_vcpu_write_guest(vcpu, page_addr, page, PAGE_SIZE))
+	if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, page_addr >> PAGE_SHIFT,
+				true) < 0)
 		goto out_free;
+	if (kvm_vcpu_write_guest(vcpu, page_addr, page, PAGE_SIZE)) {
+		kvm_dsm_vcpu_release_page(vcpu, slot, page_addr >> PAGE_SHIFT);
+		goto out_free;
+	}
+	kvm_dsm_vcpu_release_page(vcpu, slot, page_addr >> PAGE_SHIFT);
 	r = 0;
 out_free:
 	kfree(page);
@@ -2076,12 +2103,17 @@ static void kvmclock_reset(struct kvm_vcpu *vcpu)
 
 static void record_steal_time(struct kvm_vcpu *vcpu)
 {
+	struct kvm_memslots *slots;
+
 	if (!(vcpu->arch.st.msr_val & KVM_MSR_ENABLED))
 		return;
 
+	if (kvm_dsm_vcpu_acquire(vcpu, &slots, vcpu->arch.st.stime.gpa,
+				sizeof(struct kvm_steal_time), true) < 0)
+		return;
 	if (unlikely(kvm_read_guest_cached(vcpu->kvm, &vcpu->arch.st.stime,
 		&vcpu->arch.st.steal, sizeof(struct kvm_steal_time))))
-		return;
+		goto out;
 
 	if (vcpu->arch.st.steal.version & 1)
 		vcpu->arch.st.steal.version += 1;  /* first time write, random junk */
@@ -2106,6 +2138,9 @@ static void record_steal_time(struct kvm_vcpu *vcpu)
 
 	kvm_write_guest_cached(vcpu->kvm, &vcpu->arch.st.stime,
 		&vcpu->arch.st.steal, sizeof(struct kvm_steal_time));
+out:
+	kvm_dsm_vcpu_release(vcpu, slots, vcpu->arch.st.stime.gpa,
+			sizeof(struct kvm_steal_time));
 }
 
 int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
@@ -2641,10 +2676,13 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_ENABLE_CAP_VM:
 	case KVM_CAP_DISABLE_QUIRKS:
 	case KVM_CAP_SET_BOOT_CPU_ID:
- 	case KVM_CAP_SPLIT_IRQCHIP:
+	case KVM_CAP_SPLIT_IRQCHIP:
 #ifdef CONFIG_KVM_DEVICE_ASSIGNMENT
 	case KVM_CAP_ASSIGN_DEV_IRQ:
 	case KVM_CAP_PCI_2_3:
+#endif
+#ifdef CONFIG_KVM_DSM
+	case KVM_CAP_X86_DSM:
 #endif
 		r = 1;
 		break;
@@ -4177,6 +4215,8 @@ long kvm_arch_vm_ioctl(struct file *filp,
 	}
 	default:
 		r = kvm_vm_ioctl_assigned_device(kvm, ioctl, arg);
+		if (r == -ENOTTY)
+			r = kvm_vm_ioctl_dsm(kvm, ioctl, arg);
 	}
 out:
 	return r;
@@ -4340,14 +4380,21 @@ static int kvm_read_guest_virt_helper(gva_t addr, void *val, unsigned int bytes,
 	while (bytes) {
 		gpa_t gpa = vcpu->arch.walk_mmu->gva_to_gpa(vcpu, addr, access,
 							    exception);
+		gfn_t gfn = gpa >> PAGE_SHIFT;
+		struct kvm_memory_slot *slot;
 		unsigned offset = addr & (PAGE_SIZE-1);
 		unsigned toread = min(bytes, (unsigned)PAGE_SIZE - offset);
 		int ret;
 
 		if (gpa == UNMAPPED_GVA)
 			return X86EMUL_PROPAGATE_FAULT;
-		ret = kvm_vcpu_read_guest_page(vcpu, gpa >> PAGE_SHIFT, data,
-					       offset, toread);
+
+		if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, false) < 0) {
+			r = X86EMUL_IO_NEEDED;
+			goto out;
+		}
+		ret = kvm_vcpu_read_guest_page(vcpu, gfn, data, offset, toread);
+		kvm_dsm_vcpu_release_page(vcpu, slot, gfn);
 		if (ret < 0) {
 			r = X86EMUL_IO_NEEDED;
 			goto out;
@@ -4367,6 +4414,7 @@ static int kvm_fetch_guest_virt(struct x86_emulate_ctxt *ctxt,
 				struct x86_exception *exception)
 {
 	struct kvm_vcpu *vcpu = emul_to_vcpu(ctxt);
+	struct kvm_memory_slot *slot;
 	u32 access = (kvm_x86_ops->get_cpl(vcpu) == 3) ? PFERR_USER_MASK : 0;
 	unsigned offset;
 	int ret;
@@ -4374,14 +4422,17 @@ static int kvm_fetch_guest_virt(struct x86_emulate_ctxt *ctxt,
 	/* Inline kvm_read_guest_virt_helper for speed.  */
 	gpa_t gpa = vcpu->arch.walk_mmu->gva_to_gpa(vcpu, addr, access|PFERR_FETCH_MASK,
 						    exception);
+	gfn_t gfn = gpa >> PAGE_SHIFT;
 	if (unlikely(gpa == UNMAPPED_GVA))
 		return X86EMUL_PROPAGATE_FAULT;
 
+	if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, false) < 0)
+		return X86EMUL_IO_NEEDED;
 	offset = addr & (PAGE_SIZE-1);
 	if (WARN_ON(offset + bytes > PAGE_SIZE))
 		bytes = (unsigned)PAGE_SIZE - offset;
-	ret = kvm_vcpu_read_guest_page(vcpu, gpa >> PAGE_SHIFT, val,
-				       offset, bytes);
+	ret = kvm_vcpu_read_guest_page(vcpu, gfn, val, offset, bytes);
+	kvm_dsm_vcpu_release_page(vcpu, slot, gfn);
 	if (unlikely(ret < 0))
 		return X86EMUL_IO_NEEDED;
 
@@ -4412,7 +4463,13 @@ static int kvm_read_guest_phys_system(struct x86_emulate_ctxt *ctxt,
 		unsigned long addr, void *val, unsigned int bytes)
 {
 	struct kvm_vcpu *vcpu = emul_to_vcpu(ctxt);
-	int r = kvm_vcpu_read_guest(vcpu, addr, val, bytes);
+	struct kvm_memslots *slots;
+	int r;
+
+	if (kvm_dsm_vcpu_acquire(vcpu, &slots, addr, bytes, false) < 0)
+		return X86EMUL_IO_NEEDED;
+	r = kvm_vcpu_read_guest(vcpu, addr, val, bytes);
+	kvm_dsm_vcpu_release(vcpu, slots, addr, bytes);
 
 	return r < 0 ? X86EMUL_IO_NEEDED : X86EMUL_CONTINUE;
 }
@@ -4423,6 +4480,7 @@ int kvm_write_guest_virt_system(struct x86_emulate_ctxt *ctxt,
 				       struct x86_exception *exception)
 {
 	struct kvm_vcpu *vcpu = emul_to_vcpu(ctxt);
+	struct kvm_memory_slot *slot;
 	void *data = val;
 	int r = X86EMUL_CONTINUE;
 
@@ -4430,17 +4488,23 @@ int kvm_write_guest_virt_system(struct x86_emulate_ctxt *ctxt,
 		gpa_t gpa =  vcpu->arch.walk_mmu->gva_to_gpa(vcpu, addr,
 							     PFERR_WRITE_MASK,
 							     exception);
+		gfn_t gfn = gpa >> PAGE_SHIFT;
 		unsigned offset = addr & (PAGE_SIZE-1);
 		unsigned towrite = min(bytes, (unsigned)PAGE_SIZE - offset);
 		int ret;
 
 		if (gpa == UNMAPPED_GVA)
 			return X86EMUL_PROPAGATE_FAULT;
+
+		if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, true) < 0)
+			return X86EMUL_IO_NEEDED;
 		ret = kvm_vcpu_write_guest(vcpu, gpa, data, towrite);
 		if (ret < 0) {
 			r = X86EMUL_IO_NEEDED;
+			kvm_dsm_vcpu_release_page(vcpu, slot, gfn);
 			goto out;
 		}
+		kvm_dsm_vcpu_release_page(vcpu, slot, gfn);
 
 		bytes -= towrite;
 		data += towrite;
@@ -4492,9 +4556,13 @@ static int vcpu_mmio_gva_to_gpa(struct kvm_vcpu *vcpu, unsigned long gva,
 int emulator_write_phys(struct kvm_vcpu *vcpu, gpa_t gpa,
 			const void *val, int bytes)
 {
+	struct kvm_memslots *slots;
 	int ret;
 
+	if (kvm_dsm_vcpu_acquire(vcpu, &slots, gpa, bytes, true) < 0)
+		return 0;
 	ret = kvm_vcpu_write_guest(vcpu, gpa, val, bytes);
+	kvm_dsm_vcpu_release(vcpu, slots, gpa, bytes);
 	if (ret < 0)
 		return 0;
 	kvm_page_track_write(vcpu, gpa, val, bytes);
@@ -4528,7 +4596,14 @@ static int read_prepare(struct kvm_vcpu *vcpu, void *val, int bytes)
 static int read_emulate(struct kvm_vcpu *vcpu, gpa_t gpa,
 			void *val, int bytes)
 {
-	return !kvm_vcpu_read_guest(vcpu, gpa, val, bytes);
+	struct kvm_memslots *slots;
+	int ret;
+
+	if (kvm_dsm_vcpu_acquire(vcpu, &slots, gpa, bytes, false) < 0)
+		return 0;
+	ret = kvm_vcpu_read_guest(vcpu, gpa, val, bytes);
+	kvm_dsm_vcpu_release(vcpu, slots, gpa, bytes);
+	return !ret;
 }
 
 static int write_emulate(struct kvm_vcpu *vcpu, gpa_t gpa,
@@ -4708,6 +4783,7 @@ static int emulator_cmpxchg_emulated(struct x86_emulate_ctxt *ctxt,
 				     struct x86_exception *exception)
 {
 	struct kvm_vcpu *vcpu = emul_to_vcpu(ctxt);
+	struct kvm_memory_slot *slot;
 	gpa_t gpa;
 	struct page *page;
 	char *kaddr;
@@ -4730,6 +4806,8 @@ static int emulator_cmpxchg_emulated(struct x86_emulate_ctxt *ctxt,
 	if (is_error_page(page))
 		goto emul_write;
 
+	if (kvm_dsm_vcpu_acquire_page(vcpu, &slot, gpa >> PAGE_SHIFT, true) < 0)
+		return X86EMUL_CMPXCHG_FAILED;
 	kaddr = kmap_atomic(page);
 	kaddr += offset_in_page(gpa);
 	switch (bytes) {
@@ -4750,6 +4828,7 @@ static int emulator_cmpxchg_emulated(struct x86_emulate_ctxt *ctxt,
 	}
 	kunmap_atomic(kaddr);
 	kvm_release_page_dirty(page);
+	kvm_dsm_vcpu_release_page(vcpu, slot, gpa >> PAGE_SHIFT);
 
 	if (!exchanged)
 		return X86EMUL_CMPXCHG_FAILED;
@@ -6423,9 +6502,11 @@ static void enter_smm_save_state_64(struct kvm_vcpu *vcpu, char *buf)
 static void enter_smm(struct kvm_vcpu *vcpu)
 {
 	struct kvm_segment cs, ds;
+	struct kvm_memslots *slots;
 	struct desc_ptr dt;
 	char buf[512];
 	u32 cr0;
+	int ret;
 
 	trace_kvm_enter_smm(vcpu->vcpu_id, vcpu->arch.smbase, true);
 	vcpu->arch.hflags |= HF_SMM_MASK;
@@ -6435,7 +6516,12 @@ static void enter_smm(struct kvm_vcpu *vcpu)
 	else
 		enter_smm_save_state_32(vcpu, buf);
 
+	/* XXX: fail silently, not sure if this is appropriate */
+	ret = kvm_dsm_vcpu_acquire(vcpu, &slots, vcpu->arch.smbase + 0xfe00,
+			sizeof(buf), true);
 	kvm_vcpu_write_guest(vcpu, vcpu->arch.smbase + 0xfe00, buf, sizeof(buf));
+	if (ret >= 0)
+		kvm_dsm_vcpu_release(vcpu, slots, vcpu->arch.smbase + 0xfe00, sizeof(buf));
 
 	if (kvm_x86_ops->get_nmi_mask(vcpu))
 		vcpu->arch.hflags |= HF_SMM_INSIDE_NMI_MASK;
@@ -7871,6 +7957,8 @@ void kvm_arch_sched_in(struct kvm_vcpu *vcpu, int cpu)
 
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 {
+	int r;
+
 	if (type)
 		return -EINVAL;
 
@@ -7889,6 +7977,9 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	raw_spin_lock_init(&kvm->arch.tsc_write_lock);
 	mutex_init(&kvm->arch.apic_map_lock);
 	spin_lock_init(&kvm->arch.pvclock_gtod_sync_lock);
+	r = kvm_dsm_alloc(kvm);
+	if (r < 0)
+		return r;
 
 	kvm->arch.kvmclock_offset = -ktime_get_boot_ns();
 	pvclock_update_vm_gtod_copy(kvm);
@@ -8030,6 +8121,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 	kfree(kvm->arch.vioapic);
 	kvm_free_vcpus(kvm);
 	kvfree(rcu_dereference_check(kvm->arch.apic_map, 1));
+	kvm_dsm_free(kvm);
 	kvm_mmu_uninit_vm(kvm);
 	kvm_page_track_cleanup(kvm);
 }
@@ -8106,6 +8198,11 @@ int kvm_arch_create_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
 	if (kvm_page_track_create_memslot(slot, npages))
 		goto out_free;
 
+	if (kvm_dsm_register_memslot_hva(kvm, slot, npages)) {
+		kvm_page_track_free_memslot(slot, NULL);
+		goto out_free;
+	}
+
 	return 0;
 
 out_free:
@@ -8135,7 +8232,9 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 				const struct kvm_userspace_memory_region *mem,
 				enum kvm_mr_change change)
 {
-	return 0;
+	if (change == KVM_MR_DELETE || change == KVM_MR_FLAGS_ONLY)
+		return 0;
+	return kvm_dsm_add_memslot(kvm, memslot, mem->slot >> 16);
 }
 
 static void kvm_mmu_slot_apply_flags(struct kvm *kvm,
@@ -8242,6 +8341,7 @@ void kvm_arch_flush_shadow_memslot(struct kvm *kvm,
 				   struct kvm_memory_slot *slot)
 {
 	kvm_mmu_invalidate_zap_all_pages(kvm);
+	kvm_dsm_remove_memslot(kvm, slot);
 }
 
 static inline bool kvm_vcpu_has_events(struct kvm_vcpu *vcpu)
@@ -8412,9 +8512,17 @@ static void kvm_del_async_pf_gfn(struct kvm_vcpu *vcpu, gfn_t gfn)
 
 static int apf_put_user(struct kvm_vcpu *vcpu, u32 val)
 {
+	struct kvm_memslots *slots;
+	int ret;
 
-	return kvm_write_guest_cached(vcpu->kvm, &vcpu->arch.apf.data, &val,
+	ret = kvm_dsm_vcpu_acquire(vcpu, &slots, vcpu->arch.apf.data.gpa,
+			sizeof(val), true);
+	if (ret < 0)
+		return ret;
+	ret = kvm_write_guest_cached(vcpu->kvm, &vcpu->arch.apf.data, &val,
 				      sizeof(val));
+	kvm_dsm_vcpu_release(vcpu, slots, vcpu->arch.apf.data.gpa, sizeof(val));
+	return ret;
 }
 
 void kvm_arch_async_page_not_present(struct kvm_vcpu *vcpu,

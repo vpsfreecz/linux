@@ -6,10 +6,12 @@
  *
  * Copyright (C) 2006 Qumranet, Inc.
  * Copyright 2010 Red Hat, Inc. and/or its affiliates.
+ * Copyright (C) 2018, Trusted Cloud Group, Shanghai Jiao Tong University.
  *
  * Authors:
  *   Avi Kivity   <avi@qumranet.com>
  *   Yaniv Kamay  <yaniv@qumranet.com>
+ *   Zhuocheng Ding  <tcbbd@sjtu.edu.cn>
  *
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
@@ -78,7 +80,7 @@ static bool __read_mostly enable_unrestricted_guest = 1;
 module_param_named(unrestricted_guest,
 			enable_unrestricted_guest, bool, S_IRUGO);
 
-static bool __read_mostly enable_ept_ad_bits = 1;
+static bool __read_mostly enable_ept_ad_bits = 0;
 module_param_named(eptad, enable_ept_ad_bits, bool, S_IRUGO);
 
 static bool __read_mostly emulate_invalid_guest_state = true;

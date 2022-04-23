@@ -6,10 +6,14 @@
  *
  * Copyright (C) 2006 Qumranet, Inc.
  * Copyright 2010 Red Hat, Inc. and/or its affiliates.
+ * Copyright (C) 2019, Trusted Cloud Group, Shanghai Jiao Tong University.
  *
  * Authors:
  *   Avi Kivity   <avi@qumranet.com>
  *   Yaniv Kamay  <yaniv@qumranet.com>
+ *   Jin Zhang 	    <jzhang3002@sjtu.edu.cn>
+ *   Yubin Chen 	<binsschen@sjtu.edu.cn>
+ *   Zhuocheng Ding <tcbbd@sjtu.edu.cn>
  *
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
@@ -237,6 +241,16 @@ int kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 {
 	struct page *page;
 	int r;
+	char from_comm[TASK_COMM_LEN];
+
+	/*
+	 * task_set_comm is not defined? This code snippet is equivalent to
+	 * set_task_comm but tracing functions.
+	 */
+	sprintf(from_comm, "qemu-vcpu/%d", id);
+	task_lock(current);
+	strlcpy(current->comm, from_comm, sizeof(current->comm));
+	task_unlock(current);
 
 	mutex_init(&vcpu->mutex);
 	vcpu->cpu = -1;
@@ -1758,7 +1772,7 @@ static int next_segment(unsigned long len, int offset)
 		return len;
 }
 
-static int __kvm_read_guest_page(struct kvm_memory_slot *slot, gfn_t gfn,
+int __kvm_read_guest_page(struct kvm_memory_slot *slot, gfn_t gfn,
 				 void *data, int offset, int len)
 {
 	int r;
@@ -1870,7 +1884,7 @@ int kvm_vcpu_read_guest_atomic(struct kvm_vcpu *vcpu, gpa_t gpa,
 }
 EXPORT_SYMBOL_GPL(kvm_vcpu_read_guest_atomic);
 
-static int __kvm_write_guest_page(struct kvm_memory_slot *memslot, gfn_t gfn,
+int __kvm_write_guest_page(struct kvm_memory_slot *memslot, gfn_t gfn,
 			          const void *data, int offset, int len)
 {
 	int r;

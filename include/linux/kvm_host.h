@@ -2,6 +2,12 @@
 #define __KVM_HOST_H
 
 /*
+ * Copyright (C) 2018, Trusted Cloud Group, Shanghai Jiao Tong University.
+ * Authors:
+ *   Jin Zhang 	    <jzhang3002@sjtu.edu.cn>
+ *   Yubin Chen 	<binsschen@sjtu.edu.cn>
+ *   Zhuocheng Ding <tcbbd@sjtu.edu.cn>
+ * 	
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  */
@@ -632,6 +638,8 @@ void kvm_set_pfn_dirty(kvm_pfn_t pfn);
 void kvm_set_pfn_accessed(kvm_pfn_t pfn);
 void kvm_get_pfn(kvm_pfn_t pfn);
 
+int __kvm_read_guest_page(struct kvm_memory_slot *slot, gfn_t gfn,
+				 void *data, int offset, int len);
 int kvm_read_guest_page(struct kvm *kvm, gfn_t gfn, void *data, int offset,
 			int len);
 int kvm_read_guest_atomic(struct kvm *kvm, gpa_t gpa, void *data,
@@ -639,6 +647,8 @@ int kvm_read_guest_atomic(struct kvm *kvm, gpa_t gpa, void *data,
 int kvm_read_guest(struct kvm *kvm, gpa_t gpa, void *data, unsigned long len);
 int kvm_read_guest_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
 			   void *data, unsigned long len);
+int __kvm_write_guest_page(struct kvm_memory_slot *memslot, gfn_t gfn,
+			          const void *data, int offset, int len);
 int kvm_write_guest_page(struct kvm *kvm, gfn_t gfn, const void *data,
 			 int offset, int len);
 int kvm_write_guest(struct kvm *kvm, gpa_t gpa, const void *data,
@@ -1206,5 +1216,4 @@ static inline bool vcpu_valid_wakeup(struct kvm_vcpu *vcpu)
 	return true;
 }
 #endif /* CONFIG_HAVE_KVM_INVALID_WAKEUPS */
-
 #endif

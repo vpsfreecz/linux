@@ -1,6 +1,15 @@
 #
 # KVM configuration
 #
+# Copyright (C) 2018, Trusted Cloud Group, Shanghai Jiao Tong University.
+# 
+# Authors:
+#   Jin Zhang 	    <jzhang3002@sjtu.edu.cn>
+#   Yubin Chen 	 	<binsschen@sjtu.edu.cn>
+#   Zhuocheng Ding  <tcbbd@sjtu.edu.cn>
+# 
+#  This work is licensed under the terms of the GNU GPL, version 2.  See
+#  the COPYING file in the top-level directory.
 
 source "virt/kvm/Kconfig"
 
@@ -97,6 +106,15 @@ config KVM_DEVICE_ASSIGNMENT
 	  better security.
 
 	  If unsure, say N.
+
+config KVM_DSM
+	bool "KVM distributed software memory support"
+	depends on KVM && KVM_INTEL
+	default n
+	---help---
+	  Provide support for distributed software memory inside KVM, which allows
+	  userspace to implement distributed hypervisors.
+
 
 # OK, it's a little counter-intuitive to do this, but it puts it neatly under
 # the virtualization menu.
