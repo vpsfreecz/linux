@@ -79,12 +79,12 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		i.totalram = i.totalhigh = totalram;
 		i.freeram = i.freehigh = totalram - memusage;
 
-		if (memsw < PAGE_COUNTER_MAX) {
-			i.totalswap = memsw - totalram;
-			i.freeswap = i.totalswap - (memsw_usage - memusage);
-		} else {
+		if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
 			i.totalswap = 0;
 			i.freeswap = 0;
+		} else {
+			i.totalswap = memsw - totalram;
+			i.freeswap = i.totalswap - (memsw_usage - memusage);
 		}
 
 		available = i.freeram + sreclaimable + cached_inactive;

@@ -2856,7 +2856,7 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 		memsw_usage = page_counter_read(&memcg->memsw);
 	}
 
-	if (memsw == PAGE_COUNTER_MAX)
+	if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
 		return 0;
 
 	totalswap = (memsw - totalram) * PAGE_SIZE;

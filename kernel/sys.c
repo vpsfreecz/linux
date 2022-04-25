@@ -2628,12 +2628,12 @@ static int do_sysinfo(struct sysinfo *info)
 
 		info->totalram = info->totalhigh = totalram;
 		info->freeram = info->freehigh = totalram - memusage;
-		if (memsw < PAGE_COUNTER_MAX) {
-			info->totalswap = memsw - totalram;
-			info->freeswap = info->totalswap - (memsw_usage - memusage);
-		} else {
+		if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
 			info->totalswap = 0;
 			info->freeswap = 0;
+		} else {
+			info->totalswap = memsw - totalram;
+			info->freeswap = info->totalswap - (memsw_usage - memusage);
 		}
 		info->bufferram = memcg_page_state(memcg, NR_FILE_PAGES);
 		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
