@@ -2660,7 +2660,8 @@ out:
 	return 0;
 }
 
-SYSCALL_DEFINE1(sysinfo, struct sysinfo __user *, info)
+#include "kpatch-macros.h"
+KPATCH_SYSCALL_DEFINE1(sysinfo, struct sysinfo __user *, info)
 {
 	struct sysinfo val;
 
