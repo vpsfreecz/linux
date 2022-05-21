@@ -388,6 +388,8 @@ static int console_msg_format = MSG_FORMAT_DEFAULT;
 static u64 exclusive_console_stop_seq;
 static unsigned long console_dropped;
 
+static u64 clear_seq;
+
 #define LOG_LEVEL(v)		((v) & 0x07)
 #define LOG_FACILITY(v)		((v) >> 3 & 0xff)
 
@@ -397,7 +399,10 @@ static unsigned long console_dropped;
 #define LOG_BUF_LEN_MAX (u32)(1 << 31)
 
 /* this buf only for init_syslog_ns */
+
 static char __log_buf[__LOG_BUF_LEN] __aligned(LOG_ALIGN);
+static char *log_buf;
+static u32 log_buf_len;
 
 #if CONFIG_LOG_BUF_SHIFT <= PRB_AVGBITS
 #error CONFIG_LOG_BUF_SHIFT value too small.
@@ -406,6 +411,8 @@ _DEFINE_PRINTKRB(printk_rb_static, CONFIG_LOG_BUF_SHIFT - PRB_AVGBITS,
 		 PRB_AVGBITS, &__log_buf[0]);
 
 static struct printk_ringbuffer printk_rb_dynamic;
+
+static struct printk_ringbuffer *prb = &printk_rb_static;
 
 /*
  * We cannot access per-CPU data (e.g. per-CPU flush irq_work) before
@@ -958,11 +965,10 @@ const struct file_operations kmsg_fops = {
 void log_buf_vmcoreinfo_setup(void)
 {
 	struct dev_printk_info *dev_info = NULL;
-	struct syslog_namespace *ns = &init_syslog_ns;
 
-	VMCOREINFO_SYMBOL(ns->prb);
+	VMCOREINFO_SYMBOL(prb);
 	VMCOREINFO_SYMBOL(printk_rb_static);
-	VMCOREINFO_SYMBOL(ns->clear_seq);
+	VMCOREINFO_SYMBOL(clear_seq);
 
 	/*
 	 * Export struct size and field offsets. User space tools can
@@ -1184,8 +1190,10 @@ void __init setup_log_buf(int early)
 
 	logbuf_lock_irqsave(flags, ns);
 
-	ns->log_buf_len = new_log_buf_len;
-	ns->log_buf = new_log_buf;
+	log_buf_len = new_log_buf_len;
+	log_buf = new_log_buf;
+	ns->log_buf_len = log_buf_len;
+	ns->log_buf = log_buf;
 	new_log_buf_len = 0;
 
 	free = __LOG_BUF_LEN;
@@ -1197,7 +1205,8 @@ void __init setup_log_buf(int early)
 	 * boot CPU and interrupts are disabled. So no new messages will
 	 * appear during the transition to the dynamic buffer.
 	 */
-	ns->prb = &printk_rb_dynamic;
+	prb = &printk_rb_dynamic;
+	ns->prb = prb;
 
 	logbuf_unlock_irqrestore(flags, ns);
 
@@ -1601,8 +1610,11 @@ static int syslog_print_all(char __user *buf, int size, bool clear,
 			break;
 	}
 
-	if (clear)
+	if (clear) {
 		ns->clear_seq = seq;
+		if (ns == &init_syslog_ns)
+			clear_seq = ns->clear_seq;
+	}
 	logbuf_unlock_irq(ns);
 
 	kfree(text);
@@ -1613,6 +1625,8 @@ static void syslog_clear(struct syslog_namespace *ns)
 {
 	logbuf_lock_irq(ns);
 	ns->clear_seq = prb_next_seq(ns->prb);
+	if (ns == &init_syslog_ns)
+		clear_seq = ns->clear_seq;
 	logbuf_unlock_irq(ns);
 }
 
