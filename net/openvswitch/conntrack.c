@@ -1194,7 +1194,7 @@ static int ovs_ct_commit(struct net *net, struct sw_flow_key *key,
 		return 0;
 
 #if	IS_ENABLED(CONFIG_NETFILTER_CONNCOUNT)
-	if (static_branch_unlikely(&ovs_ct_limit_enabled)) {
+	if (static_key_enabled(&ovs_ct_limit_enabled)) {
 		if (!nf_ct_is_confirmed(ct)) {
 			err = ovs_ct_check_limit(net, info,
 				&ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple);

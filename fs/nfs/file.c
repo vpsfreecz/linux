@@ -227,7 +227,7 @@ nfs_file_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	struct inode *inode = file_inode(file);
 	int ret;
 
-	trace_nfs_fsync_enter(inode);
+	//trace_nfs_fsync_enter(inode);
 
 	for (;;) {
 		ret = file_write_and_wait_range(file, start, end);
@@ -250,7 +250,7 @@ nfs_file_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 		end = LLONG_MAX;
 	}
 
-	trace_nfs_fsync_exit(inode, ret);
+	//trace_nfs_fsync_exit(inode, ret);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(nfs_file_fsync);
