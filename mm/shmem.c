@@ -40,7 +40,7 @@
 #include <linux/fs_parser.h>
 #include <linux/swapfile.h>
 #include <linux/iversion.h>
-#include <linux/unicode.h>
+#include <linux/vpsadminos.h>
 #include "swap.h"
 
 static struct vfsmount *shm_mnt __ro_after_init;
@@ -48,6 +48,9 @@ static struct vfsmount *shm_mnt __ro_after_init;
 #ifdef CONFIG_SHMEM
 /*
  * This virtual memory filesystem is heavily based on the ramfs. It
+ * extends ramfs by the ability to use swap and honor resource limits
+ * which makes it a completely usable filesystem.
+ */
  * extends ramfs by the ability to use swap and honor resource limits
  * which makes it a completely usable filesystem.
  */
@@ -147,13 +150,24 @@ static bool shmem_orders_configured __initdata;
 #ifdef CONFIG_TMPFS
 static unsigned long shmem_default_max_blocks(void)
 {
-	return totalram_pages() / 2;
+	unsigned long limit = totalram_pages() / 2;
+	struct mem_cgroup *memcg = get_current_most_limited_memcg();
+	if (memcg) {
+		limit = (u64)READ_ONCE(memcg->memory.max) / 2;
+		mem_cgroup_put(memcg);
+	}
+	return limit;
 }
 
 static unsigned long shmem_default_max_inodes(void)
 {
 	unsigned long nr_pages = totalram_pages();
-
+	struct mem_cgroup *memcg = get_current_most_limited_memcg();
+	if (memcg) {
+		nr_pages = READ_ONCE(memcg->memory.max);
+		mem_cgroup_put(memcg);
+		return nr_pages;
+	}
 	return min3(nr_pages - totalhigh_pages(), nr_pages / 2,
 			ULONG_MAX / BOGO_INODE_SIZE);
 }
