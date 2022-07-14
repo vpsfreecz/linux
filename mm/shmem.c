@@ -39,6 +39,7 @@
 #include <linux/fs_parser.h>
 #include <linux/swapfile.h>
 #include <linux/iversion.h>
+#include <linux/vpsadminos.h>
 #include "swap.h"
 
 static struct vfsmount *shm_mnt;
@@ -125,13 +126,24 @@ struct shmem_options {
 #ifdef CONFIG_TMPFS
 static unsigned long shmem_default_max_blocks(void)
 {
-	return totalram_pages() / 2;
+	unsigned long limit = totalram_pages() / 2;
+	struct mem_cgroup *memcg = get_current_most_limited_memcg();
+	if (memcg) {
+		limit = (u64)READ_ONCE(memcg->memory.max) / 2;
+		mem_cgroup_put(memcg);
+	}
+	return limit;
 }
 
 static unsigned long shmem_default_max_inodes(void)
 {
 	unsigned long nr_pages = totalram_pages();
-
+	struct mem_cgroup *memcg = get_current_most_limited_memcg();
+	if (memcg) {
+		nr_pages = READ_ONCE(memcg->memory.max);
+		mem_cgroup_put(memcg);
+		return nr_pages;
+	}
 	return min(nr_pages - totalhigh_pages(), nr_pages / 2);
 }
 #endif
