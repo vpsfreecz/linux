@@ -4276,10 +4276,10 @@ static int shmem_show_options(struct seq_file *seq, struct dentry *root)
 		seq_printf(seq, ",mode=%03ho", sbinfo->mode);
 	if (!uid_eq(sbinfo->uid, GLOBAL_ROOT_UID))
 		seq_printf(seq, ",uid=%u",
-				from_kuid_munged(&init_user_ns, sbinfo->uid));
+				from_kuid_munged(current_user_ns(), sbinfo->uid));
 	if (!gid_eq(sbinfo->gid, GLOBAL_ROOT_GID))
 		seq_printf(seq, ",gid=%u",
-				from_kgid_munged(&init_user_ns, sbinfo->gid));
+				from_kgid_munged(current_user_ns(), sbinfo->gid));
 
 	/*
 	 * Showing inode{64,32} might be useful even if it's the system default,
