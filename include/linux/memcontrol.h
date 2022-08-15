@@ -1142,6 +1142,13 @@ unsigned long mem_cgroup_soft_limit_reclaim(pg_data_t *pgdat, int order,
 						gfp_t gfp_mask,
 						unsigned long *total_scanned);
 
+/* Whether the swap controller is active */
+#ifdef CONFIG_MEMCG_SWAP
+extern bool cgroup_memory_noswap;
+#else
+#define cgroup_memory_noswap		1
+#endif
+
 #else /* CONFIG_MEMCG */
 
 #define MEM_CGROUP_ID_SHIFT	0
