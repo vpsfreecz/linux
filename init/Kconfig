@@ -1209,6 +1209,13 @@ config NET_NS
 	  Allow user space to create what appear to be multiple instances
 	  of the network stack.
 
+config SYSLOG_NS
+	bool "Syslog namespace"
+	depends on USER_NS
+	default n
+	help
+	  Syslog namespace
+
 endif # NAMESPACES
 
 config CHECKPOINT_RESTORE
