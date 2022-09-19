@@ -72,9 +72,9 @@ nfs_fattr_to_ino_t(struct nfs_fattr *fattr)
 	return nfs_fileid_to_ino_t(fattr->fileid);
 }
 
-static int nfs_wait_killable(int mode)
+static noinline int nfs_wait_killable(int mode)
 {
-	freezable_schedule_unsafe();
+	schedule_timeout_interruptible(msecs_to_jiffies(250));
 	if (signal_pending_state(mode, current))
 		return -ERESTARTSYS;
 	return 0;
