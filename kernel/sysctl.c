@@ -71,6 +71,7 @@
 #include <linux/coredump.h>
 #include <linux/latencytop.h>
 #include <linux/pid.h>
+#include <linux/syslog_namespace.h>
 
 #include "../lib/kstrtox.h"
 

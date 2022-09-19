@@ -16,6 +16,7 @@
 #include <linux/wait.h>
 #include <linux/vt_kern.h>
 #include <linux/console.h>
+#include <linux/syslog_namespace.h>
 
 void bust_spinlocks(int yes)
 {
@@ -27,6 +28,6 @@ void bust_spinlocks(int yes)
 #endif
 		console_unblank();
 		if (--oops_in_progress == 0)
-			wake_up_klogd();
+			wake_up_klogd(&init_syslog_ns);
 	}
 }
