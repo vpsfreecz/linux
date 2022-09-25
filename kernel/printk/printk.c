@@ -64,6 +64,8 @@
 #include "braille.h"
 #include "internal.h"
 
+int syslog_ns_print_to_init_ns = 1;
+
 int console_printk[4] = {
 	CONSOLE_LOGLEVEL_DEFAULT,	/* console_loglevel */
 	MESSAGE_LOGLEVEL_DEFAULT,	/* default_message_loglevel */
@@ -2082,7 +2084,7 @@ asmlinkage int vprintk_emit_ns(struct syslog_namespace *ns,
 	boot_delay_msec(level);
 	printk_delay();
 
-	if (ns != &init_syslog_ns) {
+	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
 		struct syslog_namespace *init_ns = &init_syslog_ns;
 		va_list init_args;
 
