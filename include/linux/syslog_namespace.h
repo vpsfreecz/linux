@@ -9,7 +9,6 @@
 #include <linux/err.h>
 #include <linux/kref.h>
 
-
 /*
  * Define the average message size. This only affects the number of
  * descriptors that will be available. Underestimating is better than
@@ -18,6 +17,8 @@
 #define PRB_AVGBITS 5	/* 32 character average length */
 
 #ifdef CONFIG_PRINTK
+
+extern int syslog_ns_print_to_init_ns;
 
 #ifdef CONFIG_PRINTK_CALLER
 #define LOG_PREFIX_MAX		48
