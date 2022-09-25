@@ -53,6 +53,10 @@ struct ctl_dir;
 #define SYSCTL_MAXOLDUID		((void *)&sysctl_vals[10])
 #define SYSCTL_NEG_ONE			((void *)&sysctl_vals[11])
 
+// WTF is this ^^^^ shit supposed to be at all, people!?!?! ...
+// Lemme shit on this some more
+#define SYSCTL_TEN_THOUSAND		((void *)&sysctl_vals[12])
+
 extern const int sysctl_vals[];
 
 #define SYSCTL_LONG_ZERO	((void *)&sysctl_long_vals[0])
