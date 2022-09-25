@@ -11,6 +11,7 @@
 struct user_namespace;
 
 struct mem_cgroup *get_current_most_limited_memcg(void);
+struct mem_cgroup *get_nearest_memcg_running_ksoftlimd(void);
 
 extern ssize_t fake_sysfs_kf_read(struct kernfs_open_file *of, char *buf);
 extern ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
