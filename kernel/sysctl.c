@@ -82,7 +82,7 @@
 #endif
 
 /* shared constants to be used in various sysctls */
-const int sysctl_vals[] = { 0, 1, 2, 3, 4, 100, 200, 1000, 3000, INT_MAX, 65535, -1 };
+const int sysctl_vals[] = { 0, 1, 2, 3, 4, 100, 200, 1000, 3000, INT_MAX, 65535, -1, 10000, };
 EXPORT_SYMBOL(sysctl_vals);
 
 const unsigned long sysctl_long_vals[] = { 0, 1, LONG_MAX };
@@ -2298,6 +2298,35 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= (void *)&mmap_rnd_compat_bits_min,
 		.extra2		= (void *)&mmap_rnd_compat_bits_max,
+	},
+#endif
+#ifdef CONFIG_MEMCG
+	{
+		.procname	= "cgroup_memory_ksoftlimd_for_all",
+		.data		= &cgroup_memory_ksoftlimd_for_all,
+		.maxlen		= sizeof(cgroup_memory_ksoftlimd_for_all),
+		.mode		= 0644,
+		.proc_handler	= mem_cgroup_ksoftlimd_sysctl_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "cgroup_memory_ksoftlimd_sleep_msec",
+		.data		= &cgroup_memory_ksoftlimd_sleep_msec,
+		.maxlen		= sizeof(cgroup_memory_ksoftlimd_sleep_msec),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE_HUNDRED,
+		.extra2		= SYSCTL_TEN_THOUSAND,
+	},
+	{
+		.procname	= "cgroup_memory_ksoftlimd_loops",
+		.data		= &cgroup_memory_ksoftlimd_loops,
+		.maxlen		= sizeof(cgroup_memory_ksoftlimd_loops),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
+		.extra2		= SYSCTL_TEN_THOUSAND,
 	},
 #endif
 	{ }
