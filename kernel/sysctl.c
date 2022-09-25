@@ -2348,6 +2348,15 @@ static struct ctl_table kern_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= &two,
 	},
+	{
+		.procname	= "syslog_ns_print_to_init_ns",
+		.data		= &syslog_ns_print_to_init_ns,
+		.maxlen		= sizeof(syslog_ns_print_to_init_ns),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax_sysadmin,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
 #endif
 	{
 		.procname	= "ngroups_max",
