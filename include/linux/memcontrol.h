@@ -129,6 +129,10 @@ struct mem_cgroup_per_node {
 	bool			on_tree;
 	struct mem_cgroup	*memcg;		/* Back pointer, we cannot */
 						/* use container_of	   */
+
+	wait_queue_head_t	ksoftlimd_wait;
+	struct task_struct	*ksoftlimd_task;
+	struct pglist_data 	*ksoftlimd_pgdat;
 };
 
 struct mem_cgroup_threshold {
@@ -236,6 +240,13 @@ struct mem_cgroup {
 	 * Should the OOM killer kill all belonging tasks, had it kill one?
 	 */
 	bool oom_group;
+
+	/* Number of ksoftlimd threads running for this memcg */
+	atomic_long_t	ksoftlimd_threads_running; // one per NUMA node
+	unsigned long	ksoftlimd_total_runs;
+	unsigned long	ksoftlimd_total_wakeups;
+	unsigned long	ksoftlimd_total_scanned;
+	unsigned long	ksoftlimd_total_reclaimed;
 
 	/* protected by memcg_oom_lock */
 	bool		oom_lock;
@@ -1167,6 +1178,27 @@ static inline void memcg_memory_event_mm(struct mm_struct *mm,
 
 void split_page_memcg(struct page *head, unsigned int nr);
 
+extern int cgroup_memory_ksoftlimd_for_all;
+extern int cgroup_memory_ksoftlimd_sleep_msec;
+extern int cgroup_memory_ksoftlimd_loops;
+extern atomic_long_t total_num_ksoftlimd_threads_running;
+static inline unsigned long total_ksoftlimd_threads_running(void) {
+	return atomic_long_read(&total_num_ksoftlimd_threads_running);
+}
+static inline int mem_cgroup_ksoftlimd_running(struct mem_cgroup *memcg) {
+	return (atomic_long_read(&memcg->ksoftlimd_threads_running) > 0);
+}
+bool mem_cgroup_try_to_wakeup_ksoftlimd(void);
+unsigned long mem_cgroup_soft_limit_try_reclaim(gfp_t gfp_mask, unsigned long *scanned);
+int mem_cgroup_ksoftlimd_run_node(struct mem_cgroup *memcg, int nid);
+void mem_cgroup_ksoftlimd_stop_node(struct mem_cgroup *memcg, int nid);
+int mem_cgroup_ksoftlimd_run(struct mem_cgroup *memcg);
+void mem_cgroup_ksoftlimd_stop(struct mem_cgroup *memcg);
+int mem_cgroup_ksoftlimd_node_run(int nid);
+void mem_cgroup_ksoftlimd_node_stop(int nid);
+int mem_cgroup_ksoftlimd_sysctl_handler(struct ctl_table *table, int write,
+    void __user *buffer, size_t *length, loff_t *ppos);
+
 unsigned long mem_cgroup_soft_limit_reclaim(pg_data_t *pgdat, int order,
 						gfp_t gfp_mask,
 						unsigned long *total_scanned);
@@ -1627,6 +1659,29 @@ static inline void split_page_memcg(struct page *head, unsigned int nr)
 {
 }
 
+/*
+ * TODO: ksoftlimd patch should compile when no MEMCG enabled
+extern int cgroup_memory_ksoftlimd_for_all;
+extern int cgroup_memory_ksoftlimd_sleep_msec;
+extern int cgroup_memory_ksoftlimd_loops;
+extern atomic_long_t total_num_ksoftlimd_threads_running;
+static inline unsigned long total_ksoftlimd_threads_running(void) {
+	return atomic_long_read(&total_num_ksoftlimd_threads_running);
+}
+static inline int mem_cgroup_ksoftlimd_running(struct mem_cgroup *memcg) {
+	return (atomic_long_read(&memcg->ksoftlimd_threads_running) > 0);
+}
+bool mem_cgroup_try_to_wakeup_ksoftlimd(void);
+unsigned long mem_cgroup_soft_limit_try_reclaim(gfp_t gfp_mask, unsigned long *scanned);
+int mem_cgroup_ksoftlimd_run_node(struct mem_cgroup *memcg, int nid);
+void mem_cgroup_ksoftlimd_stop_node(struct mem_cgroup *memcg, int nid);
+int mem_cgroup_ksoftlimd_run(struct mem_cgroup *memcg);
+void mem_cgroup_ksoftlimd_stop(struct mem_cgroup *memcg);
+int mem_cgroup_ksoftlimd_node_run(int nid);
+void mem_cgroup_ksoftlimd_node_stop(int nid);
+int mem_cgroup_ksoftlimd_sysctl_handler(struct ctl_table *table, int write,
+    void __user *buffer, size_t *length, loff_t *ppos);
+ */
 static inline
 unsigned long mem_cgroup_soft_limit_reclaim(pg_data_t *pgdat, int order,
 					    gfp_t gfp_mask,

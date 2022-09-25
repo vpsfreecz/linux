@@ -6126,9 +6126,15 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
 			 * and balancing, not for a memcg's limit.
 			 */
 			nr_soft_scanned = 0;
-			nr_soft_reclaimed = mem_cgroup_soft_limit_reclaim(zone->zone_pgdat,
-						sc->order, sc->gfp_mask,
-						&nr_soft_scanned);
+			if (mem_cgroup_try_to_wakeup_ksoftlimd())
+				nr_soft_reclaimed = mem_cgroup_soft_limit_try_reclaim(sc->gfp_mask, &nr_soft_scanned);
+			else
+				if (current_is_kswapd() && total_ksoftlimd_threads_running() > 0)
+					nr_soft_reclaimed = 0;
+				else
+					nr_soft_reclaimed = mem_cgroup_soft_limit_reclaim(
+						zone->zone_pgdat, sc->order,
+						sc->gfp_mask, &nr_soft_scanned);
 			sc->nr_reclaimed += nr_soft_reclaimed;
 			sc->nr_scanned += nr_soft_scanned;
 			/* need some check for avoid more shrink_zone() */
@@ -6463,8 +6469,6 @@ unsigned long mem_cgroup_shrink_node(struct mem_cgroup *memcg,
 		.reclaim_idx = MAX_NR_ZONES - 1,
 		.may_swap = !noswap,
 	};
-
-	WARN_ON_ONCE(!current->reclaim_state);
 
 	sc.gfp_mask = (gfp_mask & GFP_RECLAIM_MASK) |
 			(GFP_HIGHUSER_MOVABLE & ~GFP_RECLAIM_MASK);
@@ -6874,8 +6878,15 @@ restart:
 		/* Call soft limit reclaim before calling shrink_node. */
 		sc.nr_scanned = 0;
 		nr_soft_scanned = 0;
-		nr_soft_reclaimed = mem_cgroup_soft_limit_reclaim(pgdat, sc.order,
-						sc.gfp_mask, &nr_soft_scanned);
+		if (mem_cgroup_try_to_wakeup_ksoftlimd())
+			nr_soft_reclaimed = mem_cgroup_soft_limit_try_reclaim(sc.gfp_mask, &sc.nr_scanned);
+		else
+			if (current_is_kswapd() && total_ksoftlimd_threads_running() > 0)
+				nr_soft_reclaimed = 0;
+			else
+				nr_soft_reclaimed = mem_cgroup_soft_limit_reclaim(
+					zone->zone_pgdat, sc.order,
+					sc.gfp_mask, &nr_soft_scanned);
 		sc.nr_reclaimed += nr_soft_reclaimed;
 
 		/*
