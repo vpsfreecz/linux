@@ -41,6 +41,31 @@ not_found:
 	return NULL;
 }
 
+struct mem_cgroup *get_nearest_memcg_running_ksoftlimd(void)
+{
+	struct mem_cgroup *root_memcg, *walk_memcg, *res_memcg = NULL;
+	struct mem_cgroup_per_node *mcpn;
+
+	rcu_read_lock();
+
+	root_memcg = walk_memcg = mem_cgroup_from_task(current);
+	if (!root_memcg)
+		return NULL;
+
+	while ((walk_memcg != root_mem_cgroup) && (walk_memcg != NULL)) {
+		long nthreads = atomic_long_read(&walk_memcg->ksoftlimd_threads_running);
+		mcpn = walk_memcg->nodeinfo[cpu_to_node(raw_smp_processor_id())];
+		if (nthreads && mcpn->ksoftlimd_task != NULL) {
+			res_memcg = walk_memcg;
+			break;
+		}
+		walk_memcg = parent_mem_cgroup(walk_memcg);
+	}
+
+	rcu_read_unlock();
+	return res_memcg;
+}
+
 struct fake_sysctl_buf {
 	ssize_t count;
 	char *buf;
