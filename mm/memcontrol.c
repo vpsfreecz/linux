@@ -50,6 +50,7 @@
 #include <linux/eventfd.h>
 #include <linux/poll.h>
 #include <linux/sort.h>
+#include <linux/freezer.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 #include <linux/vmpressure.h>
@@ -70,6 +71,7 @@
 #include <net/ip.h>
 #include "slab.h"
 #include "swap.h"
+#include <linux/vpsadminos.h>
 
 #include <linux/uaccess.h>
 
@@ -92,6 +94,10 @@ static bool cgroup_memory_nokmem __ro_after_init;
 
 /* BPF memory accounting disabled? */
 static bool cgroup_memory_nobpf __ro_after_init;
+
+int cgroup_memory_ksoftlimd_for_all = 0;
+int cgroup_memory_ksoftlimd_sleep_msec = 1000;
+int cgroup_memory_ksoftlimd_loops = 256;
 
 #ifdef CONFIG_CGROUP_WRITEBACK
 static DECLARE_WAIT_QUEUE_HEAD(memcg_cgwb_frn_waitq);
@@ -203,6 +209,7 @@ static struct move_charge_struct {
  */
 #define	MEM_CGROUP_MAX_RECLAIM_LOOPS		100
 #define	MEM_CGROUP_MAX_SOFT_LIMIT_RECLAIM_LOOPS	2
+#define	MEM_CGROUP_MAX_KSOFTLIMD_RECLAIM_LOOPS	128
 
 /* for encoding cft->private value on file */
 enum res_type {
@@ -210,11 +217,15 @@ enum res_type {
 	_MEMSWAP,
 	_KMEM,
 	_TCP,
+	_KSOFTLIMD_TYPE,
 };
 
 #define MEMFILE_PRIVATE(x, val)	((x) << 16 | (val))
 #define MEMFILE_TYPE(val)	((val) >> 16 & 0xffff)
 #define MEMFILE_ATTR(val)	((val) & 0xffff)
+
+/* Used for ksoftlimd */
+#define KSOFTLIMD_CONTROL	(0)
 
 /*
  * Iteration constructs for visiting all cgroups (under a tree).  If
@@ -1859,6 +1870,10 @@ static int mem_cgroup_soft_reclaim(struct mem_cgroup *root_memcg,
 	struct mem_cgroup_reclaim_cookie reclaim = {
 		.pgdat = pgdat,
 	};
+	int max_loops = MEM_CGROUP_MAX_RECLAIM_LOOPS;
+
+	if (mem_cgroup_ksoftlimd_running(root_memcg))
+		max_loops = MEM_CGROUP_MAX_KSOFTLIMD_RECLAIM_LOOPS;
 
 	excess = soft_limit_excess(root_memcg);
 
@@ -1881,7 +1896,7 @@ static int mem_cgroup_soft_reclaim(struct mem_cgroup *root_memcg,
 				 * coming back to reclaim from this cgroup
 				 */
 				if (total >= (excess >> 2) ||
-					(loop > MEM_CGROUP_MAX_RECLAIM_LOOPS))
+					(loop > max_loops))
 					break;
 			}
 			continue;
@@ -1894,6 +1909,261 @@ static int mem_cgroup_soft_reclaim(struct mem_cgroup *root_memcg,
 	}
 	mem_cgroup_iter_break(root_memcg, victim);
 	return total;
+}
+
+atomic_long_t total_num_ksoftlimd_threads_running = ATOMIC_LONG_INIT(0);
+
+static int ksoftlimd(void *p)
+{
+	int ret = 0;
+	struct mem_cgroup_per_node *mcpn = (struct mem_cgroup_per_node *)p;
+	struct mem_cgroup *memcg = mcpn->memcg;
+	pg_data_t *pgdat = mcpn->ksoftlimd_pgdat;
+	const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
+	struct task_struct *tsk = current;
+	DEFINE_WAIT(wait);
+
+	pr_debug("ksoftlimd: launching %s\n", tsk->comm);
+
+	if (!cpumask_empty(cpumask))
+		set_cpus_allowed_ptr(tsk, cpumask);
+
+	set_freezable();
+	allow_signal(SIGSTOP);
+	allow_signal(SIGKILL);
+
+	// See comment in mm/vmscan.c kswapd() for the reasoning here
+	tsk->flags |= PF_MEMALLOC | PF_KSWAPD;
+
+	atomic_long_add(1, &memcg->ksoftlimd_threads_running);
+	atomic_long_add(1, &total_num_ksoftlimd_threads_running);
+	for (;;) {
+		unsigned long hard_limit = memcg->memory.max;
+		unsigned long soft_limit = memcg->soft_limit * PAGE_SIZE;
+		unsigned long timeout = 0;
+		unsigned long lru_inactive = 0;
+		unsigned long scanned = 0;
+		unsigned long reclaimed = 0;
+		unsigned long excess = 0;
+		unsigned long remaining_jiffies = 0;
+		bool woken_early = 0;
+		int sleep_msec = cgroup_memory_ksoftlimd_sleep_msec;
+		int max_loops = cgroup_memory_ksoftlimd_loops;
+		int loops = 0;
+
+		/*
+		 * If we're supposed to stop, do that before next reclaim.
+		 */
+		ret = try_to_freeze();
+		if (kthread_should_stop())
+			goto exit;
+
+		timeout = msecs_to_jiffies(sleep_msec);
+		prepare_to_wait(&mcpn->ksoftlimd_wait, &wait, TASK_INTERRUPTIBLE);
+		remaining_jiffies = schedule_timeout(timeout);
+		finish_wait(&mcpn->ksoftlimd_wait, &wait);
+
+		lru_inactive = memcg_page_state(memcg, NR_LRU_BASE + LRU_INACTIVE_FILE) * PAGE_SIZE;
+		excess = soft_limit_excess(memcg) * PAGE_SIZE;
+
+		if (remaining_jiffies > (timeout / 2)) {
+			woken_early = 1;
+			reclaimed += mem_cgroup_soft_reclaim(mcpn->memcg,
+			    mcpn->ksoftlimd_pgdat, GFP_KERNEL, &scanned);
+		}
+
+		/* Reasons to give up and wait again:
+		 *
+		 * 1. not oversoft_limit by at least 32M */
+		if (excess < 32ULL * 1024 * 1024) {
+			pr_debug("ksoftlimd run for memcg %d giving up, reason %d, excess %lu\n", memcg->css.id, 1, excess);
+			continue;
+		}
+		/* 2. lru_inactive, from which we eat, is lower than 32M */
+		if (!woken_early && (lru_inactive < 32ULL * 1024 * 1024)) {
+			pr_debug("ksoftlimd run for memcg %d giving up, reason %d\n", memcg->css.id, 2);
+			continue;
+		}
+		/* 3. we're so much over limit we're only getting in way */
+		if (!woken_early && (soft_limit + excess > hard_limit - 48ULL * 1024 * 1024)) {
+			pr_debug("ksoftlimd run for memcg %d giving up, reason %d\n", memcg->css.id, 3);
+			continue;
+		}
+
+		// Reclaim up to 32M or loop with increasing timeout for 50s
+		while (loops < max_loops && reclaimed * PAGE_SIZE < 32ULL * 1024 * 1024) {
+			reclaimed += mem_cgroup_soft_reclaim(mcpn->memcg,
+			    mcpn->ksoftlimd_pgdat, GFP_KERNEL, &scanned);
+
+			timeout = msecs_to_jiffies(loops) / 10; // Up to 100 ms
+			if (timeout) {
+				prepare_to_wait(&mcpn->ksoftlimd_wait, &wait, TASK_INTERRUPTIBLE);
+				remaining_jiffies = schedule_timeout(timeout);
+				finish_wait(&mcpn->ksoftlimd_wait, &wait);
+			}
+
+			pr_debug("ksoftlimd clean loop %d memcg %d soft_limit %li excess %li scanned %lu reclaimed %lu woken early %d\n",
+			    loops, memcg->css.id, soft_limit, excess, scanned, reclaimed, woken_early);
+
+			ret = try_to_freeze();
+			if (kthread_should_stop())
+				goto exit;
+
+			loops++;
+		}
+
+		if (scanned)
+			xchg(&memcg->ksoftlimd_total_scanned, memcg->ksoftlimd_total_scanned + scanned * PAGE_SIZE);
+		if (reclaimed)
+			xchg(&memcg->ksoftlimd_total_reclaimed, memcg->ksoftlimd_total_reclaimed + reclaimed * PAGE_SIZE);
+		xchg(&memcg->ksoftlimd_total_runs, memcg->ksoftlimd_total_runs + 1);
+
+		pr_debug("ksoftlimd run for memcg %d soft_limit %li excess %li scanned %lu reclaimed %lu woken early %d remaining_jiffies %lu\n",
+		    memcg->css.id, soft_limit, excess, scanned * PAGE_SIZE, reclaimed * PAGE_SIZE, woken_early, remaining_jiffies);
+
+	}
+exit:
+	atomic_long_sub(1, &memcg->ksoftlimd_threads_running);
+	atomic_long_sub(1, &total_num_ksoftlimd_threads_running);
+	pr_debug("ksoftlimd: stopped %s\n", tsk->comm);
+
+	return ret;
+}
+
+bool mem_cgroup_try_to_wakeup_ksoftlimd(void)
+{
+	int nid = cpu_to_node(raw_smp_processor_id());
+	struct mem_cgroup *memcg = get_nearest_memcg_running_ksoftlimd();
+	struct mem_cgroup_per_node *mcpn;
+
+	if (memcg == NULL)
+		return false;
+
+	pr_debug("wake up ksoftlimd for memcg %d\n", memcg->css.id);
+	mcpn = memcg->nodeinfo[nid];
+	xchg(&memcg->ksoftlimd_total_wakeups, memcg->ksoftlimd_total_wakeups++);
+	wake_up_interruptible(&mcpn->ksoftlimd_wait);
+	return true;
+}
+
+unsigned long mem_cgroup_soft_limit_try_reclaim(gfp_t gfp_mask, unsigned long *scanned)
+{
+	int nid = cpu_to_node(raw_smp_processor_id());
+	struct mem_cgroup *memcg = get_nearest_memcg_running_ksoftlimd();
+	struct mem_cgroup_per_node *mcpn;
+
+	if (memcg == NULL)
+		return 0;
+
+	mcpn = memcg->nodeinfo[nid];
+	return mem_cgroup_soft_reclaim(mcpn->memcg, mcpn->ksoftlimd_pgdat, gfp_mask, scanned);
+}
+
+int mem_cgroup_ksoftlimd_run_node(struct mem_cgroup *memcg, int nid)
+{
+	struct mem_cgroup_per_node *mcpn = memcg->nodeinfo[nid];
+
+	pg_data_t *pgdat = NODE_DATA(nid);
+
+	if (mcpn->ksoftlimd_task)
+		return 0;
+
+	init_waitqueue_head(&mcpn->ksoftlimd_wait);
+	mcpn->ksoftlimd_pgdat = pgdat;
+
+	mcpn->ksoftlimd_task = kthread_run(ksoftlimd, mcpn,
+	    "ksoftlimd%d/%d", nid, memcg->css.id);
+
+	if (IS_ERR(mcpn->ksoftlimd_task)) {
+		mcpn->ksoftlimd_task = NULL;
+		mcpn->ksoftlimd_pgdat = NULL;
+		pr_err("Failed to start ksoftlimd for memcg %d on node %d\n",
+		    memcg->css.id, nid);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+void mem_cgroup_ksoftlimd_stop_node(struct mem_cgroup *memcg, int nid)
+{
+	struct mem_cgroup_per_node *mcpn = memcg->nodeinfo[nid];
+
+	if (mcpn->ksoftlimd_task) {
+		kthread_stop(mcpn->ksoftlimd_task);
+		mcpn->ksoftlimd_task = NULL;
+	}
+}
+
+int mem_cgroup_ksoftlimd_run(struct mem_cgroup *memcg)
+{
+	int nid;
+
+	for_each_node_state(nid, N_MEMORY)
+		mem_cgroup_ksoftlimd_run_node(memcg, nid);
+	return 0;
+}
+
+void mem_cgroup_ksoftlimd_stop(struct mem_cgroup *memcg)
+{
+	int nid;
+
+	for_each_node_state(nid, N_MEMORY)
+		mem_cgroup_ksoftlimd_stop_node(memcg, nid);
+}
+
+int mem_cgroup_ksoftlimd_node_run(int nid)
+{
+	struct mem_cgroup *memcg = NULL;
+	int ret = 0;
+
+	for_each_mem_cgroup(memcg) {
+		if (mem_cgroup_ksoftlimd_running(memcg)) {
+			ret = mem_cgroup_ksoftlimd_run_node(memcg, nid);
+			if (ret < 0)
+				return ret;
+		}
+	}
+	return 0;
+}
+
+void mem_cgroup_ksoftlimd_node_stop(int nid)
+{
+	struct mem_cgroup *memcg = NULL;
+
+	for_each_mem_cgroup(memcg)
+		if (mem_cgroup_ksoftlimd_running(memcg))
+			mem_cgroup_ksoftlimd_stop_node(memcg, nid);
+}
+
+int mem_cgroup_ksoftlimd_sysctl_handler(struct ctl_table *table, int write,
+	void __user *buffer, size_t *length, loff_t *ppos)
+{
+	int ret, newval;
+	int oldval = cgroup_memory_ksoftlimd_for_all;
+	struct mem_cgroup *memcg;
+
+	ret = proc_dointvec_minmax(table, write, buffer, length, ppos);
+
+	if (!write)
+		return ret;
+
+	newval = cgroup_memory_ksoftlimd_for_all;
+	if ((oldval == 0) && (newval == 1)) {
+		pr_info("ksoftlimd: launching for all soft-limited memory cgroups\n");
+		for_each_mem_cgroup(memcg) {
+			if ((memcg->soft_limit < PAGE_COUNTER_MAX) &&
+			    !mem_cgroup_ksoftlimd_running(memcg))
+				mem_cgroup_ksoftlimd_run(memcg);
+		}
+	} else if ((oldval == 1) && (newval == 0)) {
+		pr_info("ksoftlimd: stopping for all soft-limited memory cgroups\n");
+		for_each_mem_cgroup(memcg) {
+			if (mem_cgroup_ksoftlimd_running(memcg))
+				mem_cgroup_ksoftlimd_stop(memcg);
+		}
+	}
+	return ret;
 }
 
 #ifdef CONFIG_LOCKDEP
@@ -4108,6 +4378,9 @@ static ssize_t mem_cgroup_write(struct kernfs_open_file *of,
 			ret = -EOPNOTSUPP;
 		} else {
 			WRITE_ONCE(memcg->soft_limit, nr_pages);
+			if (cgroup_memory_ksoftlimd_for_all &&
+			    !mem_cgroup_ksoftlimd_running(memcg))
+				mem_cgroup_ksoftlimd_run(memcg);
 			ret = 0;
 		}
 		break;
@@ -4772,6 +5045,54 @@ static int mem_cgroup_oom_control_write(struct cgroup_subsys_state *css,
 	return 0;
 }
 
+static int mem_cgroup_ksoftlimd_control_read(struct seq_file *sf, void *v)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_seq(sf);
+	long nthreads = atomic_long_read(&memcg->ksoftlimd_threads_running);
+	int nid;
+
+	seq_printf(sf, "enabled %s\n",
+	    (nthreads > 0) ? "yes" : "no");
+	seq_printf(sf, "running_threads %ld\n", nthreads);
+	seq_printf(sf, "total_runs %li\n", memcg->ksoftlimd_total_runs);
+	seq_printf(sf, "total_wakeups %li\n", memcg->ksoftlimd_total_wakeups);
+	seq_printf(sf, "total_scanned %li\n", memcg->ksoftlimd_total_scanned);
+	seq_printf(sf, "total_reclaimed %li\n", memcg->ksoftlimd_total_reclaimed);
+	if (nthreads > 0)
+		for_each_node_state(nid, N_MEMORY) {
+			struct mem_cgroup_per_node *mcpn = memcg->nodeinfo[nid];
+			seq_printf(sf, "node %d pid %d\n", nid, task_pid_nr(mcpn->ksoftlimd_task));
+		}
+	return 0;
+}
+
+static int mem_cgroup_ksoftlimd_control_write(struct cgroup_subsys_state *css,
+	struct cftype *cft, u64 val)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+	bool running = mem_cgroup_ksoftlimd_running(memcg);
+
+	if (!ns_capable(current_user_ns(), CAP_SYS_ADMIN))
+		return -EPERM;
+
+	/* cannot set to root cgroup and only 0 and 1 are allowed */
+	if (!css->parent || !((val == 0) || (val == 1)))
+		return -EINVAL;
+
+	if ((val == 0) && running)
+		if (cgroup_memory_ksoftlimd_for_all) {
+			pr_warn_once("error: cgroup_memory_ksoftlimd_for_all "
+				     "set, can't stop any running ksoftlimd\n");
+			return -EINVAL;
+		} else
+			mem_cgroup_ksoftlimd_stop(memcg);
+	else if ((val == 1) && !running)
+		mem_cgroup_ksoftlimd_run(memcg);
+	else
+		return -EINVAL;
+	return 0;
+}
+
 #ifdef CONFIG_CGROUP_WRITEBACK
 
 #include <trace/events/writeback.h>
@@ -5299,6 +5620,13 @@ static struct cftype mem_cgroup_legacy_files[] = {
 		.write_u64 = mem_cgroup_oom_control_write,
 	},
 	{
+		.name = "ksoftlimd_control",
+		.seq_show = mem_cgroup_ksoftlimd_control_read,
+		.write_u64 = mem_cgroup_ksoftlimd_control_write,
+		.private = MEMFILE_PRIVATE(_KSOFTLIMD_TYPE, KSOFTLIMD_CONTROL),
+		.flags = CFTYPE_NS_DELEGATABLE,
+	},
+	{
 		.name = "pressure_level",
 		.seq_show = mem_cgroup_dummy_seq_show,
 	},
@@ -5471,6 +5799,7 @@ static int alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
 
 	lruvec_init(&pn->lruvec);
 	pn->memcg = memcg;
+	pn->ksoftlimd_task = NULL;
 
 	memcg->nodeinfo[node] = pn;
 	return 0;
@@ -5704,6 +6033,9 @@ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 	lru_gen_offline_memcg(memcg);
 
 	drain_all_stock(memcg);
+
+	if (mem_cgroup_ksoftlimd_running(memcg))
+		mem_cgroup_ksoftlimd_stop(memcg);
 
 	mem_cgroup_id_put(memcg);
 }
@@ -7097,6 +7429,11 @@ static struct cftype memory_files[] = {
 		.flags = CFTYPE_NS_DELEGATABLE,
 		.write = memory_reclaim,
 	},
+//	{
+//		.name = "ksoftlimd",
+//		.seq_show TODO
+//		.write TODO
+//	},
 	{ }	/* terminate */
 };
 
@@ -7746,6 +8083,8 @@ static int __init cgroup_memory(char *s)
 			cgroup_memory_nokmem = true;
 		if (!strcmp(token, "nobpf"))
 			cgroup_memory_nobpf = true;
+		if (!strcmp(token, "ksoftlimd_for_all"))
+			cgroup_memory_ksoftlimd_for_all = 1;
 	}
 	return 1;
 }
