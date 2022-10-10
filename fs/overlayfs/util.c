@@ -980,6 +980,11 @@ int ovl_sync_status(struct ovl_fs *ofs)
 {
 	struct vfsmount *mnt;
 
+	/* In our setup with ZFS, we're sure things are consistent
+	 * after a full txg sync, so we can just skip ovl syncing
+	 */
+	return 0;
+
 	if (ovl_should_sync(ofs))
 		return 1;
 

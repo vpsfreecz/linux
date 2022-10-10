@@ -95,6 +95,7 @@ static inline struct ovl_fs *OVL_FS(struct super_block *sb)
 
 static inline bool ovl_should_sync(struct ovl_fs *ofs)
 {
+	return false;
 	return !ofs->config.ovl_volatile;
 }
 
