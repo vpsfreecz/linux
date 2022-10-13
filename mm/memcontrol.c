@@ -85,6 +85,11 @@ static bool cgroup_memory_nosocket;
 /* Kernel memory accounting disabled? */
 static bool cgroup_memory_nokmem;
 
+bool cgroup_memory_kmem_enabled(void)
+{
+	return !cgroup_memory_nokmem;
+}
+
 int cgroup_memory_ksoftlimd_for_all = 0;
 int cgroup_memory_ksoftlimd_sleep_msec = 1000;
 int cgroup_memory_ksoftlimd_loops = 256;
