@@ -82,7 +82,12 @@ DEFINE_PER_CPU(struct mem_cgroup *, int_active_memcg);
 static bool cgroup_memory_nosocket;
 
 /* Kernel memory accounting disabled? */
-static bool cgroup_memory_nokmem;
+static bool cgroup_memory_nokmem = 1;
+
+bool cgroup_memory_kmem_enabled(void)
+{
+	return !cgroup_memory_nokmem;
+}
 
 int cgroup_memory_ksoftlimd_for_all = 0;
 int cgroup_memory_ksoftlimd_sleep_msec = 1000;
