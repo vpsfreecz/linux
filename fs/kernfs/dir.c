@@ -1705,7 +1705,6 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 		file->private_data = pos;
 		kernfs_get(pos);
 
-		mutex_unlock(&kernfs_mutex);
 		if ((current->nsproxy->cgroup_ns != &init_cgroup_ns) &&
 		    (strncmp(pname, "cpu", 3) == 0) &&
 		    (strncmp(name, "cpu", 3) == 0)) {
@@ -1715,6 +1714,7 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 			if (id >= maxcpus)
 				continue;
 		}
+		mutex_unlock(&kernfs_mutex);
 		if (!dir_emit(ctx, name, len, ino, type))
 			return 0;
 		mutex_lock(&kernfs_mutex);
