@@ -11,11 +11,38 @@
 #include "sched/sched.h"
 #include <linux/vpsadminos-livepatch.h>
 #include "kpatch-macros.h"
+
+#define SHADOW_MUTEX	0
+#define SHADOW_CACHE	1
+#define SHADOW_KEY	2
+
+static int proc_cgroup_mutex_ctor(void *obj, void *shadow_data, void *ctor_data)
+{
+	struct mutex *mutex = (struct mutex *)shadow_data;
+	mutex_init(mutex);
+	return 0;
+}
+
+extern struct mutex cgroup_mutex;
 char old_uname[65];
 char new_uname[65];
-
 static int patch(patch_object *obj)
 {
+	struct task_struct *p, *t;
+	mutex_lock(&cgroup_mutex);
+	read_lock(&tasklist_lock);
+	for_each_process_thread(p, t) {
+		task_lock(t);
+		klp_shadow_get_or_alloc(t, SHADOW_CACHE,
+		    sizeof(void *) * 16, GFP_KERNEL, NULL, NULL);
+		klp_shadow_get_or_alloc(t, SHADOW_KEY,
+		    sizeof(void *) * 16, GFP_KERNEL, NULL, NULL);
+		klp_shadow_get_or_alloc(t, SHADOW_MUTEX,
+		    sizeof(struct mutex), GFP_KERNEL, proc_cgroup_mutex_ctor, NULL);
+		task_unlock(t);
+	};
+	read_unlock(&tasklist_lock);
+	mutex_unlock(&cgroup_mutex);
 	scnprintf(new_uname, 64, "%s.%s", LIVEPATCH_ORIG_KERNEL_VERSION,
 	    LIVEPATCH_NAME);
 	scnprintf(old_uname, 64, "%s", init_uts_ns.name.release);
@@ -25,6 +52,22 @@ static int patch(patch_object *obj)
 KPATCH_PRE_PATCH_CALLBACK(patch);
 static void unpatch(patch_object *obj)
 {
+	struct task_struct *p, *t;
+	mutex_lock(&cgroup_mutex);
+	read_lock(&tasklist_lock);
+	for_each_process_thread(p, t) {
+		struct mutex *m = klp_shadow_get(t, SHADOW_MUTEX);
+		if (m) {
+			mutex_lock(m);
+			proc_cgroup_cache_clear(t);
+			mutex_unlock(m);
+		};
+	};
+	klp_shadow_free_all(SHADOW_MUTEX, NULL);
+	klp_shadow_free_all(SHADOW_CACHE, NULL);
+	klp_shadow_free_all(SHADOW_KEY, NULL);
+	read_unlock(&tasklist_lock);
+	mutex_unlock(&cgroup_mutex);
 	scnprintf(init_uts_ns.name.release, 64, "%s", old_uname);
 }
 KPATCH_POST_UNPATCH_CALLBACK(unpatch);
