@@ -439,6 +439,19 @@ void put_task_stack(struct task_struct *tsk)
 }
 #endif
 
+#include <linux/livepatch.h>
+
+#define SHADOW_MUTEX	0
+#define SHADOW_CACHE	1
+#define SHADOW_KEY	2
+
+static int proc_cgroup_mutex_ctor(void *obj, void *shadow_data, void *ctor_data)
+{
+	struct mutex *mutex = (struct mutex *)shadow_data;
+	mutex_init(mutex);
+	return 0;
+}
+extern void proc_cgroup_cache_clear(struct task_struct *tsk);
 void free_task(struct task_struct *tsk)
 {
 	scs_release(tsk);
@@ -461,6 +474,10 @@ void free_task(struct task_struct *tsk)
 	arch_release_task_struct(tsk);
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
+	proc_cgroup_cache_clear(tsk);
+	klp_shadow_free(tsk, SHADOW_MUTEX, NULL);
+	klp_shadow_free(tsk, SHADOW_CACHE, NULL);
+	klp_shadow_free(tsk, SHADOW_KEY, NULL);
 	free_task_struct(tsk);
 }
 EXPORT_SYMBOL(free_task);
@@ -1955,6 +1972,14 @@ static __latent_entropy struct task_struct *copy_process(
 	if (!p)
 		goto fork_out;
 
+#ifdef CONFIG_CGROUPS
+	klp_shadow_get_or_alloc(p, SHADOW_CACHE,
+	    sizeof(void *) * 16, GFP_KERNEL, NULL, NULL);
+	klp_shadow_get_or_alloc(p, SHADOW_KEY,
+	    sizeof(void *) * 16, GFP_KERNEL, NULL, NULL);
+	klp_shadow_get_or_alloc(p, SHADOW_MUTEX,
+	    sizeof(struct mutex), GFP_KERNEL, proc_cgroup_mutex_ctor, NULL);
+#endif
 	/*
 	 * This _must_ happen before we call free_task(), i.e. before we jump
 	 * to any of the bad_fork_* labels. This is to avoid freeing

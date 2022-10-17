@@ -955,6 +955,12 @@ void psi_cgroup_free(struct cgroup *cgroup)
 	WARN_ONCE(cgroup->psi.poll_states, "psi: trigger leak\n");
 }
 
+#include <linux/livepatch.h>
+
+#define SHADOW_MUTEX	0
+#define SHADOW_CACHE	1
+#define SHADOW_KEY	2
+
 /**
  * cgroup_move_task - move task to a different cgroup
  * @task: the task
@@ -972,6 +978,7 @@ void cgroup_move_task(struct task_struct *task, struct css_set *to)
 	unsigned int task_flags = 0;
 	struct rq_flags rf;
 	struct rq *rq;
+	struct mutex *proc_cgroup_mutex = klp_shadow_get(task, SHADOW_MUTEX);
 
 	if (static_branch_likely(&psi_disabled)) {
 		/*
@@ -983,6 +990,12 @@ void cgroup_move_task(struct task_struct *task, struct css_set *to)
 	}
 
 	rq = task_rq_lock(task, &rf);
+
+	if (proc_cgroup_mutex) {
+		mutex_lock(proc_cgroup_mutex);
+		proc_cgroup_cache_clear(task);
+		mutex_unlock(proc_cgroup_mutex);
+	}
 
 	if (task_on_rq_queued(task)) {
 		task_flags = TSK_RUNNING;
