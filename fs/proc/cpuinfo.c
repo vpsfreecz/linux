@@ -9,10 +9,19 @@ __weak void arch_freq_prepare_all(void)
 {
 }
 
+extern unsigned long show_cpuinfo_cache_jiffies[NR_CPUS];
 extern const struct seq_operations cpuinfo_op;
 static int cpuinfo_open(struct inode *inode, struct file *file)
 {
-	arch_freq_prepare_all();
+	unsigned long now = jiffies;
+	int cpu;
+
+	for_each_online_cpu(cpu) {
+		if (now - show_cpuinfo_cache_jiffies[cpu] > msecs_to_jiffies(5000)) {
+			arch_freq_prepare_all();
+			break;
+		}
+	}
 	return seq_open(file, &cpuinfo_op);
 }
 
