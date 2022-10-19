@@ -50,9 +50,15 @@ static int patch(patch_object *obj)
 	return 0;
 }
 KPATCH_PRE_PATCH_CALLBACK(patch);
+extern void proc_cgroup_cache_clear(struct task_struct *tsk);
+extern struct mutex *show_cpuinfo_cache_mutexes[NR_CPUS];
 static void unpatch(patch_object *obj)
 {
 	struct task_struct *p, *t;
+	int cpu;
+	for_each_online_cpu(cpu)
+		if (show_cpuinfo_cache_mutexes[cpu])
+			kfree(show_cpuinfo_cache_mutexes[cpu]);
 	mutex_lock(&cgroup_mutex);
 	read_lock(&tasklist_lock);
 	for_each_process_thread(p, t) {
