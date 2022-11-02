@@ -984,6 +984,10 @@ void cgroup_move_task(struct task_struct *task, struct css_set *to)
 
 	rq = task_rq_lock(task, &rf);
 
+	mutex_lock(&tsk->cgroup_cache_mutex);
+	proc_cgroup_cache_clear(task);
+	mutex_unlock(&tsk->cgroup_cache_mutex);
+
 	if (task_on_rq_queued(task)) {
 		task_flags = TSK_RUNNING;
 		if (task_current(rq, task))
