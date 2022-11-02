@@ -439,6 +439,7 @@ void put_task_stack(struct task_struct *tsk)
 }
 #endif
 
+extern void proc_cgroup_cache_clear(struct task_struct *tsk);
 void free_task(struct task_struct *tsk)
 {
 	scs_release(tsk);
@@ -461,6 +462,7 @@ void free_task(struct task_struct *tsk)
 	arch_release_task_struct(tsk);
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
+	proc_cgroup_cache_clear(tsk);
 	free_task_struct(tsk);
 }
 EXPORT_SYMBOL(free_task);
@@ -1964,6 +1966,11 @@ static __latent_entropy struct task_struct *copy_process(
 		siginitsetinv(&p->blocked, sigmask(SIGKILL)|sigmask(SIGSTOP));
 	}
 
+#ifdef CONFIG_CGROUPS
+	memset(p->cgroup_cache_caches, 0, sizeof(void *) * 16);
+	memset(p->cgroup_cache_keys, 0, sizeof(void *) * 16);
+	mutex_init(&p->cgroup_cache_mutex);
+#endif
 	/*
 	 * This _must_ happen before we call free_task(), i.e. before we jump
 	 * to any of the bad_fork_* labels. This is to avoid freeing
