@@ -6194,6 +6194,65 @@ void cgroup_path_from_kernfs_id(u64 id, char *buf, size_t buflen)
 	kernfs_put(kn);
 }
 
+/* Needs tsk->cgroup_cache_mutex */
+void proc_cgroup_cache_clear(struct task_struct *tsk)
+{
+	void **caches = tsk->cgroup_cache_caches;
+	void **keys = tsk->cgroup_cache_keys;
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		if (keys[i] != 0) {
+			keys[i] = 0;
+			if (caches[i])
+				kfree(caches[i]);
+		};
+	};
+}
+
+/* Needs tsk->cgroup_cache_mutex */
+char *proc_cgroup_cache_lookup(struct task_struct *tsk, struct cgroup_namespace *srchkey)
+{
+	void **caches = tsk->cgroup_cache_caches;
+	void **keys = tsk->cgroup_cache_keys;
+	int i;
+
+	if (!caches || !keys)
+		return NULL;
+
+	for (i = 0; i < 16; i++) {
+		if (keys[i] == srchkey)
+			return caches[i];
+	};
+	return NULL;
+}
+
+/* Needs tsk->cgroup_cache_mutex */
+char *proc_cgroup_cache_alloc(struct task_struct *tsk, struct cgroup_namespace *srchkey, char* buf, size_t len)
+{
+	void **caches = tsk->cgroup_cache_caches;
+	void **keys = tsk->cgroup_cache_keys;
+	int i;
+	char *ret;
+
+	if (!caches || !keys)
+		return NULL;
+
+	for (i = 0; i < 16; i++) {
+		if (!keys[i]) {
+			ret = kzalloc(len+1, GFP_KERNEL);
+			if (!ret)
+				return NULL;
+			caches[i] = ret;
+			keys[i] = srchkey;
+			memcpy(ret, buf, len);
+			return ret;
+		};
+	};
+	proc_cgroup_cache_clear(tsk);
+	return NULL;
+}
+
 /*
  * cgroup_get_from_id : get the cgroup associated with cgroup id
  * @id: cgroup id
@@ -6244,11 +6303,34 @@ EXPORT_SYMBOL_GPL(cgroup_get_from_id);
 int proc_cgroup_show(struct seq_file *m, struct pid_namespace *ns,
 		     struct pid *pid, struct task_struct *tsk)
 {
+	char *cache;
 	char *buf;
-	int retval;
+	int retval = -ENOMEM;
 	struct cgroup_root *root;
+	struct seq_file *dupm;
 
-	retval = -ENOMEM;
+	mutex_lock(&tsk->cgroup_cache_mutex);
+	cache = proc_cgroup_cache_lookup(tsk, current->nsproxy->cgroup_ns);
+	if (cache) {
+		seq_puts(m, cache);
+		mutex_unlock(&tsk->cgroup_cache_mutex);
+		return 0;
+	}
+
+	dupm = kzalloc(sizeof(struct seq_file), GFP_KERNEL);
+	if (!dupm) {
+		mutex_unlock(&tsk->cgroup_cache_mutex);
+		return -ENOMEM;
+	}
+	dupm->buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!dupm->buf) {
+		kfree(dupm);
+		mutex_unlock(&tsk->cgroup_cache_mutex);
+		return -ENOMEM;
+	}
+	dupm->size = PAGE_SIZE;
+	mutex_init(&dupm->lock);
+
 	buf = kmalloc(PATH_MAX, GFP_KERNEL);
 	if (!buf)
 		goto out;
@@ -6264,16 +6346,16 @@ int proc_cgroup_show(struct seq_file *m, struct pid_namespace *ns,
 		if (root == &cgrp_dfl_root && !READ_ONCE(cgrp_dfl_visible))
 			continue;
 
-		seq_printf(m, "%d:", root->hierarchy_id);
+		seq_printf(dupm, "%d:", root->hierarchy_id);
 		if (root != &cgrp_dfl_root)
 			for_each_subsys(ss, ssid)
 				if (root->subsys_mask & (1 << ssid))
-					seq_printf(m, "%s%s", count++ ? "," : "",
+					seq_printf(dupm, "%s%s", count++ ? "," : "",
 						   ss->legacy_name);
 		if (strlen(root->name))
-			seq_printf(m, "%sname=%s", count ? "," : "",
+			seq_printf(dupm, "%sname=%s", count ? "," : "",
 				   root->name);
-		seq_putc(m, ':');
+		seq_putc(dupm, ':');
 
 		cgrp = task_cgroup_from_root(tsk, root);
 
@@ -6294,15 +6376,15 @@ int proc_cgroup_show(struct seq_file *m, struct pid_namespace *ns,
 			if (retval < 0)
 				goto out_unlock;
 
-			seq_puts(m, buf);
+			seq_puts(dupm, buf);
 		} else {
-			seq_puts(m, "/");
+			seq_puts(dupm, "/");
 		}
 
 		if (cgroup_on_dfl(cgrp) && cgroup_is_dead(cgrp))
-			seq_puts(m, " (deleted)\n");
+			seq_puts(dupm, " (deleted)\n");
 		else
-			seq_putc(m, '\n');
+			seq_putc(dupm, '\n');
 	}
 
 	retval = 0;
@@ -6311,6 +6393,14 @@ out_unlock:
 	cgroup_unlock();
 	kfree(buf);
 out:
+	if (dupm->buf) {
+		cache = proc_cgroup_cache_alloc(tsk, current->nsproxy->cgroup_ns, dupm->buf, dupm->count);
+		kfree(dupm->buf);
+	}
+	if (cache)
+		seq_puts(m, cache);
+	kfree(dupm);
+	mutex_unlock(&tsk->cgroup_cache_mutex);
 	return retval;
 }
 

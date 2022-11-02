@@ -1225,6 +1225,9 @@ struct task_struct {
 	struct css_set __rcu		*cgroups;
 	/* cg_list protected by css_set_lock and tsk->alloc_lock: */
 	struct list_head		cg_list;
+	void				*cgroup_cache_caches[16];
+	void				*cgroup_cache_keys[16];
+	struct mutex			cgroup_cache_mutex;
 #endif
 #ifdef CONFIG_X86_CPU_RESCTRL
 	u32				closid;
