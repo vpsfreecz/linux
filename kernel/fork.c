@@ -533,6 +533,7 @@ void put_task_stack(struct task_struct *tsk)
 }
 #endif
 
+extern void proc_cgroup_cache_clear(struct task_struct *tsk);
 void free_task(struct task_struct *tsk)
 {
 #ifdef CONFIG_SECCOMP
@@ -559,6 +560,7 @@ void free_task(struct task_struct *tsk)
 	arch_release_task_struct(tsk);
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
+	proc_cgroup_cache_clear(tsk);
 	free_task_struct(tsk);
 }
 EXPORT_SYMBOL(free_task);
@@ -2103,6 +2105,11 @@ static __latent_entropy struct task_struct *copy_process(
 		siginitsetinv(&p->blocked, sigmask(SIGKILL)|sigmask(SIGSTOP));
 	}
 
+#ifdef CONFIG_CGROUPS
+	memset(p->cgroup_cache_caches, 0, sizeof(void *) * 16);
+	memset(p->cgroup_cache_keys, 0, sizeof(void *) * 16);
+	mutex_init(&p->cgroup_cache_mutex);
+#endif
 	p->set_child_tid = (clone_flags & CLONE_CHILD_SETTID) ? args->child_tid : NULL;
 	/*
 	 * Clear TID on mm_release()?
