@@ -81,6 +81,8 @@ struct task_struct init_task
 	.policy		= SCHED_NORMAL,
 	.cpus_ptr	= &init_task.cpus_mask,
 	.cpus_mask	= CPU_MASK_ALL,
+	.set_fake_cpu_mask = 0,
+	.fake_cpu_mask = CPU_MASK_ALL,
 	.nr_cpus_allowed= NR_CPUS,
 	.mm		= NULL,
 	.active_mm	= &init_mm,

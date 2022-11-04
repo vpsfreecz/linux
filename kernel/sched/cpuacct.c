@@ -30,7 +30,10 @@ struct cpuacct {
 	struct cgroup_subsys_state	css;
 	/* cpuusage holds pointer to a u64-type object on every CPU */
 	struct cpuacct_usage __percpu	*cpuusage;
+	struct cpuacct_usage __percpu	*cpuusage_old;
+	struct cpuacct_usage __percpu	*cpuusage_fake;
 	struct kernel_cpustat __percpu	*cpustat;
+	u64 timestamp_old;
 };
 
 static inline struct cpuacct *css_ca(struct cgroup_subsys_state *css)
@@ -72,12 +75,24 @@ cpuacct_css_alloc(struct cgroup_subsys_state *parent_css)
 	if (!ca->cpuusage)
 		goto out_free_ca;
 
+	ca->cpuusage_old = alloc_percpu(struct cpuacct_usage);
+	if (!ca->cpuusage_old)
+		goto out_free_cpuusage;
+
+	ca->cpuusage_fake = alloc_percpu(struct cpuacct_usage);
+	if (!ca->cpuusage_fake)
+		goto out_free_cpuusage_old;
+
 	ca->cpustat = alloc_percpu(struct kernel_cpustat);
 	if (!ca->cpustat)
-		goto out_free_cpuusage;
+		goto out_free_cpuusage_fake;
 
 	return &ca->css;
 
+out_free_cpuusage_fake:
+	free_percpu(ca->cpuusage_fake);
+out_free_cpuusage_old:
+	free_percpu(ca->cpuusage_old);
 out_free_cpuusage:
 	free_percpu(ca->cpuusage);
 out_free_ca:
@@ -93,6 +108,8 @@ static void cpuacct_css_free(struct cgroup_subsys_state *css)
 
 	free_percpu(ca->cpustat);
 	free_percpu(ca->cpuusage);
+	free_percpu(ca->cpuusage_old);
+	free_percpu(ca->cpuusage_fake);
 	kfree(ca);
 }
 
@@ -374,3 +391,80 @@ struct cgroup_subsys cpuacct_cgrp_subsys = {
 	.legacy_cftypes	= files,
 	.early_init	= true,
 };
+
+u64 cpuacct_cpuusage_fake_set_timestamp(struct cgroup_subsys_state *css, u64 new)
+{
+	struct cpuacct *ca = css_ca(css);
+	u64 old = ca->timestamp_old;
+	ca->timestamp_old = new;
+	return old;
+}
+
+void cpuacct_cpuusage_fake_readout(struct cgroup_subsys_state *css, int cpu,
+				   u64 *user, u64 *system,
+				   u64 *user_old, u64 *system_old)
+{
+	struct cpuacct *ca = css_ca(css);
+	struct cpuacct_usage *cpuusage = per_cpu_ptr(ca->cpuusage, cpu);
+	struct cpuacct_usage *cpuusage_old = per_cpu_ptr(ca->cpuusage_old, cpu);
+
+#ifndef CONFIG_64BIT
+	/*
+	 * Take rq->lock to make 64-bit read safe on 32-bit platforms.
+	 */
+	raw_spin_lock_irq(&cpu_rq(cpu)->lock);
+#endif
+
+	*user_old = cpuusage_old->usages[CPUACCT_STAT_USER];
+	*system_old = cpuusage_old->usages[CPUACCT_STAT_SYSTEM];
+	*user = cpuusage->usages[CPUACCT_STAT_USER];
+	*system = cpuusage->usages[CPUACCT_STAT_SYSTEM];
+	cpuusage_old->usages[CPUACCT_STAT_USER] = *user;
+	cpuusage_old->usages[CPUACCT_STAT_SYSTEM] = *system;
+
+#ifndef CONFIG_64BIT
+	raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
+#endif
+}
+
+void cpuacct_cpuusage_fake_readout_percpu(struct cgroup_subsys_state *css,
+					  int cpu, u64 *user, u64 *system)
+{
+	struct cpuacct *ca = css_ca(css);
+	struct cpuacct_usage *cpuusage_fake = per_cpu_ptr(ca->cpuusage_fake, cpu);
+
+#ifndef CONFIG_64BIT
+	/*
+	 * Take rq->lock to make 64-bit write safe on 32-bit platforms.
+	 */
+	raw_spin_lock_irq(&cpu_rq(cpu)->lock);
+#endif
+
+	*user = cpuusage_fake->usages[CPUACCT_STAT_USER];
+	*system = cpuusage_fake->usages[CPUACCT_STAT_SYSTEM];
+
+#ifndef CONFIG_64BIT
+	raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
+#endif
+}
+
+void cpuacct_cpuusage_fake_write(struct cgroup_subsys_state *css, int cpu,
+				 u64 user, u64 system)
+{
+	struct cpuacct *ca = css_ca(css);
+	struct cpuacct_usage *cpuusage_fake = per_cpu_ptr(ca->cpuusage_fake, cpu);
+
+#ifndef CONFIG_64BIT
+	/*
+	 * Take rq->lock to make 64-bit write safe on 32-bit platforms.
+	 */
+	raw_spin_lock_irq(&cpu_rq(cpu)->lock);
+#endif
+
+	cpuusage_fake->usages[CPUACCT_STAT_USER] += user;
+	cpuusage_fake->usages[CPUACCT_STAT_SYSTEM] += system;
+
+#ifndef CONFIG_64BIT
+	raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
+#endif
+}
