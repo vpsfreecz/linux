@@ -174,7 +174,7 @@ cont_normal:
 	seq_put_decimal_ull(p, " ", nsec_to_clock_t(guest_nice));
 	seq_putc(p, '\n');
 
-	if (fake)
+	if (fake && fake_cpumask(current, &cpu_fake_mask))
 		goto fake_online_cpus;
 
 	for_each_online_cpu(i) {
@@ -213,8 +213,6 @@ cont_normal:
 	goto cont_normal_cpus;
 
 fake_online_cpus:
-	if (!fake_cpumask(current, &cpu_fake_mask))
-		goto cont_normal_cpus;
 	for_each_cpu(i, &cpu_fake_mask) {
 		fake_cpuacct_readout_percpu(current, i, &user, &system);
 		idle = uptime - user - system;
