@@ -1731,6 +1731,7 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 		ctx->pos = pos->hash;
 		file->private_data = pos;
 
+		up_read(&kernfs_rwsem);
 		if ((current->nsproxy->cgroup_ns != &init_cgroup_ns) &&
 		    (strncmp(pname, "cpu", 3) == 0) &&
 		    (strncmp(name, "cpu", 3) == 0)) {
@@ -1740,11 +1741,12 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 			if (!fake_cpumask(current, &cpu_fake_mask))
 				goto orig;
 			sscanf(name, "cpu%d", &id);
-			if (!cpumask_test_cpu(id, &cpu_fake_mask))
+			if (!cpumask_test_cpu(id, &cpu_fake_mask)) {
+				down_read(&kernfs_rwsem);
 				continue;
+			}
 		}
 orig:
-		up_read(&kernfs_rwsem);
 		if (!dir_emit(ctx, name, len, ino, type))
 			return 0;
 		down_read(&kernfs_rwsem);
