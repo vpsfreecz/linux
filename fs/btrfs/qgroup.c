@@ -1639,7 +1639,7 @@ int btrfs_remove_qgroup(struct btrfs_trans_handle *trans, u64 qgroupid)
 	/*
 	 * Remove the qgroup from sysfs now without holding the qgroup_lock
 	 * spinlock, since the sysfs_remove_group() function needs to take
-	 * the mutex kernfs_mutex through kernfs_remove_by_name_ns().
+	 * the mutex kernfs_rwsem through kernfs_remove_by_name_ns().
 	 */
 	btrfs_sysfs_del_one_qgroup(fs_info, qgroup);
 	kfree(qgroup);
