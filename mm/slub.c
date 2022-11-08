@@ -4951,10 +4951,10 @@ static ssize_t show_slab_objects(struct kmem_cache *s,
 	}
 
 	/*
-	 * It is impossible to take "mem_hotplug_lock" here with "kernfs_mutex"
+	 * It is impossible to take "mem_hotplug_lock" here with "kernfs_rwsem"
 	 * already held which will conflict with an existing lock order:
 	 *
-	 * mem_hotplug_lock->slab_mutex->kernfs_mutex
+	 * mem_hotplug_lock->slab_mutex->kernfs_rwsem
 	 *
 	 * We don't really need mem_hotplug_lock (to hold off
 	 * slab_mem_going_offline_callback) here because slab's memory hot
