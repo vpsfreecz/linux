@@ -122,6 +122,7 @@ static int one_hundred = 100;
 static int two_hundred = 200;
 static int one_thousand = 1000;
 static int ten_thousand = 10000;
+static int sixty_thousand = 60000;
 #ifdef CONFIG_PERF_EVENTS
 static int six_hundred_forty_kb = 640 * 1024;
 #endif
@@ -3245,7 +3246,7 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &one_hundred,
-		.extra2		= &ten_thousand,
+		.extra2		= &sixty_thousand,
 	},
 	{
 		.procname	= "cgroup_memory_ksoftlimd_loops",
@@ -3254,7 +3255,7 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ONE,
-		.extra2		= &one_thousand,
+		.extra2		= &ten_thousand,
 	},
 #endif
 	{ }
