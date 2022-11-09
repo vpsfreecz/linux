@@ -14,6 +14,7 @@
 #include <linux/security.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
+#include <linux/user_namespace.h>
 #include "overlayfs.h"
 
 struct ovl_aio_req {
@@ -596,6 +597,10 @@ static long ovl_ioctl_set_flags(struct file *file, unsigned int cmd,
 {
 	long ret;
 	struct inode *inode = file_inode(file);
+	struct user_namespace *ns = current_user_ns();
+
+	if ((ns != &init_user_ns) && (ns->parent != &init_user_ns))
+		ns = &init_user_ns;
 
 	if (!inode_owner_or_capable(inode))
 		return -EACCES;
@@ -612,7 +617,7 @@ static long ovl_ioctl_set_flags(struct file *file, unsigned int cmd,
 	 */
 	ret = -EPERM;
 	if (!ovl_has_upperdata(inode) && IS_IMMUTABLE(inode) &&
-	    !capable(CAP_LINUX_IMMUTABLE))
+	    !ns_capable(ns, CAP_LINUX_IMMUTABLE))
 		goto unlock;
 
 	ret = ovl_maybe_copy_up(file_dentry(file), O_WRONLY);
