@@ -2307,6 +2307,11 @@ EXPORT_SYMBOL(current_time);
 int vfs_ioc_setflags_prepare(struct inode *inode, unsigned int oldflags,
 			     unsigned int flags)
 {
+	struct user_namespace *ns = current_user_ns();
+
+	if ((ns != &init_user_ns) && (ns->parent != &init_user_ns))
+		ns = &init_user_ns;
+
 	/*
 	 * The IMMUTABLE and APPEND_ONLY flags can only be changed by
 	 * the relevant capability.
@@ -2314,7 +2319,7 @@ int vfs_ioc_setflags_prepare(struct inode *inode, unsigned int oldflags,
 	 * This test looks nicer. Thanks to Pauline Middelink
 	 */
 	if ((flags ^ oldflags) & (FS_APPEND_FL | FS_IMMUTABLE_FL) &&
-	    !capable(CAP_LINUX_IMMUTABLE))
+	    !ns_capable(ns, CAP_LINUX_IMMUTABLE))
 		return -EPERM;
 
 	return fscrypt_prepare_setflags(inode, oldflags, flags);
@@ -2331,13 +2336,18 @@ EXPORT_SYMBOL(vfs_ioc_setflags_prepare);
 int vfs_ioc_fssetxattr_check(struct inode *inode, const struct fsxattr *old_fa,
 			     struct fsxattr *fa)
 {
+	struct user_namespace *ns = current_user_ns();
+
+	if ((ns != &init_user_ns) && (ns->parent != &init_user_ns))
+		ns = &init_user_ns;
+
 	/*
 	 * Can't modify an immutable/append-only file unless we have
 	 * appropriate permission.
 	 */
 	if ((old_fa->fsx_xflags ^ fa->fsx_xflags) &
 			(FS_XFLAG_IMMUTABLE | FS_XFLAG_APPEND) &&
-	    !capable(CAP_LINUX_IMMUTABLE))
+	    !ns_capable(ns, CAP_LINUX_IMMUTABLE))
 		return -EPERM;
 
 	/*
