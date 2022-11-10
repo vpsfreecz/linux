@@ -5921,13 +5921,15 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 		struct cpumask fake_mask;
 		if (!fake_cpumask(p, &fake_mask))
 			goto orig;
-		rcu_read_lock();
-		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+		if (!check_same_owner(p)) {
+			rcu_read_lock();
+			if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+				rcu_read_unlock();
+				retval = -EPERM;
+				goto out_put_task;
+			}
 			rcu_read_unlock();
-			retval = -EPERM;
-			goto out_put_task;
 		}
-		rcu_read_unlock();
 		if (!cpumask_subset(in_mask, &fake_mask)) {
 			retval = -EINVAL;
 			goto out_put_task;
