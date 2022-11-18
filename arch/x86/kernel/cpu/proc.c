@@ -6,6 +6,7 @@
 #include <linux/cpufreq.h>
 #include <asm/prctl.h>
 #include <linux/proc_fs.h>
+#include <linux/user_namespace.h>
 
 #include "cpu.h"
 
@@ -60,14 +61,52 @@ static void show_cpuinfo_misc(struct seq_file *m, struct cpuinfo_x86 *c)
 }
 #endif
 
+struct mutex *show_cpuinfo_cache_mutexes[NR_CPUS] = { 0 };
+unsigned long show_cpuinfo_cache_jiffies[NR_CPUS] = { 0 };
+char *show_cpuinfo_cache[NR_CPUS] = { 0 };
+
 static int show_cpuinfo(struct seq_file *m, void *v)
 {
 	struct cpuinfo_x86 *c = v;
 	unsigned int cpu;
 	int i;
+	unsigned long now = jiffies;
+	struct seq_file *dupm;
 
 	cpu = c->cpu_index;
-	seq_printf(m, "processor\t: %u\n"
+
+	if (!show_cpuinfo_cache_mutexes[cpu]) {
+		show_cpuinfo_cache_mutexes[cpu] = kmalloc(sizeof(struct mutex), GFP_KERNEL);
+		if (!show_cpuinfo_cache_mutexes[cpu])
+			return -ERESTARTSYS;
+		mutex_init(show_cpuinfo_cache_mutexes[cpu]);
+	}
+
+	mutex_lock(show_cpuinfo_cache_mutexes[cpu]);
+	if (now - show_cpuinfo_cache_jiffies[cpu] > msecs_to_jiffies(5000)) {
+		if (show_cpuinfo_cache[cpu])
+			kfree(show_cpuinfo_cache[cpu]);
+	} else if (show_cpuinfo_cache[cpu]) {
+		seq_puts(m, show_cpuinfo_cache[cpu]);
+		mutex_unlock(show_cpuinfo_cache_mutexes[cpu]);
+		return 0;
+	}
+
+	dupm = kzalloc(sizeof(struct seq_file), GFP_KERNEL);
+	if (!dupm) {
+		mutex_unlock(show_cpuinfo_cache_mutexes[cpu]);
+		return -ENOMEM;
+	}
+	dupm->buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!dupm->buf) {
+		kfree(dupm);
+		mutex_unlock(show_cpuinfo_cache_mutexes[cpu]);
+		return -ENOMEM;
+	}
+	dupm->size = PAGE_SIZE;
+	mutex_init(&dupm->lock);
+
+	seq_printf(dupm, "processor\t: %u\n"
 		   "vendor_id\t: %s\n"
 		   "cpu family\t: %d\n"
 		   "model\t\t: %u\n"
@@ -79,77 +118,89 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		   c->x86_model_id[0] ? c->x86_model_id : "unknown");
 
 	if (c->x86_stepping || c->cpuid_level >= 0)
-		seq_printf(m, "stepping\t: %d\n", c->x86_stepping);
+		seq_printf(dupm, "stepping\t: %d\n", c->x86_stepping);
 	else
-		seq_puts(m, "stepping\t: unknown\n");
+		seq_puts(dupm, "stepping\t: unknown\n");
 	if (c->microcode)
-		seq_printf(m, "microcode\t: 0x%x\n", c->microcode);
+		seq_printf(dupm, "microcode\t: 0x%x\n", c->microcode);
 
 	if (cpu_has(c, X86_FEATURE_TSC)) {
 		unsigned int freq = arch_freq_get_on_cpu(cpu);
 
-		seq_printf(m, "cpu MHz\t\t: %u.%03u\n", freq / 1000, (freq % 1000));
+		seq_printf(dupm, "cpu MHz\t\t: %u.%03u\n", freq / 1000, (freq % 1000));
 	}
 
 	/* Cache size */
 	if (c->x86_cache_size)
-		seq_printf(m, "cache size\t: %u KB\n", c->x86_cache_size);
+		seq_printf(dupm, "cache size\t: %u KB\n", c->x86_cache_size);
 
-	show_cpuinfo_core(m, c, cpu);
-	show_cpuinfo_misc(m, c);
+	show_cpuinfo_core(dupm, c, cpu);
+	show_cpuinfo_misc(dupm, c);
 
-	seq_puts(m, "flags\t\t:");
+	seq_puts(dupm, "flags\t\t:");
 	for (i = 0; i < 32*NCAPINTS; i++)
 		if (cpu_has(c, i) && x86_cap_flags[i] != NULL)
-			seq_printf(m, " %s", x86_cap_flags[i]);
+			seq_printf(dupm, " %s", x86_cap_flags[i]);
 
 #ifdef CONFIG_X86_VMX_FEATURE_NAMES
 	if (cpu_has(c, X86_FEATURE_VMX) && c->vmx_capability[0]) {
-		seq_puts(m, "\nvmx flags\t:");
+		seq_puts(dupm, "\nvmx flags\t:");
 		for (i = 0; i < 32*NVMXINTS; i++) {
 			if (test_bit(i, (unsigned long *)c->vmx_capability) &&
 			    x86_vmx_flags[i] != NULL)
-				seq_printf(m, " %s", x86_vmx_flags[i]);
+				seq_printf(dupm, " %s", x86_vmx_flags[i]);
 		}
 	}
 #endif
 
-	seq_puts(m, "\nbugs\t\t:");
+	seq_puts(dupm, "\nbugs\t\t:");
 	for (i = 0; i < 32*NBUGINTS; i++) {
 		unsigned int bug_bit = 32*NCAPINTS + i;
 
 		if (cpu_has_bug(c, bug_bit) && x86_bug_flags[i])
-			seq_printf(m, " %s", x86_bug_flags[i]);
+			seq_printf(dupm, " %s", x86_bug_flags[i]);
 	}
 
-	seq_printf(m, "\nbogomips\t: %lu.%02lu\n",
+	seq_printf(dupm, "\nbogomips\t: %lu.%02lu\n",
 		   c->loops_per_jiffy/(500000/HZ),
 		   (c->loops_per_jiffy/(5000/HZ)) % 100);
 
 #ifdef CONFIG_X86_64
 	if (c->x86_tlbsize > 0)
-		seq_printf(m, "TLB size\t: %d 4K pages\n", c->x86_tlbsize);
+		seq_printf(dupm, "TLB size\t: %d 4K pages\n", c->x86_tlbsize);
 #endif
-	seq_printf(m, "clflush size\t: %u\n", c->x86_clflush_size);
-	seq_printf(m, "cache_alignment\t: %d\n", c->x86_cache_alignment);
-	seq_printf(m, "address sizes\t: %u bits physical, %u bits virtual\n",
+	seq_printf(dupm, "clflush size\t: %u\n", c->x86_clflush_size);
+	seq_printf(dupm, "cache_alignment\t: %d\n", c->x86_cache_alignment);
+	seq_printf(dupm, "address sizes\t: %u bits physical, %u bits virtual\n",
 		   c->x86_phys_bits, c->x86_virt_bits);
 
-	seq_puts(m, "power management:");
+	seq_puts(dupm, "power management:");
 	for (i = 0; i < 32; i++) {
 		if (c->x86_power & (1 << i)) {
 			if (i < ARRAY_SIZE(x86_power_flags) &&
 			    x86_power_flags[i])
-				seq_printf(m, "%s%s",
+				seq_printf(dupm, "%s%s",
 					   x86_power_flags[i][0] ? " " : "",
 					   x86_power_flags[i]);
 			else
-				seq_printf(m, " [%d]", i);
+				seq_printf(dupm, " [%d]", i);
 		}
 	}
 
-	seq_puts(m, "\n\n");
+	seq_puts(dupm, "\n\n");
 
+	if (dupm->buf) {
+		show_cpuinfo_cache[cpu] = kzalloc(dupm->count + 1, GFP_KERNEL);
+		if (show_cpuinfo_cache[cpu])
+			memcpy(show_cpuinfo_cache[cpu], dupm->buf, dupm->count);
+		seq_puts(m, dupm->buf);
+		kfree(dupm->buf);
+	}
+	if (show_cpuinfo_cache[cpu]) {
+		show_cpuinfo_cache_jiffies[cpu] = now;
+	}
+	kfree(dupm);
+	mutex_unlock(show_cpuinfo_cache_mutexes[cpu]);
 	return 0;
 }
 
