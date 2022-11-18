@@ -431,6 +431,7 @@ static int proc_pid_stack(struct seq_file *m, struct pid_namespace *ns,
 {
 	unsigned long *entries;
 	int err;
+	struct user_namespace *userns = current_user_ns();
 
 	/*
 	 * The ability to racily run the kernel stack unwinder on a running task
@@ -441,9 +442,11 @@ static int proc_pid_stack(struct seq_file *m, struct pid_namespace *ns,
 	 * some work to ensure that the remote task can not be scheduled; and
 	 * even then, this would still expose the unwinder as local attack
 	 * surface.
-	 * Therefore, this interface is restricted to root.
+	 * Therefore, this interface is restricted to first level container root.
 	 */
-	if (!file_ns_capable(m->file, &init_user_ns, CAP_SYS_ADMIN))
+	if ((userns != &init_user_ns) && (userns->parent != &init_user_ns))
+		userns = &init_user_ns;
+	if (!file_ns_capable(m->file, userns, CAP_SYS_ADMIN))
 		return -EACCES;
 
 	entries = kmalloc_array(MAX_STACK_TRACE_DEPTH, sizeof(*entries),
