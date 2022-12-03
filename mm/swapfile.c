@@ -2878,8 +2878,11 @@ static int swaps_open(struct inode *inode, struct file *file)
 	struct mem_cgroup *memcg;
 
 	memcg = get_current_most_limited_memcg();
-	if (memcg)
-		return single_open(file, fake_swap_show, memcg);
+	if (memcg) {
+		ret = single_open(file, fake_swap_show, memcg);
+		mem_cgroup_put(memcg);
+		return ret;
+	}
 
 	ret = seq_open(file, &swaps_op);
 	if (ret)
