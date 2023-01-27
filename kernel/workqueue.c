@@ -55,6 +55,7 @@
 #include <linux/kvm_para.h>
 #include <linux/delay.h>
 #include <linux/irq_work.h>
+#include <linux/memcontrol.h>
 
 #include "workqueue_internal.h"
 
@@ -6097,6 +6098,8 @@ void print_worker_info(const char *log_lvl, struct task_struct *task)
 	struct pool_workqueue *pwq = NULL;
 	struct workqueue_struct *wq = NULL;
 	struct worker *worker;
+
+	mem_cgroup_print_dump_stack_context(log_lvl, task);
 
 	if (!(task->flags & PF_WQ_WORKER))
 		return;
