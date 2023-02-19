@@ -11,6 +11,8 @@
 
 #ifdef CONFIG_PRINTK
 
+extern int syslog_ns_print_to_init_ns;
+
 #ifdef CONFIG_PRINTK_CALLER
 #define LOG_PREFIX_MAX		48
 #else

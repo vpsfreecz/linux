@@ -64,6 +64,8 @@
 #include "braille.h"
 #include "internal.h"
 
+int syslog_ns_print_to_init_ns = 1;
+
 int console_printk[4] = {
 	CONSOLE_LOGLEVEL_DEFAULT,	/* console_loglevel */
 	MESSAGE_LOGLEVEL_DEFAULT,	/* default_message_loglevel */
@@ -2282,7 +2284,8 @@ asmlinkage int vprintk_emit_ns(struct syslog_namespace *ns,
 	printk_delay(level);
 
 	printed_len = vprintk_store_ns(ns, facility, level, dev_info, fmt, args);
-	vprintk_store_ns(&init_syslog_ns, facility, level, dev_info, fmt, args);
+	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns)
+		vprintk_store_ns(&init_syslog_ns, facility, level, dev_info, fmt, args);
 
 	/* If called from the scheduler, we can not call up(). */
 	if (!in_sched) {
