@@ -587,13 +587,17 @@ static int fileattr_set_prepare(struct inode *inode,
 			      struct fileattr *fa)
 {
 	int err;
+	struct user_namespace *ns = current_user_ns();
+
+	if ((ns != &init_user_ns) && (ns->parent != &init_user_ns))
+		ns = &init_user_ns;
 
 	/*
 	 * The IMMUTABLE and APPEND_ONLY flags can only be changed by
 	 * the relevant capability.
 	 */
 	if ((fa->flags ^ old_ma->flags) & (FS_APPEND_FL | FS_IMMUTABLE_FL) &&
-	    !capable(CAP_LINUX_IMMUTABLE))
+	    !ns_capable(ns, CAP_LINUX_IMMUTABLE))
 		return -EPERM;
 
 	err = fscrypt_prepare_setflags(inode, old_ma->flags, fa->flags);
