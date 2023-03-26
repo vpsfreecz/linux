@@ -150,7 +150,7 @@ u64 nbcon_seq_read(struct console *con)
 {
 	unsigned long nbcon_seq = atomic_long_read(&ACCESS_PRIVATE(con, nbcon_seq));
 
-	return __ulseq_to_u64seq(prb, nbcon_seq);
+	return __ulseq_to_u64seq(init_syslog_ns.prb, nbcon_seq);
 }
 
 /**
@@ -169,7 +169,7 @@ void nbcon_seq_force(struct console *con, u64 seq)
 	 * the lower 32 bits of the sequence number are stored. The upper 32 bits
 	 * are derived from the sequence numbers available in the ringbuffer.
 	 */
-	u64 valid_seq = max_t(u64, seq, prb_first_valid_seq(prb));
+	u64 valid_seq = max_t(u64, seq, prb_first_valid_seq(init_syslog_ns.prb));
 
 	atomic_long_set(&ACCESS_PRIVATE(con, nbcon_seq), __u64seq_to_ulseq(valid_seq));
 
