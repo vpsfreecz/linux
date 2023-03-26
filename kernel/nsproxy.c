@@ -21,6 +21,7 @@
 #include <linux/time_namespace.h>
 #include <linux/fs_struct.h>
 #include <linux/proc_fs.h>
+#include <linux/syslog_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/file.h>
 #include <linux/syscalls.h>
@@ -47,6 +48,7 @@ struct nsproxy init_nsproxy = {
 	.time_ns		= &init_time_ns,
 	.time_ns_for_children	= &init_time_ns,
 #endif
+	.syslog_ns		= &init_syslog_ns,
 };
 
 static inline struct nsproxy *create_nsproxy(void)
@@ -70,6 +72,7 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 {
 	struct nsproxy *new_nsp;
 	int err;
+	bool new_syslogns = false;
 
 	new_nsp = create_nsproxy();
 	if (!new_nsp)
@@ -121,8 +124,39 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 	}
 	new_nsp->time_ns = get_time_ns(tsk->nsproxy->time_ns);
 
+	/* Will tsk be always the same as reported from current? */
+	task_lock(tsk);
+	if (tsk->syslog_ns_for_child == 2)
+		new_syslogns = true;
+	tsk->syslog_ns_for_child = 0;
+	task_unlock(tsk);
+
+	/* copy syslog ns */
+	new_nsp->syslog_ns = copy_syslog_ns(new_syslogns, user_ns,
+				      tsk->nsproxy->syslog_ns);
+	if (IS_ERR(new_nsp->syslog_ns)) {
+		err = PTR_ERR(new_nsp->syslog_ns);
+		goto out_syslog;
+	}
+
+	if (new_syslogns) {
+		pr_debug("Overriding syslog namespace in net_ns %p\n",
+			 new_nsp->net_ns);
+		pr_debug("\t%p new_nsp->net_ns->user_ns\n",
+			 new_nsp->net_ns->user_ns);
+		pr_debug("\t%p used syslog_ns\n",
+			 new_nsp->syslog_ns);
+		pr_debug("\t%p &init_syslog_ns\n",
+			 &init_syslog_ns);
+		pr_debug("\t%p &init_user_ns\n",
+			 &init_user_ns);
+		put_syslog_ns(new_nsp->net_ns->user_ns->syslog_ns);
+		new_nsp->net_ns->user_ns->syslog_ns = get_syslog_ns(new_nsp->syslog_ns);
+	}
+
 	return new_nsp;
 
+out_syslog:
 out_time:
 	put_net(new_nsp->net_ns);
 out_net:
@@ -141,6 +175,7 @@ out_uts:
 		put_mnt_ns(new_nsp->mnt_ns);
 out_ns:
 	kmem_cache_free(nsproxy_cachep, new_nsp);
+
 	return ERR_PTR(err);
 }
 
@@ -156,7 +191,8 @@ int copy_namespaces(unsigned long flags, struct task_struct *tsk)
 
 	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			      CLONE_NEWPID | CLONE_NEWNET |
-			      CLONE_NEWCGROUP | CLONE_NEWTIME)))) {
+			      CLONE_NEWCGROUP | CLONE_NEWTIME))) &&
+	        likely(!tsk->syslog_ns_for_child)) {
 		if (likely(old_ns->time_ns_for_children == old_ns->time_ns)) {
 			get_nsproxy(old_ns);
 			return 0;
@@ -199,6 +235,8 @@ void free_nsproxy(struct nsproxy *ns)
 		put_time_ns(ns->time_ns);
 	if (ns->time_ns_for_children)
 		put_time_ns(ns->time_ns_for_children);
+	if (ns->syslog_ns)
+		put_syslog_ns(ns->syslog_ns);
 	put_cgroup_ns(ns->cgroup_ns);
 	put_net(ns->net_ns);
 	kmem_cache_free(nsproxy_cachep, ns);
@@ -216,7 +254,8 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 
 	if (!(unshare_flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			       CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWCGROUP |
-			       CLONE_NEWTIME)))
+			       CLONE_NEWTIME))
+	    && !current->syslog_ns_for_child)
 		return 0;
 
 	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
