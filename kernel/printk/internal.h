@@ -2,6 +2,7 @@
 /*
  * internal.h - printk internal definitions
  */
+#include <linux/syslog_namespace.h>
 #include <linux/percpu.h>
 
 #if defined(CONFIG_PRINTK) && defined(CONFIG_SYSCTL)
@@ -14,17 +15,15 @@ int devkmsg_sysctl_set_loglvl(struct ctl_table *table, int write,
 
 #ifdef CONFIG_PRINTK
 
-/* Flags for a single printk record. */
-enum printk_info_flags {
-	LOG_NEWLINE	= 2,	/* text ended with a newline */
-	LOG_CONT	= 8,	/* text is a fragment of a continuation line */
-};
+struct syslog_namespace;
 
-__printf(4, 0)
-int vprintk_store(int facility, int level,
+__printf(5, 0)
+int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 		  const struct dev_printk_info *dev_info,
 		  const char *fmt, va_list args);
 
+__printf(2, 0) int vprintk_ns(struct syslog_namespace *ns,
+		  const char *fmt, va_list args);
 __printf(1, 0) int vprintk_default(const char *fmt, va_list args);
 __printf(1, 0) int vprintk_deferred(const char *fmt, va_list args);
 
@@ -42,7 +41,7 @@ bool printk_percpu_data_ready(void);
 		local_irq_restore(flags);	\
 	} while (0)
 
-void defer_console_output(void);
+void defer_console_output(struct syslog_namespace *ns);
 
 u16 printk_parse_prefix(const char *text, int *level,
 			enum printk_info_flags *flags);
