@@ -5,7 +5,7 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/bug.h>
-#include "printk_ringbuffer.h"
+#include <linux/printk_ringbuffer.h>
 
 /**
  * DOC: printk_ringbuffer overview

@@ -52,9 +52,12 @@ struct kmsg_dumper {
 	void (*dump)(struct kmsg_dumper *dumper, enum kmsg_dump_reason reason);
 	enum kmsg_dump_reason max_reason;
 	bool registered;
+	struct syslog_namespace *ns;
 };
 
 #ifdef CONFIG_PRINTK
+struct syslog_namespace;
+
 void kmsg_dump(enum kmsg_dump_reason reason);
 
 bool kmsg_dump_get_line(struct kmsg_dump_iter *iter, bool syslog,
