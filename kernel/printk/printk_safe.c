@@ -9,6 +9,7 @@
 #include <linux/cpumask.h>
 #include <linux/printk.h>
 #include <linux/kprobes.h>
+#include <linux/syslog_namespace.h>
 
 #include "internal.h"
 
@@ -28,6 +29,8 @@ void __printk_safe_exit(void)
 
 asmlinkage int vprintk(const char *fmt, va_list args)
 {
+	struct syslog_namespace *ns = detect_syslog_namespace();
+
 #ifdef CONFIG_KGDB_KDB
 	/* Allow to pass printk() to kdb but avoid a recursion. */
 	if (unlikely(kdb_trap_printk && kdb_printf_cpu < 0))
@@ -42,6 +45,6 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 		return vprintk_deferred(fmt, args);
 
 	/* No obstacles. */
-	return vprintk_default(fmt, args);
+	return vprintk_ns(ns, fmt, args);
 }
 EXPORT_SYMBOL(vprintk);
