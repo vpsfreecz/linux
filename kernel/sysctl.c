@@ -63,6 +63,7 @@
 #include <linux/mount.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/pid.h>
+#include <linux/syslog_namespace.h>
 
 #include "../lib/kstrtox.h"
 
@@ -1891,6 +1892,15 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
+	},
+	{
+		.procname       = "syslog_ns_print_to_init_ns",
+		.data           = &syslog_ns_print_to_init_ns,
+		.maxlen         = sizeof(syslog_ns_print_to_init_ns),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec_minmax,
+		.extra1         = SYSCTL_ZERO,
+		.extra2         = SYSCTL_ONE,
 	},
 	{
 		.procname	= "ngroups_max",
