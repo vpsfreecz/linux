@@ -116,7 +116,8 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u6
 	system_time = sys - sys_old;
 	run_time = user_time + system_time;
 
-	usr_frac = 10000 * user_time / run_time;
+	usr_frac = 10000 * user_time;
+	do_div(usr_frac, run_time);
 	sys_frac = 10000 - usr_frac;
 
 	if (!run_time)
@@ -124,11 +125,15 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u6
 
 	for_each_cpu(i, &cpu_fake_mask) {
 		if (run_time >= elapsed) {
-			usr = elapsed * usr_frac / 10000;
+			usr = elapsed * usr_frac;
+			if (!usr)
+				BUG();
+			do_div(usr, 10000);
 			sys = elapsed - usr;
 			run_time -= elapsed;
 		} else if (run_time) {
-			usr = run_time * usr_frac / 10000;
+			usr = run_time * usr_frac;
+			do_div(usr, 10000);
 			sys = run_time - usr;
 			run_time = 0;
 		} else {
