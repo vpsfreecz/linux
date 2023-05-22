@@ -28,7 +28,7 @@ up:
 	quota = cpu_cfs_quota_read_s64(css, NULL);
 	period = cpu_cfs_period_read_u64(css, NULL);
 
-	if (quota && period) {
+	if (quota > 0 && period > 0) {
 		cpus = quota;
 		if (do_div(cpus, period))
 			cpus++;
