@@ -79,12 +79,26 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		i.totalram = i.totalhigh = totalram;
 		i.freeram = i.freehigh = totalram - memusage;
 
-		if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
-			i.totalswap = 0;
-			i.freeswap = 0;
-		} else {
-			i.totalswap = memsw - totalram;
-			i.freeswap = i.totalswap - (memsw_usage - memusage);
+		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
+			if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
+				i.totalswap = 0;
+				i.freeswap = 0;
+			} else if (memsw == PAGE_COUNTER_MAX) {
+				i.freeswap = i.totalswap - memsw_usage;
+			} else {
+				i.freeswap = i.totalswap - (memsw_usage - memusage);
+				i.totalswap = memsw - totalram;
+			}
+		} else { // v2
+			if (!memsw) {
+				i.totalswap = 0;
+				i.freeswap = 0;
+			} else if (memsw == PAGE_COUNTER_MAX) {
+				i.freeswap = i.totalswap - memsw_usage;
+			} else {
+				i.totalswap = memsw;
+				i.freeswap = i.totalswap - memsw_usage;
+			}
 		}
 
 		available = i.freeram + sreclaimable + cached_inactive;
