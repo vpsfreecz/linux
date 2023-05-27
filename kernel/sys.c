@@ -2801,12 +2801,22 @@ static int do_sysinfo(struct sysinfo *info)
 
 		info->totalram = info->totalhigh = totalram;
 		info->freeram = info->freehigh = totalram - memusage;
-		if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
-			info->totalswap = 0;
-			info->freeswap = 0;
-		} else {
-			info->totalswap = memsw - totalram;
-			info->freeswap = info->totalswap - (memsw_usage - memusage);
+		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
+			if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
+				info->totalswap = 0;
+				info->freeswap = 0;
+			} else {
+				info->totalswap = memsw - totalram;
+				info->freeswap = info->totalswap - (memsw_usage - memusage);
+			}
+		} else { // v2
+			if (!memsw) {
+				info->totalswap = 0;
+				info->freeswap = 0;
+			} else {
+				info->totalswap = memsw;
+				info->freeswap = info->totalswap - memsw_usage;
+			}
 		}
 		info->bufferram = memcg_page_state(memcg, NR_FILE_PAGES);
 		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
