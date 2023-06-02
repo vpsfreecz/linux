@@ -11,6 +11,16 @@
 #include <linux/sched/cputime.h>
 #include "sched/sched.h"
 
+static int __init vpsadminos_init(void)
+{
+	int ret;
+
+	ret = sysfs_create_mount_point(fs_kobj, "vpsadminos");
+
+	return ret;
+}
+fs_initcall(vpsadminos_init);
+
 unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
 {
 	struct cgroup_subsys_state *css;
