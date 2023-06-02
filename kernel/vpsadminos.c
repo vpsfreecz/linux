@@ -11,6 +11,16 @@
 #include <linux/sched/cputime.h>
 #include "sched/sched.h"
 
+static int __init vpsadminos_init(void)
+{
+	int ret;
+
+	ret = sysfs_create_mount_point(fs_kobj, "vpsadminos");
+
+	return ret;
+}
+fs_initcall(vpsadminos_init);
+
 struct mem_cgroup *get_current_most_limited_memcg(void)
 {
 	struct mem_cgroup *root_memcg, *walk_memcg, *res_memcg = NULL;
