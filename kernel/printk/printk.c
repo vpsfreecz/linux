@@ -3550,11 +3550,6 @@ static DEFINE_PER_CPU(struct irq_work, wake_up_klogd_work) =
 
 static void __wake_up_klogd(struct syslog_namespace *ns, int val)
 {
-	if (ns && (ns != &init_syslog_ns)) {
-		wake_up_interruptible(&ns->log_wait);
-		return;
-	}
-
 	if (!printk_percpu_data_ready())
 		return;
 
