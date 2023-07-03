@@ -6281,6 +6281,7 @@ void get_slabinfo(struct kmem_cache *s, struct slabinfo *sinfo)
 	unsigned long nr_slabs = 0;
 	unsigned long nr_objs = 0;
 	unsigned long nr_free = 0;
+	/* Temporarily patch out slabinfo
 	int node;
 	struct kmem_cache_node *n;
 
@@ -6288,7 +6289,7 @@ void get_slabinfo(struct kmem_cache *s, struct slabinfo *sinfo)
 		nr_slabs += node_nr_slabs(n);
 		nr_objs += node_nr_objs(n);
 		nr_free += count_partial(n, count_free);
-	}
+	} */
 
 	sinfo->active_objs = nr_objs - nr_free;
 	sinfo->num_objs = nr_objs;
