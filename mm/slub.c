@@ -7263,6 +7263,9 @@ void get_slabinfo(struct kmem_cache *s, struct slabinfo *sinfo)
 	int node;
 	struct kmem_cache_node *n;
 
+	if (current_user_ns() != &init_user_ns)
+		return;
+
 	for_each_kmem_cache_node(s, node, n) {
 		nr_slabs += node_nr_slabs(n);
 		nr_objs += node_nr_objs(n);
