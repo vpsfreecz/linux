@@ -25,7 +25,7 @@
 #include <asm/setup.h>
 #include <asm/unwind.h>
 
-#if 0
+#if 1
 #define DEBUGP(fmt, ...)				\
 	printk(KERN_DEBUG fmt, ##__VA_ARGS__)
 #else
