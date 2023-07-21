@@ -820,6 +820,7 @@ out_free:
 	kfree(pathbuf);
 }
 
+extern void proc_cgroup_cache_clear(struct task_struct *tsk);
 /*
  * cgroup_rename - Only allow simple rename of directories in place.
  */
@@ -827,7 +828,9 @@ static int cgroup1_rename(struct kernfs_node *kn, struct kernfs_node *new_parent
 			  const char *new_name_str)
 {
 	struct cgroup *cgrp = kn->priv;
-	int ret;
+	int ret, length, n = 0;
+	struct css_task_iter it;
+	struct task_struct *tsk;
 
 	/* do not accept '\n' to prevent making /proc/<pid>/cgroup unparsable */
 	if (strchr(new_name_str, '\n'))
@@ -847,6 +850,17 @@ static int cgroup1_rename(struct kernfs_node *kn, struct kernfs_node *new_parent
 	kernfs_break_active_protection(kn);
 
 	cgroup_lock();
+
+	length = cgroup_task_count(cgrp);
+	css_task_iter_start(&cgrp->self, 0, &it);
+	while ((tsk = css_task_iter_next(&it))) {
+		if (unlikely(n == length))
+			break;
+		spin_lock(&tsk->cgroup_cache_lock);
+		proc_cgroup_cache_clear(tsk);
+		spin_unlock(&tsk->cgroup_cache_lock);
+	}
+	css_task_iter_end(&it);
 
 	ret = kernfs_rename(kn, new_parent, new_name_str);
 	if (!ret)

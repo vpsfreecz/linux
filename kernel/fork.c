@@ -2355,7 +2355,7 @@ __latent_entropy struct task_struct *copy_process(
 #ifdef CONFIG_CGROUPS
 	memset(p->cgroup_cache_caches, 0, sizeof(void *) * 16);
 	memset(p->cgroup_cache_keys, 0, sizeof(void *) * 16);
-	mutex_init(&p->cgroup_cache_mutex);
+	spin_lock_init(&p->cgroup_cache_lock);
 #endif
 	p->set_child_tid = (clone_flags & CLONE_CHILD_SETTID) ? args->child_tid : NULL;
 	/*
