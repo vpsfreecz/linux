@@ -882,6 +882,7 @@ static void css_set_skip_task_iters(struct css_set *cset,
 		css_task_iter_skip(it, task);
 }
 
+extern void proc_cgroup_cache_clear(struct task_struct *tsk);
 /**
  * css_set_move_task - move a task from one css_set to another
  * @task: task being moved
@@ -902,6 +903,10 @@ static void css_set_move_task(struct task_struct *task,
 			      bool use_mg_tasks)
 {
 	lockdep_assert_held(&css_set_lock);
+
+	mutex_lock(&task->cgroup_cache_mutex);
+	proc_cgroup_cache_clear(task);
+	mutex_unlock(&task->cgroup_cache_mutex);
 
 	if (to_cset && !css_set_populated(to_cset))
 		css_set_update_populated(to_cset, true);
