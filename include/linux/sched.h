@@ -1230,7 +1230,7 @@ struct task_struct {
 	struct list_head		cg_list;
 	void				*cgroup_cache_caches[16];
 	void				*cgroup_cache_keys[16];
-	struct mutex			cgroup_cache_mutex;
+	spinlock_t			cgroup_cache_lock;
 #endif
 #ifdef CONFIG_X86_CPU_RESCTRL
 	u32				closid;

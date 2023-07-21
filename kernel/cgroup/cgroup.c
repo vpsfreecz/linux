@@ -2496,6 +2496,7 @@ struct task_struct *cgroup_taskset_next(struct cgroup_taskset *tset,
 	return NULL;
 }
 
+extern void proc_cgroup_cache_clear(struct task_struct *tsk);
 /**
  * cgroup_migrate_execute - migrate a taskset
  * @mgctx: migration context
@@ -2540,7 +2541,11 @@ static int cgroup_migrate_execute(struct cgroup_mgctx *mgctx)
 
 			get_css_set(to_cset);
 			to_cset->nr_tasks++;
+			spin_lock(&task->cgroup_cache_lock);
 			css_set_move_task(task, from_cset, to_cset, true);
+			proc_cgroup_cache_clear(task);
+			spin_unlock(&task->cgroup_cache_lock);
+
 			from_cset->nr_tasks--;
 			/*
 			 * If the source or destination cgroup is frozen,
@@ -6194,7 +6199,7 @@ void cgroup_path_from_kernfs_id(u64 id, char *buf, size_t buflen)
 	kernfs_put(kn);
 }
 
-/* Needs tsk->cgroup_cache_mutex */
+/* Needs tsk->cgroup_cache_lock */
 void proc_cgroup_cache_clear(struct task_struct *tsk)
 {
 	void **caches = tsk->cgroup_cache_caches;
@@ -6210,7 +6215,7 @@ void proc_cgroup_cache_clear(struct task_struct *tsk)
 	};
 }
 
-/* Needs tsk->cgroup_cache_mutex */
+/* Needs tsk->cgroup_cache_lock */
 char *proc_cgroup_cache_lookup(struct task_struct *tsk, struct cgroup_namespace *srchkey)
 {
 	void **caches = tsk->cgroup_cache_caches;
@@ -6227,30 +6232,26 @@ char *proc_cgroup_cache_lookup(struct task_struct *tsk, struct cgroup_namespace 
 	return NULL;
 }
 
-/* Needs tsk->cgroup_cache_mutex */
-char *proc_cgroup_cache_alloc(struct task_struct *tsk, struct cgroup_namespace *srchkey, char* buf, size_t len)
+/* Needs tsk->cgroup_cache_lock */
+char *proc_cgroup_cache_reg(struct task_struct *tsk, struct cgroup_namespace *srchkey, char* buf, size_t len)
 {
 	void **caches = tsk->cgroup_cache_caches;
 	void **keys = tsk->cgroup_cache_keys;
 	int i;
-	char *ret;
 
 	if (!caches || !keys)
 		return NULL;
 
+retry:
 	for (i = 0; i < 16; i++) {
 		if (!keys[i]) {
-			ret = kzalloc(len+1, GFP_KERNEL);
-			if (!ret)
-				return NULL;
-			caches[i] = ret;
+			caches[i] = buf;
 			keys[i] = srchkey;
-			memcpy(ret, buf, len);
-			return ret;
+			return buf;
 		};
 	};
 	proc_cgroup_cache_clear(tsk);
-	return NULL;
+	goto retry;
 }
 
 /*
@@ -6309,23 +6310,24 @@ int proc_cgroup_show(struct seq_file *m, struct pid_namespace *ns,
 	struct cgroup_root *root;
 	struct seq_file *dupm;
 
-	mutex_lock(&tsk->cgroup_cache_mutex);
+	spin_lock(&tsk->cgroup_cache_lock);
 	cache = proc_cgroup_cache_lookup(tsk, current->nsproxy->cgroup_ns);
 	if (cache) {
 		seq_puts(m, cache);
-		mutex_unlock(&tsk->cgroup_cache_mutex);
+		spin_unlock(&tsk->cgroup_cache_lock);
 		return 0;
 	}
+	spin_unlock(&tsk->cgroup_cache_lock);
 
 	dupm = kzalloc(sizeof(struct seq_file), GFP_KERNEL);
 	if (!dupm) {
-		mutex_unlock(&tsk->cgroup_cache_mutex);
+		spin_unlock(&tsk->cgroup_cache_lock);
 		return -ENOMEM;
 	}
 	dupm->buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!dupm->buf) {
 		kfree(dupm);
-		mutex_unlock(&tsk->cgroup_cache_mutex);
+		spin_unlock(&tsk->cgroup_cache_lock);
 		return -ENOMEM;
 	}
 	dupm->size = PAGE_SIZE;
@@ -6393,14 +6395,12 @@ out_unlock:
 	cgroup_unlock();
 	kfree(buf);
 out:
-	if (dupm->buf) {
-		cache = proc_cgroup_cache_alloc(tsk, current->nsproxy->cgroup_ns, dupm->buf, dupm->count);
-		kfree(dupm->buf);
-	}
+	spin_lock(&tsk->cgroup_cache_lock);
+	cache = proc_cgroup_cache_reg(tsk, current->nsproxy->cgroup_ns, dupm->buf, dupm->count);
 	if (cache)
 		seq_puts(m, cache);
 	kfree(dupm);
-	mutex_unlock(&tsk->cgroup_cache_mutex);
+	spin_unlock(&tsk->cgroup_cache_lock);
 	return retval;
 }
 

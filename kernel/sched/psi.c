@@ -1146,10 +1146,6 @@ void cgroup_move_task(struct task_struct *task, struct css_set *to)
 	struct rq_flags rf;
 	struct rq *rq;
 
-	mutex_lock(&tsk->cgroup_cache_mutex);
-	proc_cgroup_cache_clear(task);
-	mutex_unlock(&tsk->cgroup_cache_mutex);
-
 	if (!static_branch_likely(&psi_cgroups_enabled)) {
 		/*
 		 * Lame to do this here, but the scheduler cannot be locked
