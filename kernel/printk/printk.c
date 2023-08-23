@@ -4236,10 +4236,12 @@ static void printk_start_kthread(struct console *con)
 #define PRINTK_PENDING_DIRECT_OUTPUT	0x02
 
 static DEFINE_PER_CPU(int, printk_pending);
+static DEFINE_PER_CPU(struct syslog_namespace *, printk_pending_ns);
 
 static void wake_up_klogd_work_func(struct irq_work *irq_work)
 {
 	int pending = this_cpu_xchg(printk_pending, 0);
+	struct syslog_namespace *ns = this_cpu_read(printk_pending_ns);
 
 	if (pending & PRINTK_PENDING_DIRECT_OUTPUT) {
 		printk_prefer_direct_enter();
@@ -4252,7 +4254,7 @@ static void wake_up_klogd_work_func(struct irq_work *irq_work)
 	}
 
 	if (pending & PRINTK_PENDING_WAKEUP)
-		wake_up_interruptible(&init_syslog_ns.log_wait);
+		wake_up_interruptible(&ns->log_wait);
 }
 
 static DEFINE_PER_CPU(struct irq_work, wake_up_klogd_work) =
@@ -4278,12 +4280,9 @@ static void __wake_up_klogd(struct syslog_namespace *ns, int val)
 	 */
 	if (wq_has_sleeper(&ns->log_wait) || /* LMM(__wake_up_klogd:A) */
 	    (val & PRINTK_PENDING_DIRECT_OUTPUT)) {
-		if (ns == &init_syslog_ns) {
-			this_cpu_or(printk_pending, val);
-			irq_work_queue(this_cpu_ptr(&wake_up_klogd_work));
-		} else
-			if (val & PRINTK_PENDING_WAKEUP)
-				wake_up_interruptible(&ns->log_wait);
+		this_cpu_or(printk_pending, val);
+		this_cpu_write(printk_pending_ns, ns);
+		irq_work_queue(this_cpu_ptr(&wake_up_klogd_work));
 	}
 	preempt_enable();
 }
