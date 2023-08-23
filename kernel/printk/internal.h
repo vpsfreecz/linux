@@ -17,6 +17,8 @@ int devkmsg_sysctl_set_loglvl(struct ctl_table *table, int write,
 
 struct syslog_namespace;
 
+extern bool block_console_kthreads;
+
 __printf(5, 0)
 int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 		  const struct dev_printk_info *dev_info,
