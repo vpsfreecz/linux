@@ -561,6 +561,8 @@ void free_task(struct task_struct *tsk)
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
 	bpf_task_storage_free(tsk);
+	if (tsk->syslog_ns_for_child_name)
+		kfree(tsk->syslog_ns_for_child_name);
 	proc_cgroup_cache_clear(tsk);
 	free_task_struct(tsk);
 }
@@ -3217,6 +3219,7 @@ int ksys_unshare(unsigned long unshare_flags)
 		goto bad_unshare_cleanup_fd;
 	err = unshare_nsproxy_namespaces(unshare_flags, &new_nsproxy,
 					 new_cred, new_fs);
+	pr_warn("here\n");
 	if (err)
 		goto bad_unshare_cleanup_cred;
 
@@ -3238,6 +3241,7 @@ int ksys_unshare(unsigned long unshare_flags)
 			exit_shm(current);
 			shm_init_task(current);
 		}
+	pr_warn("here2\n");
 
 		if (new_nsproxy)
 			switch_task_namespaces(current, new_nsproxy);
@@ -3267,6 +3271,7 @@ int ksys_unshare(unsigned long unshare_flags)
 		}
 	}
 
+	pr_warn("here3\n");
 	perf_event_namespaces(current);
 
 bad_unshare_cleanup_cred:

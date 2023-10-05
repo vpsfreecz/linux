@@ -6,6 +6,7 @@
 #include <linux/errno.h>
 #include <linux/bug.h>
 #include <linux/printk_ringbuffer.h>
+#include <linux/syslog_namespace.h>
 
 /**
  * DOC: printk_ringbuffer overview
@@ -1482,6 +1483,7 @@ static void desc_make_final(struct prb_desc_ring *desc_ring, unsigned long id)
  *            order for data to be readable and/or extended. Its value
  *            is initialized to 0.
  */
+#define dlol()  { if (detect_syslog_namespace() != &init_syslog_ns) ns_printk(&init_syslog_ns, KERN_DEBUG "%s:%d hir in pid %d\n", __func__, __LINE__, current->pid); }
 bool prb_reserve(struct prb_reserved_entry *e, struct printk_ringbuffer *rb,
 		 struct printk_record *r)
 {
@@ -1494,24 +1496,29 @@ bool prb_reserve(struct prb_reserved_entry *e, struct printk_ringbuffer *rb,
 	if (!data_check_size(&rb->text_data_ring, r->text_buf_size))
 		goto fail;
 
+	dlol();
 	/*
 	 * Descriptors in the reserved state act as blockers to all further
 	 * reservations once the desc_ring has fully wrapped. Disable
 	 * interrupts during the reserve/commit window in order to minimize
 	 * the likelihood of this happening.
 	 */
-	local_irq_save(e->irqflags);
+	//local_irq_save(e->irqflags);
 
+	dlol();
 	if (!desc_reserve(rb, &id)) {
+	dlol();
 		/* Descriptor reservation failures are tracked. */
 		atomic_long_inc(&rb->fail);
 		local_irq_restore(e->irqflags);
 		goto fail;
 	}
 
+	dlol();
 	d = to_desc(desc_ring, id);
 	info = to_info(desc_ring, id);
 
+	dlol();
 	/*
 	 * All @info fields (except @seq) are cleared and must be filled in
 	 * by the writer. Save @seq before clearing because it is used to
@@ -1520,6 +1527,7 @@ bool prb_reserve(struct prb_reserved_entry *e, struct printk_ringbuffer *rb,
 	seq = info->seq;
 	memset(info, 0, sizeof(*info));
 
+	dlol();
 	/*
 	 * Set the @e fields here so that prb_commit() can be used if
 	 * text data allocation fails.
@@ -1527,6 +1535,7 @@ bool prb_reserve(struct prb_reserved_entry *e, struct printk_ringbuffer *rb,
 	e->rb = rb;
 	e->id = id;
 
+	dlol();
 	/*
 	 * Initialize the sequence number if it has "never been set".
 	 * Otherwise just increment it by a full wrap.
@@ -1543,6 +1552,7 @@ bool prb_reserve(struct prb_reserved_entry *e, struct printk_ringbuffer *rb,
 	else
 		info->seq = seq + DESCS_COUNT(desc_ring);
 
+	dlol();
 	/*
 	 * New data is about to be reserved. Once that happens, previous
 	 * descriptors are no longer able to be extended. Finalize the
@@ -1552,22 +1562,29 @@ bool prb_reserve(struct prb_reserved_entry *e, struct printk_ringbuffer *rb,
 	if (info->seq > 0)
 		desc_make_final(desc_ring, DESC_ID(id - 1));
 
+	dlol();
 	r->text_buf = data_alloc(rb, r->text_buf_size, &d->text_blk_lpos, id);
+	dlol();
 	/* If text data allocation fails, a data-less record is committed. */
 	if (r->text_buf_size && !r->text_buf) {
+	dlol();
 		prb_commit(e);
+	dlol();
 		/* prb_commit() re-enabled interrupts. */
 		goto fail;
 	}
+	dlol();
 
 	r->info = info;
 
 	/* Record full text space used by record. */
 	e->text_space = space_used(&rb->text_data_ring, &d->text_blk_lpos);
 
+	dlol();
 	return true;
 fail:
 	/* Make it clear to the caller that the reserve failed. */
+	dlol();
 	memset(r, 0, sizeof(*r));
 	return false;
 }
@@ -1735,7 +1752,7 @@ static bool copy_data(struct prb_data_ring *data_ring,
 	if (!buf || !buf_size)
 		return true;
 
-	data_size = min_t(unsigned int, buf_size, len);
+	data_size = min_t(u16, buf_size, len);
 
 	memcpy(&buf[0], data, data_size); /* LMM(copy_data:A) */
 	return true;

@@ -146,7 +146,8 @@ int create_user_ns(struct cred *new)
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_SIGPENDING, rlimit(RLIMIT_SIGPENDING));
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_MEMLOCK, rlimit(RLIMIT_MEMLOCK));
 	ns->ucounts = ucounts;
-	ns->syslog_ns = get_syslog_ns(parent_ns->syslog_ns);
+	ns->syslog_ns = get_syslog_ns(current->nsproxy->syslog_ns);
+	pr_debug("%s: while init syslog ns is at %llx, ns->syslog_ns at %llx\n", __func__, (u64) &init_syslog_ns, (u64) ns->syslog_ns);
 
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
 	mutex_lock(&userns_state_mutex);

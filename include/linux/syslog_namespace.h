@@ -59,6 +59,8 @@ struct syslog_namespace {
 	struct kref		kref;
 	struct syslog_namespace	*parent;
 
+	char			*name;
+
 	/*
 	 * The next printk record to read after the last 'clear' command. There are
 	 * two copies (updated with seqcount_latch) so that reads can locklessly
@@ -107,9 +109,10 @@ extern struct printk_ringbuffer *syslog_ns_create_ring_buffer(struct syslog_name
 #ifdef CONFIG_SYSLOG_NS
 
 extern struct syslog_namespace *clone_syslog_ns(struct user_namespace *user_ns,
-					struct syslog_namespace *old_ns);
+					struct syslog_namespace *old_ns,
+					char *name);
 
-extern struct syslog_namespace *copy_syslog_ns(bool new,
+extern struct syslog_namespace *copy_syslog_ns(bool newns, char *name,
 					struct user_namespace *user_ns,
 					struct syslog_namespace *old_ns);
 
@@ -133,7 +136,7 @@ static inline void put_syslog_ns(struct syslog_namespace *ns)
 
 #else /* CONFIG_SYSLOG_NS not defined */
 
-static inline struct syslog_namespace *copy_syslog_ns(bool new,
+static inline struct syslog_namespace *copy_syslog_ns(bool newns, char *name,
 					struct user_namespace *user_ns,
 					struct syslog_namespace *old_ns)
 {

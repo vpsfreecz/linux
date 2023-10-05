@@ -495,8 +495,9 @@ static int check_syslog_permissions(int type, int source,
 		ns = &init_syslog_ns;
 
 	/* create a new syslog ns */
-	if (type == SYSLOG_ACTION_NEW_NS || type == SYSLOG_ACTION_COPY_NS)
-		return 0;
+	if (type == SYSLOG_ACTION_NEW_NS &&
+	    !ns_capable(ns->user_ns, CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (syslog_action_restricted(type, ns)) {
 		if (ns_capable(ns->user_ns, CAP_SYSLOG))
@@ -620,14 +621,6 @@ int devkmsg_emit(struct syslog_namespace *ns, int facility, int level,
 {
 	va_list args;
 	int r;
-
-	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
-		va_list args2;
-		va_copy(args2, args);
-		va_start(args2, fmt);
-		vprintk_emit_ns(&init_syslog_ns, facility, level, NULL, fmt, args2);
-		va_end(args2);
-	}
 
 	va_start(args, fmt);
 	r = vprintk_emit_ns(ns, facility, level, NULL, fmt, args);
@@ -1768,22 +1761,29 @@ int do_syslog(int type, char __user *buf, int len, int source,
 	case SYSLOG_ACTION_SIZE_BUFFER:
 		error = ns->log_buf_len;
 		break;
-	case SYSLOG_ACTION_COPY_NS:
-#ifdef CONFIG_SYSLOG_NS
-		pr_debug("syslog_ns: next setns(0) will copy syslog ns\n");
-		task_lock(current);
-		current->syslog_ns_for_child = 1;
-		task_unlock(current);
-#else
-		error = -EINVAL;
-#endif
-		break;
 	case SYSLOG_ACTION_NEW_NS:
 #ifdef CONFIG_SYSLOG_NS
-		pr_debug("syslog_ns: new syslog ns will be created next clone(0)\n");
-		task_lock(current);
-		current->syslog_ns_for_child = 2;
-		task_unlock(current);
+		pr_warn("SYSLOG_ACTION_NEW_NS by pid %d\n", current->pid);
+		if (len > SYSLOG_NS_NAME_MAX_LENGHT) {
+			error = -ENAMETOOLONG;
+			break;
+		}
+		current->syslog_ns_for_child = 1;
+		if (current->syslog_ns_for_child_name) {
+			kfree(current->syslog_ns_for_child_name);
+			current->syslog_ns_for_child_name = NULL;
+		}
+		if (len > 1) {
+			current->syslog_ns_for_child_name = kzalloc(len+1, GFP_KERNEL);
+			if (!current->syslog_ns_for_child_name) {
+				current->syslog_ns_for_child = 0;
+				error = -ENOMEM;
+				break;
+			}
+			error = copy_from_user(current->syslog_ns_for_child_name, buf, len);
+		}
+		error = 0;
+		pr_debug("syslog_ns: new syslog ns %s will be created next clone(0)\n", current->syslog_ns_for_child_name);
 #else
 		error = -EINVAL;
 #endif
@@ -2145,13 +2145,14 @@ static u16 printk_sprint(char *text, u16 size, int facility,
 	return text_len;
 }
 
+#define dlol()  { if (to_ns != &init_syslog_ns && ns == &init_syslog_ns) ns_printk(&init_syslog_ns, KERN_DEBUG "%s:%d here\n", __func__, __LINE__); }
 __printf(5, 0)
-int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
+int vprintk_store_ns(struct syslog_namespace *to_ns, int facility, int level,
 		  const struct dev_printk_info *dev_info,
 		  const char *fmt, va_list args)
 {
 	struct prb_reserved_entry e;
-	enum printk_info_flags flags = 0;
+	enum printk_info_flags flags;
 	struct printk_record r;
 	unsigned long irqflags;
 	u16 trunc_msg_len = 0;
@@ -2163,10 +2164,9 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 	u16 text_len;
 	int ret = 0;
 	u64 ts_nsec;
+	struct syslog_namespace *ns = to_ns;
 
-	if (!printk_enter_irqsave(recursion_ptr, irqflags))
-		return 0;
-
+//		ns = &init_syslog_ns;
 	/*
 	 * Since the duration of printk() can vary depending on the message
 	 * and state of the ringbuffer, grab the timestamp now so that it is
@@ -2184,9 +2184,22 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 	 * terminating '\0', which is not counted by vsnprintf().
 	 */
 	va_copy(args2, args);
-	reserve_size = vsnprintf(&prefix_buf[0], sizeof(prefix_buf), fmt, args2) + 1;
+	reserve_size = vsnprintf(&prefix_buf[0], sizeof(prefix_buf), fmt, args2 ) + 1;
 	va_end(args2);
 
+again:
+	dlol();
+	
+	if (!printk_enter_irqsave(recursion_ptr, irqflags))
+		return 0;
+
+	memset(&e, 0, sizeof(e));
+	memset(&r, 0, sizeof(r));
+	flags = 0;
+	trunc_msg_len = 0;
+	ret = 0;
+
+	dlol();
 	if (reserve_size > LOG_LINE_MAX)
 		reserve_size = LOG_LINE_MAX;
 
@@ -2194,12 +2207,14 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 	if (facility == 0)
 		printk_parse_prefix(&prefix_buf[0], &level, &flags);
 
+	dlol();
 	if (level == LOGLEVEL_DEFAULT)
 		level = default_message_loglevel;
 
 	if (dev_info)
 		flags |= LOG_NEWLINE;
 
+	dlol();
 	if (flags & LOG_CONT) {
 		prb_rec_init_wr(&r, reserve_size);
 		if (prb_reserve_in_last(&e, ns->prb, &r, caller_id, LOG_LINE_MAX)) {
@@ -2208,9 +2223,11 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 			r.info->text_len += text_len;
 
 			if (flags & LOG_NEWLINE) {
+	dlol();
 				r.info->flags |= LOG_NEWLINE;
 				prb_final_commit(&e);
 			} else {
+	dlol();
 				prb_commit(&e);
 			}
 
@@ -2219,23 +2236,39 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 		}
 	}
 
+	dlol();
+	if (to_ns != &init_syslog_ns && ns == &init_syslog_ns && to_ns->name != NULL)
+		reserve_size += 5 + SYSLOG_NS_NAME_MAX_LENGHT;
 	/*
 	 * Explicitly initialize the record before every prb_reserve() call.
 	 * prb_reserve_in_last() and prb_reserve() purposely invalidate the
 	 * structure when they fail.
 	 */
+	dlol();
 	prb_rec_init_wr(&r, reserve_size);
+	dlol();
 	if (!prb_reserve(&e, ns->prb, &r)) {
 		/* truncate the message if it is too long for empty buffer */
 		truncate_msg(&reserve_size, &trunc_msg_len, ns);
 
+	dlol();
 		prb_rec_init_wr(&r, reserve_size + trunc_msg_len);
 		if (!prb_reserve(&e, ns->prb, &r))
-			goto out;
+			goto fail;
 	}
 
+	dlol();
 	/* fill message */
-	text_len = printk_sprint(&r.text_buf[0], reserve_size, facility, &flags, fmt, args);
+	if (to_ns != &init_syslog_ns && ns == &init_syslog_ns && to_ns->name != NULL)
+	//{
+	//	ns_printk(&init_syslog_ns, "[%s\n ] ", to_ns->name);
+	//	text_len = 4;
+	//}
+		text_len = snprintf(&r.text_buf[0], reserve_size, "[%*s ] ", SYSLOG_NS_NAME_MAX_LENGHT, to_ns->name);
+	else
+		text_len = 0;
+	text_len += printk_sprint(&r.text_buf[text_len], (reserve_size-text_len), facility, &flags, fmt, args);
+	dlol();
 	if (trunc_msg_len)
 		memcpy(&r.text_buf[text_len], trunc_msg, trunc_msg_len);
 	r.info->text_len = text_len + trunc_msg_len;
@@ -2244,18 +2277,30 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 	r.info->flags = flags & 0x1f;
 	r.info->ts_nsec = ts_nsec;
 	r.info->caller_id = caller_id;
+	dlol();
 	if (dev_info)
 		memcpy(&r.info->dev_info, dev_info, sizeof(r.info->dev_info));
 
+	dlol();
 	/* A message without a trailing newline can be continued. */
 	if (!(flags & LOG_NEWLINE))
-		prb_commit(&e);
+	{ dlol();
+		prb_commit(&e); }
 	else
-		prb_final_commit(&e);
+	{ dlol();
+		prb_final_commit(&e); }
 
 	ret = text_len + trunc_msg_len;
+
+fail:
 out:
 	printk_exit_irqrestore(recursion_ptr, irqflags);
+
+	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
+		ns = &init_syslog_ns;
+	//	if (printk_enter_irqsave(recursion_ptr, irqflags))
+		goto again;
+	}
 	return ret;
 }
 
@@ -2348,15 +2393,6 @@ asmlinkage __visible int _printk(const char *fmt, ...)
 {
 	va_list args;
 	int r;
-	struct syslog_namespace *ns = detect_syslog_namespace();
-
-	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
-		va_list args2;
-		va_copy(args2, args);
-		va_start(args2, fmt);
-		vprintk_ns(&init_syslog_ns, fmt, args2);
-		va_end(args2);
-	}
 
 	va_start(args, fmt);
 	r = vprintk(fmt, args);
@@ -3869,7 +3905,7 @@ EXPORT_SYMBOL_GPL(kmsg_dump_get_line);
 bool kmsg_dump_get_buffer(struct kmsg_dump_iter *iter, bool syslog,
 			  char *buf, size_t size, size_t *len_out)
 {
-	struct syslog_namespace *ns = detect_syslog_namespace();
+	struct syslog_namespace *ns = &init_syslog_ns;
 	u64 min_seq = latched_seq_read_nolock(&ns->clear_seq);
 	struct printk_info info;
 	struct printk_record r;
@@ -3955,6 +3991,7 @@ struct syslog_namespace init_syslog_ns = {
 	.ucounts = NULL,
 	.kref = KREF_INIT(4),
 	.parent = NULL,
+	.name = NULL,
 	.log_wait = __WAIT_QUEUE_HEAD_INITIALIZER(init_syslog_ns.log_wait),
 	.log_buf_len = __LOG_BUF_LEN,
 	.log_buf = __log_buf,

@@ -74,6 +74,7 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 	int err;
 	bool new_syslogns = false;
 
+	pr_warn("elelelele\n");
 	new_nsp = create_nsproxy();
 	if (!new_nsp)
 		return ERR_PTR(-ENOMEM);
@@ -124,34 +125,21 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 	}
 	new_nsp->time_ns = get_time_ns(tsk->nsproxy->time_ns);
 
-	/* Will tsk be always the same as reported from current? */
-	task_lock(tsk);
-	if (tsk->syslog_ns_for_child == 2)
+	if (tsk->syslog_ns_for_child) {
+		pr_warn("elelele\n");
 		new_syslogns = true;
-	tsk->syslog_ns_for_child = 0;
-	task_unlock(tsk);
+	}
 
-	/* copy syslog ns */
-	new_nsp->syslog_ns = copy_syslog_ns(new_syslogns, user_ns,
+	new_nsp->syslog_ns = copy_syslog_ns(new_syslogns, tsk->syslog_ns_for_child_name, user_ns,
 				      tsk->nsproxy->syslog_ns);
+	if (new_syslogns)
+		kfree(tsk->syslog_ns_for_child_name);
+	tsk->syslog_ns_for_child_name = NULL;
+	tsk->syslog_ns_for_child = 0;
+
 	if (IS_ERR(new_nsp->syslog_ns)) {
 		err = PTR_ERR(new_nsp->syslog_ns);
 		goto out_syslog;
-	}
-
-	if (new_syslogns) {
-		pr_debug("Overriding syslog namespace in net_ns %p\n",
-			 new_nsp->net_ns);
-		pr_debug("\t%p new_nsp->net_ns->user_ns\n",
-			 new_nsp->net_ns->user_ns);
-		pr_debug("\t%p used syslog_ns\n",
-			 new_nsp->syslog_ns);
-		pr_debug("\t%p &init_syslog_ns\n",
-			 &init_syslog_ns);
-		pr_debug("\t%p &init_user_ns\n",
-			 &init_user_ns);
-		put_syslog_ns(new_nsp->net_ns->user_ns->syslog_ns);
-		new_nsp->net_ns->user_ns->syslog_ns = get_syslog_ns(new_nsp->syslog_ns);
 	}
 
 	return new_nsp;
@@ -252,16 +240,19 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 	struct user_namespace *user_ns;
 	int err = 0;
 
+	pr_warn("yolo\n");
 	if (!(unshare_flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			       CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWCGROUP |
 			       CLONE_NEWTIME))
 	    && !current->syslog_ns_for_child)
 		return 0;
 
+	pr_warn("yol\n");
 	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
+	pr_warn("yo\n");
 	*new_nsp = create_new_namespaces(unshare_flags, current, user_ns,
 					 new_fs ? new_fs : current->fs);
 	if (IS_ERR(*new_nsp)) {
@@ -269,6 +260,7 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 		goto out;
 	}
 
+	pr_warn("o\n");
 out:
 	return err;
 }
