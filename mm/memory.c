@@ -41,6 +41,7 @@
 
 #include <linux/kernel_stat.h>
 #include <linux/mm.h>
+#include <linux/numa_replication.h>
 #include <linux/mm_inline.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/coredump.h>
@@ -235,7 +236,10 @@ static inline void free_pud_range(struct mmu_gather *tlb, p4d_t *p4d,
 	pud_t *pud;
 	unsigned long next;
 	unsigned long start;
-
+#ifdef CONFIG_KERNEL_REPLICATION
+	int nid;
+	int offset;
+#endif
 	start = addr;
 	pud = pud_offset(p4d, addr);
 	do {
@@ -257,7 +261,18 @@ static inline void free_pud_range(struct mmu_gather *tlb, p4d_t *p4d,
 		return;
 
 	pud = pud_offset(p4d, start);
+#ifdef CONFIG_KERNEL_REPLICATION
+	if (mm_p4d_folded(tlb->mm)) {
+		offset = p4d - (p4d_t *)tlb->mm->pgd;
+		for_each_replica(nid) {
+			p4d_clear((p4d_t *)tlb->mm->pgd_numa[nid] + offset);
+		}
+	} else {
+		p4d_clear(p4d);
+	}
+#else
 	p4d_clear(p4d);
+#endif
 	pud_free_tlb(tlb, pud, start);
 	mm_dec_nr_puds(tlb->mm);
 }
@@ -269,7 +284,10 @@ static inline void free_p4d_range(struct mmu_gather *tlb, pgd_t *pgd,
 	p4d_t *p4d;
 	unsigned long next;
 	unsigned long start;
-
+#ifdef CONFIG_KERNEL_REPLICATION
+	int nid;
+	int offset;
+#endif
 	start = addr;
 	p4d = p4d_offset(pgd, addr);
 	do {
@@ -291,7 +309,16 @@ static inline void free_p4d_range(struct mmu_gather *tlb, pgd_t *pgd,
 		return;
 
 	p4d = p4d_offset(pgd, start);
+#ifdef CONFIG_KERNEL_REPLICATION
+	if (!mm_p4d_folded(tlb->mm)) {
+		offset = pgd - (pgd_t *)tlb->mm->pgd;
+		for_each_replica(nid) {
+			pgd_clear(tlb->mm->pgd_numa[nid] + offset);
+		}
+	}
+#else
 	pgd_clear(pgd);
+#endif
 	p4d_free_tlb(tlb, p4d, start);
 }
 
@@ -2758,6 +2785,60 @@ int apply_to_page_range(struct mm_struct *mm, unsigned long addr,
 	return __apply_to_page_range(mm, addr, size, fn, data, true);
 }
 EXPORT_SYMBOL_GPL(apply_to_page_range);
+
+#ifdef CONFIG_KERNEL_REPLICATION
+static int numa_apply_to_page_range_pgd(struct mm_struct *mm,
+					pgd_t *pgtable, unsigned long addr,
+					unsigned long size, pte_fn_t fn,
+					void *data, bool create)
+{
+	pgd_t *pgd;
+	unsigned long start = addr, next;
+	unsigned long end = addr + size;
+	pgtbl_mod_mask mask = 0;
+	int err = 0;
+
+	if (WARN_ON(addr >= end))
+		return -EINVAL;
+
+	pgd = pgd_offset_pgd(pgtable, addr);
+	do {
+		next = pgd_addr_end(addr, end);
+		if (pgd_none(*pgd) && !create)
+			continue;
+		if (WARN_ON_ONCE(pgd_leaf(*pgd)))
+			return -EINVAL;
+		if (!pgd_none(*pgd) && WARN_ON_ONCE(pgd_bad(*pgd))) {
+			if (!create)
+				continue;
+			pgd_clear_bad(pgd);
+		}
+		err = apply_to_p4d_range(mm, pgd, addr, next,
+					 fn, data, create, &mask);
+		if (err)
+			break;
+	} while (pgd++, addr = next, addr != end);
+
+	if (mask & ARCH_PAGE_TABLE_SYNC_MASK)
+		arch_sync_kernel_mappings(start, start + size);
+
+	return err;
+}
+
+int numa_apply_to_page_range(struct mm_struct *mm, unsigned long addr,
+			     unsigned long size, pte_fn_t fn, void *data)
+{
+	int nid;
+	int ret = 0;
+
+	for_each_replica(nid)
+		ret |= numa_apply_to_page_range_pgd(mm, per_numa_pgd(mm, nid),
+						    addr, size, fn, data, true);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(numa_apply_to_page_range);
+#endif
 
 /*
  * Scan a region of virtual memory, calling a provided function on
@@ -5483,6 +5564,10 @@ inval:
  */
 int __p4d_alloc(struct mm_struct *mm, pgd_t *pgd, unsigned long address)
 {
+#ifdef CONFIG_KERNEL_REPLICATION
+	int nid;
+	pgd_t *target;
+#endif
 	p4d_t *new = p4d_alloc_one(mm, address);
 	if (!new)
 		return -ENOMEM;
@@ -5490,6 +5575,42 @@ int __p4d_alloc(struct mm_struct *mm, pgd_t *pgd, unsigned long address)
 	spin_lock(&mm->page_table_lock);
 	if (pgd_present(*pgd)) {	/* Another has populated it */
 		p4d_free(mm, new);
+		spin_unlock(&mm->page_table_lock);
+		return 0;
+	}
+	smp_wmb(); /* See comment in pmd_install() */
+	pgd_populate(mm, pgd, new);
+
+#ifdef CONFIG_KERNEL_REPLICATION
+	if (mm_p4d_folded(mm) || !is_text_replicated()) {
+		spin_unlock(&mm->page_table_lock);
+		return 0;
+	}
+	for_each_replica(nid) {
+		target = pgd_offset_pgd(mm->pgd_numa[nid], address);
+		if (pgd_present(*target))
+			continue;
+		pgd_populate(mm, target, new);
+	}
+#endif
+	spin_unlock(&mm->page_table_lock);
+
+	return 0;
+}
+
+int __p4d_alloc_node(unsigned int nid,
+		struct mm_struct *mm,
+		pgd_t *pgd, unsigned long address)
+{
+	p4d_t *new = p4d_alloc_one_node(nid, mm, address);
+	if (!new)
+		return -ENOMEM;
+
+	spin_lock(&mm->page_table_lock);
+	if (pgd_present(*pgd)) {	/* Another has populated it */
+		p4d_free(mm, new);
+		spin_unlock(&mm->page_table_lock);
+		return 0;
 	} else {
 		smp_wmb(); /* See comment in pmd_install() */
 		pgd_populate(mm, pgd, new);
@@ -5506,6 +5627,10 @@ int __p4d_alloc(struct mm_struct *mm, pgd_t *pgd, unsigned long address)
  */
 int __pud_alloc(struct mm_struct *mm, p4d_t *p4d, unsigned long address)
 {
+#ifdef CONFIG_KERNEL_REPLICATION
+	int nid;
+	p4d_t *target;
+#endif
 	pud_t *new = pud_alloc_one(mm, address);
 	if (!new)
 		return -ENOMEM;
@@ -5515,9 +5640,48 @@ int __pud_alloc(struct mm_struct *mm, p4d_t *p4d, unsigned long address)
 		mm_inc_nr_puds(mm);
 		smp_wmb(); /* See comment in pmd_install() */
 		p4d_populate(mm, p4d, new);
-	} else	/* Another has populated it */
+	} else	{/* Another has populated it */
 		pud_free(mm, new);
+		spin_unlock(&mm->page_table_lock);
+		return 0;
+	}
+#ifdef CONFIG_KERNEL_REPLICATION
+	if (!mm_p4d_folded(mm) || !is_text_replicated()) {
+		spin_unlock(&mm->page_table_lock);
+		return 0;
+	}
+	for_each_online_node(nid) {
+		target = (p4d_t *)pgd_offset_pgd(mm->pgd_numa[nid], address);
+		if (p4d_present(*target))
+			continue;
+		p4d_populate(mm, target, new);
+	}
+#endif
 	spin_unlock(&mm->page_table_lock);
+
+	return 0;
+}
+
+int __pud_alloc_node(unsigned int nid,
+		struct mm_struct *mm,
+		p4d_t *p4d, unsigned long address)
+{
+	pud_t *new = pud_alloc_one_node(nid, mm, address);
+	if (!new)
+		return -ENOMEM;
+
+	spin_lock(&mm->page_table_lock);
+	if (!p4d_present(*p4d)) {
+		mm_inc_nr_puds(mm);
+		smp_wmb(); /* See comment in pmd_install() */
+		p4d_populate(mm, p4d, new);
+	} else	{/* Another has populated it */
+		pud_free(mm, new);
+		spin_unlock(&mm->page_table_lock);
+		return 0;
+	}
+	spin_unlock(&mm->page_table_lock);
+
 	return 0;
 }
 #endif /* __PAGETABLE_PUD_FOLDED */
@@ -5545,6 +5709,28 @@ int __pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long address)
 	spin_unlock(ptl);
 	return 0;
 }
+
+int __pmd_alloc_node(unsigned int nid,
+		struct mm_struct *mm,
+		pud_t *pud, unsigned long address)
+{
+	spinlock_t *ptl;
+	pmd_t *new = pmd_alloc_one_node(nid, mm, address);
+	if (!new)
+		return -ENOMEM;
+
+	ptl = pud_lock(mm, pud);
+	if (!pud_present(*pud)) {
+		mm_inc_nr_pmds(mm);
+		smp_wmb(); /* See comment in pmd_install() */
+		pud_populate(mm, pud, new);
+	} else {	/* Another has populated it */
+		pmd_free(mm, new);
+	}
+	spin_unlock(ptl);
+	return 0;
+}
+
 #endif /* __PAGETABLE_PMD_FOLDED */
 
 /**
@@ -6118,3 +6304,62 @@ void ptlock_free(struct ptdesc *ptdesc)
 	kmem_cache_free(page_ptl_cachep, ptdesc->ptl);
 }
 #endif
+
+/**
+ * Walk in replicated tranlation table specified by nid.
+ * If kernel replication is disabled or text is not replicated yet,
+ * value of nid is not used
+ */
+struct page *walk_to_page_node(int nid, const void *vmalloc_addr)
+{
+	unsigned long addr = (unsigned long)vmalloc_addr;
+	struct page *page = NULL;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *ptep, pte;
+
+	if (!is_text_replicated())
+		nid = 0;
+
+	pgd = pgd_offset_pgd(per_numa_pgd(&init_mm, nid), addr);
+	if (pgd_none(*pgd))
+		return NULL;
+	if (WARN_ON_ONCE(pgd_leaf(*pgd)))
+		return NULL; /* XXX: no allowance for huge pgd */
+	if (WARN_ON_ONCE(pgd_bad(*pgd)))
+		return NULL;
+
+	p4d = p4d_offset(pgd, addr);
+	if (p4d_none(*p4d))
+		return NULL;
+	if (p4d_leaf(*p4d))
+		return p4d_page(*p4d) + ((addr & ~P4D_MASK) >> PAGE_SHIFT);
+	if (WARN_ON_ONCE(p4d_bad(*p4d)))
+		return NULL;
+
+	pud = pud_offset(p4d, addr);
+	if (pud_none(*pud))
+		return NULL;
+	if (pud_leaf(*pud))
+		return pud_page(*pud) + ((addr & ~PUD_MASK) >> PAGE_SHIFT);
+	if (WARN_ON_ONCE(pud_bad(*pud)))
+		return NULL;
+
+	pmd = pmd_offset(pud, addr);
+	if (pmd_none(*pmd))
+		return NULL;
+	if (pmd_leaf(*pmd))
+		return pmd_page(*pmd) + ((addr & ~PMD_MASK) >> PAGE_SHIFT);
+	if (WARN_ON_ONCE(pmd_bad(*pmd)))
+		return NULL;
+
+	ptep = pte_offset_map(pmd, addr);
+	pte = *ptep;
+	if (pte_present(pte))
+		page = pte_page(pte);
+	pte_unmap(ptep);
+
+	return page;
+}

@@ -156,6 +156,16 @@ static inline p4d_t *p4d_alloc_one(struct mm_struct *mm, unsigned long addr)
 	return (p4d_t *)get_zeroed_page(gfp);
 }
 
+static inline p4d_t *p4d_alloc_one_node(unsigned int nid,
+					struct mm_struct *mm, unsigned long addr)
+{
+	gfp_t gfp = GFP_KERNEL_ACCOUNT;
+
+	if (mm == &init_mm)
+		gfp &= ~__GFP_ACCOUNT;
+	return (p4d_t *)get_zeroed_page_node(nid, gfp);
+}
+
 static inline void p4d_free(struct mm_struct *mm, p4d_t *p4d)
 {
 	if (!pgtable_l5_enabled())
