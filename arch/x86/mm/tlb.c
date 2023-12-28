@@ -11,6 +11,7 @@
 #include <linux/sched/smt.h>
 #include <linux/task_work.h>
 #include <linux/mmu_notifier.h>
+#include <linux/numa_replication.h>
 
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
@@ -492,6 +493,22 @@ void cr4_update_pce(void *ignored)
 static inline void cr4_update_pce_mm(struct mm_struct *mm) { }
 #endif
 
+#ifdef CONFIG_KERNEL_REPLICATION
+extern struct mm_struct *poking_mm;
+static pgd_t *get_next_pgd(struct mm_struct *next)
+{
+	if (next == poking_mm)
+		return next->pgd;
+	else
+		return next->pgd_numa[numa_node_id()];
+}
+#else
+static pgd_t *get_next_pgd(struct mm_struct *next)
+{
+	return next->pgd;
+}
+#endif /*CONFIG_KERNEL_REPLICATION*/
+
 void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
 			struct task_struct *tsk)
 {
@@ -503,6 +520,7 @@ void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
 	u64 next_tlb_gen;
 	bool need_flush;
 	u16 new_asid;
+	pgd_t *next_pgd;
 
 	/*
 	 * NB: The scheduler will call us with prev == next when switching
@@ -637,15 +655,17 @@ void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
 	}
 
 	set_tlbstate_lam_mode(next);
+
+	next_pgd = get_next_pgd(next);
 	if (need_flush) {
 		this_cpu_write(cpu_tlbstate.ctxs[new_asid].ctx_id, next->context.ctx_id);
 		this_cpu_write(cpu_tlbstate.ctxs[new_asid].tlb_gen, next_tlb_gen);
-		load_new_mm_cr3(next->pgd, new_asid, new_lam, true);
+		load_new_mm_cr3(next_pgd, new_asid, new_lam, true);
 
 		trace_tlb_flush(TLB_FLUSH_ON_TASK_SWITCH, TLB_FLUSH_ALL);
 	} else {
 		/* The new ASID is already up to date. */
-		load_new_mm_cr3(next->pgd, new_asid, new_lam, false);
+		load_new_mm_cr3(next_pgd, new_asid, new_lam, false);
 
 		trace_tlb_flush(TLB_FLUSH_ON_TASK_SWITCH, 0);
 	}
@@ -704,7 +724,7 @@ void initialize_tlbstate_and_flush(void)
 	unsigned long cr3 = __read_cr3();
 
 	/* Assert that CR3 already references the right mm. */
-	WARN_ON((cr3 & CR3_ADDR_MASK) != __pa(mm->pgd));
+	WARN_ON((cr3 & CR3_ADDR_MASK) != __pa(per_numa_pgd(mm, numa_node_id())));
 
 	/* LAM expected to be disabled */
 	WARN_ON(cr3 & (X86_CR3_LAM_U48 | X86_CR3_LAM_U57));
@@ -719,7 +739,7 @@ void initialize_tlbstate_and_flush(void)
 		!(cr4_read_shadow() & X86_CR4_PCIDE));
 
 	/* Disable LAM, force ASID 0 and force a TLB flush. */
-	write_cr3(build_cr3(mm->pgd, 0, 0));
+	write_cr3(build_cr3(per_numa_pgd(mm, numa_node_id()), 0, 0));
 
 	/* Reinitialize tlbstate. */
 	this_cpu_write(cpu_tlbstate.last_user_mm_spec, LAST_USER_MM_INIT);
@@ -1093,7 +1113,7 @@ void flush_tlb_kernel_range(unsigned long start, unsigned long end)
 unsigned long __get_current_cr3_fast(void)
 {
 	unsigned long cr3 =
-		build_cr3(this_cpu_read(cpu_tlbstate.loaded_mm)->pgd,
+		build_cr3(per_numa_pgd(this_cpu_read(cpu_tlbstate.loaded_mm), numa_node_id()),
 			  this_cpu_read(cpu_tlbstate.loaded_mm_asid),
 			  tlbstate_lam_cr3_mask());
 

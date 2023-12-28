@@ -60,6 +60,7 @@
 #include <linux/stackprotector.h>
 #include <linux/cpuhotplug.h>
 #include <linux/mc146818rtc.h>
+#include <linux/numa_replication.h>
 
 #include <asm/acpi.h>
 #include <asm/cacheinfo.h>
@@ -244,6 +245,7 @@ static void notrace start_secondary(void *unused)
 	 * limit the things done here to the most necessary things.
 	 */
 	cr4_init();
+	numa_setup_pgd();
 
 	/*
 	 * 32-bit specific. 64-bit reaches this code with the correct page

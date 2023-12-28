@@ -20,6 +20,7 @@
 #include <linux/efi.h>			/* efi_crash_gracefully_on_page_fault()*/
 #include <linux/mm_types.h>
 #include <linux/mm.h>			/* find_and_lock_vma() */
+#include <linux/numa_replication.h>
 
 #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
@@ -1031,7 +1032,8 @@ spurious_kernel_fault(unsigned long error_code, unsigned long address)
 	    error_code != (X86_PF_INSTR | X86_PF_PROT))
 		return 0;
 
-	pgd = init_mm.pgd + pgd_index(address);
+	pgd = per_numa_pgd(&init_mm, numa_node_id());
+
 	if (!pgd_present(*pgd))
 		return 0;
 

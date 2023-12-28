@@ -2,6 +2,7 @@
 #include <linux/mm.h>
 #include <linux/gfp.h>
 #include <linux/hugetlb.h>
+#include <linux/numa_replication.h>
 #include <asm/pgalloc.h>
 #include <asm/tlb.h>
 #include <asm/fixmap.h>
@@ -120,23 +121,25 @@ struct mm_struct *pgd_page_get_mm(struct page *page)
 	return page_ptdesc(page)->pt_mm;
 }
 
-static void pgd_ctor(struct mm_struct *mm, pgd_t *pgd)
+static void pgd_ctor(struct mm_struct *mm, int nid)
 {
+	pgd_t *dst_pgd = per_numa_pgd(mm, nid);
+	pgd_t *src_pgd = per_numa_pgd(&init_mm, nid);
 	/* If the pgd points to a shared pagetable level (either the
 	   ptes in non-PAE, or shared PMD in PAE), then just copy the
 	   references from swapper_pg_dir. */
 	if (CONFIG_PGTABLE_LEVELS == 2 ||
 	    (CONFIG_PGTABLE_LEVELS == 3 && SHARED_KERNEL_PMD) ||
 	    CONFIG_PGTABLE_LEVELS >= 4) {
-		clone_pgd_range(pgd + KERNEL_PGD_BOUNDARY,
-				swapper_pg_dir + KERNEL_PGD_BOUNDARY,
+		clone_pgd_range(dst_pgd + KERNEL_PGD_BOUNDARY,
+				src_pgd + KERNEL_PGD_BOUNDARY,
 				KERNEL_PGD_PTRS);
 	}
 
 	/* list required to sync kernel mapping updates */
 	if (!SHARED_KERNEL_PMD) {
-		pgd_set_mm(pgd, mm);
-		pgd_list_add(pgd);
+		pgd_set_mm(dst_pgd, mm);
+		pgd_list_add(dst_pgd);
 	}
 }
 
@@ -425,20 +428,33 @@ static inline void _pgd_free(pgd_t *pgd)
 {
 	free_pages((unsigned long)pgd, PGD_ALLOCATION_ORDER);
 }
+
+#ifdef CONFIG_KERNEL_REPLICATION
+static inline pgd_t *_pgd_alloc_node(int nid)
+{
+	struct page *pages;
+
+	pages = __alloc_pages_node(nid, GFP_PGTABLE_USER,
+				   PGD_ALLOCATION_ORDER);
+	return (pgd_t *)page_address(pages);
+}
+
+#else
+#define _pgd_alloc_node(nid) _pgd_alloc()
+#endif /* CONFIG_KERNEL_REPLICATION */
 #endif /* CONFIG_X86_PAE */
 
 pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	pgd_t *pgd;
+	int nid;
 	pmd_t *u_pmds[MAX_PREALLOCATED_USER_PMDS];
 	pmd_t *pmds[MAX_PREALLOCATED_PMDS];
 
-	pgd = _pgd_alloc();
-
-	if (pgd == NULL)
-		goto out;
-
-	mm->pgd = pgd;
+	for_each_replica(nid) {
+		per_numa_pgd(mm, nid) = _pgd_alloc_node(nid);
+		if (per_numa_pgd(mm, nid) == NULL)
+			goto out_free_pgd;
+	}
 
 	if (sizeof(pmds) != 0 &&
 			preallocate_pmds(mm, pmds, PREALLOCATED_PMDS) != 0)
@@ -458,16 +474,22 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 	 */
 	spin_lock(&pgd_lock);
 
-	pgd_ctor(mm, pgd);
-	if (sizeof(pmds) != 0)
-		pgd_prepopulate_pmd(mm, pgd, pmds);
+	for_each_replica(nid) {
+		pgd_ctor(mm, nid);
+		if (sizeof(pmds) != 0)
+			pgd_prepopulate_pmd(mm, per_numa_pgd(mm, nid), pmds);
 
-	if (sizeof(u_pmds) != 0)
-		pgd_prepopulate_user_pmd(mm, pgd, u_pmds);
+		if (sizeof(u_pmds) != 0)
+			pgd_prepopulate_user_pmd(mm, per_numa_pgd(mm, nid), u_pmds);
+	}
+
+	for_each_online_node(nid) {
+		per_numa_pgd(mm, nid) = per_numa_pgd(mm, numa_closest_memory_node(nid));
+	}
 
 	spin_unlock(&pgd_lock);
 
-	return pgd;
+	return mm->pgd;
 
 out_free_user_pmds:
 	if (sizeof(u_pmds) != 0)
@@ -476,17 +498,25 @@ out_free_pmds:
 	if (sizeof(pmds) != 0)
 		free_pmds(mm, pmds, PREALLOCATED_PMDS);
 out_free_pgd:
-	_pgd_free(pgd);
-out:
+	for_each_replica(nid) {
+		if (per_numa_pgd(mm, nid) != NULL)
+			_pgd_free(per_numa_pgd(mm, nid));
+	}
 	return NULL;
 }
 
 void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
+	int nid;
+
 	pgd_mop_up_pmds(mm, pgd);
-	pgd_dtor(pgd);
-	paravirt_pgd_free(mm, pgd);
-	_pgd_free(pgd);
+	for_each_replica(nid) {
+		pgd_t *pgd_numa = per_numa_pgd(mm, nid);
+
+		pgd_dtor(pgd_numa);
+		paravirt_pgd_free(mm, pgd_numa);
+		_pgd_free(pgd_numa);
+	}
 }
 
 /*

@@ -99,6 +99,7 @@
 #include <linux/init_syscalls.h>
 #include <linux/stackdepot.h>
 #include <linux/randomize_kstack.h>
+#include <linux/numa_replication.h>
 #include <net/net_namespace.h>
 
 #include <asm/io.h>
@@ -925,11 +926,13 @@ void start_kernel(void)
 	 * These use large bootmem allocations and must precede
 	 * initalization of page allocator
 	 */
+	numa_reserve_memory();
 	setup_log_buf(0);
 	vfs_caches_init_early();
 	sort_main_extable();
 	trap_init();
 	mm_core_init();
+	numa_replicate_kernel();
 	poking_init();
 	ftrace_init();
 
@@ -1450,6 +1453,8 @@ static int __ref kernel_init(void *unused)
 	free_initmem();
 	mark_readonly();
 
+	numa_replicate_kernel_rodata();
+	numa_clear_linear_addresses();
 	/*
 	 * Kernel mappings are now finalized - update the userspace page-table
 	 * to finalize PTI.

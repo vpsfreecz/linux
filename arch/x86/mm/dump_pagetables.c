@@ -17,6 +17,7 @@
 #include <linux/highmem.h>
 #include <linux/pci.h>
 #include <linux/ptdump.h>
+#include <linux/numa_replication.h>
 
 #include <asm/e820/types.h>
 
@@ -433,7 +434,15 @@ void ptdump_walk_user_pgd_level_checkwx(void)
 
 void ptdump_walk_pgd_level_checkwx(void)
 {
+#ifdef CONFIG_KERNEL_REPLICATION
+	int node;
+
+	for_each_replica(node)
+		ptdump_walk_pgd_level_core(NULL, &init_mm,
+				per_numa_pgd(&init_mm, node), true, false);
+#else
 	ptdump_walk_pgd_level_core(NULL, &init_mm, INIT_PGD, true, false);
+#endif
 }
 
 static int __init pt_dump_init(void)
