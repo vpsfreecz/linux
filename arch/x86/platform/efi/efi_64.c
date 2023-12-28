@@ -35,6 +35,7 @@
 #include <linux/ucs2_string.h>
 #include <linux/cc_platform.h>
 #include <linux/sched/task.h>
+#include <linux/numa_replication.h>
 
 #include <asm/setup.h>
 #include <asm/page.h>
@@ -71,6 +72,9 @@ int __init efi_alloc_page_tables(void)
 	p4d_t *p4d;
 	pud_t *pud;
 	gfp_t gfp_mask;
+#ifdef CONFIG_KERNEL_REPLICATION
+	int nid;
+#endif
 
 	gfp_mask = GFP_KERNEL | __GFP_ZERO;
 	efi_pgd = (pgd_t *)__get_free_pages(gfp_mask, PGD_ALLOCATION_ORDER);
@@ -86,7 +90,12 @@ int __init efi_alloc_page_tables(void)
 	if (!pud)
 		goto free_p4d;
 
+#ifdef CONFIG_KERNEL_REPLICATION
+	for_each_online_node(nid)
+		per_numa_pgd(&efi_mm, nid) = efi_pgd;
+#else
 	efi_mm.pgd = efi_pgd;
+#endif
 	mm_init_cpumask(&efi_mm);
 	init_new_context(NULL, &efi_mm);
 
