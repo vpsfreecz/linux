@@ -9,6 +9,7 @@
 #include <asm/page.h>		/* pgprot_t */
 #include <linux/rbtree.h>
 #include <linux/overflow.h>
+#include <linux/numa.h>
 
 #include <asm/vmalloc.h>
 
@@ -28,6 +29,10 @@ struct iov_iter;		/* in uio.h */
 #define VM_FLUSH_RESET_PERMS	0x00000100	/* reset direct map and flush TLB on unmap, can't be freed in atomic context */
 #define VM_MAP_PUT_PAGES	0x00000200	/* put pages and free array in vfree */
 #define VM_ALLOW_HUGE_VMAP	0x00000400      /* Allow for huge pages on archs with HAVE_ARCH_HUGE_VMALLOC */
+
+#ifdef CONFIG_KERNEL_REPLICATION
+#define VM_NUMA_SHARED		0x00000800	/* Pages shared between per-NUMA node TT*/
+#endif
 
 #if (defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)) && \
 	!defined(CONFIG_KASAN_VMALLOC)
@@ -54,6 +59,10 @@ struct vm_struct {
 	struct page		**pages;
 #ifdef CONFIG_HAVE_ARCH_HUGE_VMALLOC
 	unsigned int		page_order;
+#endif
+#ifdef CONFIG_KERNEL_REPLICATION
+	int			node;
+	bool			replicated;
 #endif
 	unsigned int		nr_pages;
 	phys_addr_t		phys_addr;
@@ -149,6 +158,16 @@ extern void *__vmalloc_node_range(unsigned long size, unsigned long align,
 			unsigned long start, unsigned long end, gfp_t gfp_mask,
 			pgprot_t prot, unsigned long vm_flags, int node,
 			const void *caller) __alloc_size(1);
+
+#ifdef CONFIG_KERNEL_REPLICATION
+ /*
+ * DO NOT USE this function if you don't understand what it is doing
+ * Use only in pair with __vmalloc_numa_shared_replicated_start()
+ */
+int __vmalloc_node_replicate_range(const void *addr, gfp_t gfp_mask,
+		pgprot_t prot, unsigned long vm_flags);
+#endif
+
 void *__vmalloc_node(unsigned long size, unsigned long align, gfp_t gfp_mask,
 		int node, const void *caller) __alloc_size(1);
 void *vmalloc_huge(unsigned long size, gfp_t gfp_mask) __alloc_size(1);
@@ -233,6 +252,11 @@ static inline bool is_vm_area_hugepages(const void *addr)
 
 #ifdef CONFIG_MMU
 void vunmap_range(unsigned long addr, unsigned long end);
+#ifdef CONFIG_KERNEL_REPLICATION
+void numa_vunmap_range(unsigned long addr, unsigned long end);
+#else
+#define numa_vunmap_range vunmap_range
+#endif
 static inline void set_vm_flush_reset_perms(void *addr)
 {
 	struct vm_struct *vm = find_vm_area(addr);
