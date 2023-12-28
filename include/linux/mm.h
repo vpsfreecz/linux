@@ -2825,6 +2825,13 @@ static inline struct ptdesc *pagetable_alloc(gfp_t gfp, unsigned int order)
 	return page_ptdesc(page);
 }
 
+static inline struct ptdesc *pagetable_alloc_node(unsigned int nid, gfp_t gfp, unsigned int order)
+{
+	struct page *page = alloc_pages_node(nid, gfp | __GFP_COMP, order);
+
+	return page_ptdesc(page);
+}
+
 /**
  * pagetable_free - Free pagetables
  * @pt:	The page table descriptor

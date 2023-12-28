@@ -140,6 +140,23 @@ static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 	}
 	return ptdesc_address(ptdesc);
 }
+
+static inline pmd_t *pmd_alloc_one_node(unsigned int nid, struct mm_struct *mm, unsigned long addr)
+{
+	struct ptdesc *ptdesc;
+	gfp_t gfp = GFP_PGTABLE_USER;
+
+	if (mm == &init_mm)
+		gfp = GFP_PGTABLE_KERNEL;
+	ptdesc = pagetable_alloc_node(nid, gfp, 0);
+	if (!ptdesc)
+		return NULL;
+	if (!pagetable_pmd_ctor(ptdesc)) {
+		pagetable_free(ptdesc);
+		return NULL;
+	}
+	return ptdesc_address(ptdesc);
+}
 #endif
 
 #ifndef __HAVE_ARCH_PMD_FREE
@@ -172,6 +189,21 @@ static inline pud_t *__pud_alloc_one(struct mm_struct *mm, unsigned long addr)
 	return ptdesc_address(ptdesc);
 }
 
+static inline pud_t *__pud_alloc_one_node(unsigned int nid, struct mm_struct *mm, unsigned long addr)
+{
+	gfp_t gfp = GFP_PGTABLE_USER;
+	struct ptdesc *ptdesc;
+
+	if (mm == &init_mm)
+		gfp = GFP_PGTABLE_KERNEL;
+	gfp &= ~__GFP_HIGHMEM;
+
+	ptdesc = pagetable_alloc_node(nid, gfp, 0);
+	if (!ptdesc)
+		return NULL;
+	return ptdesc_address(ptdesc);
+}
+
 #ifndef __HAVE_ARCH_PUD_ALLOC_ONE
 /**
  * pud_alloc_one - allocate memory for a PUD-level page table
@@ -185,6 +217,12 @@ static inline pud_t *__pud_alloc_one(struct mm_struct *mm, unsigned long addr)
 static inline pud_t *pud_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
 	return __pud_alloc_one(mm, addr);
+}
+
+static inline pud_t *pud_alloc_one_node(unsigned int nid,
+					struct mm_struct *mm, unsigned long addr)
+{
+	return __pud_alloc_one_node(nid, mm, addr);
 }
 #endif
 
