@@ -22,6 +22,7 @@
 #include <linux/cc_platform.h>
 #include <linux/set_memory.h>
 #include <linux/memregion.h>
+#include <linux/numa_replication.h>
 
 #include <asm/e820/api.h>
 #include <asm/processor.h>
@@ -1790,7 +1791,7 @@ out:
 	return ret;
 }
 
-static int change_page_attr_set_clr(unsigned long *addr, int numpages,
+static int change_page_attr_set_clr_pgd(pgd_t *pgd, unsigned long *addr, int numpages,
 				    pgprot_t mask_set, pgprot_t mask_clr,
 				    int force_split, int in_flag,
 				    struct page **pages)
@@ -1845,6 +1846,7 @@ static int change_page_attr_set_clr(unsigned long *addr, int numpages,
 	cpa.flags = in_flag;
 	cpa.curpage = 0;
 	cpa.force_split = force_split;
+	cpa.pgd = pgd;
 
 	ret = __change_page_attr_set_clr(&cpa, 1);
 
@@ -1873,6 +1875,15 @@ out:
 	return ret;
 }
 
+static int change_page_attr_set_clr(unsigned long *addr, int numpages,
+				    pgprot_t mask_set, pgprot_t mask_clr,
+				    int force_split, int in_flag,
+				    struct page **pages)
+{
+	return change_page_attr_set_clr_pgd(NULL, addr, numpages, mask_set,
+					    mask_clr, force_split, in_flag, pages);
+}
+
 static inline int change_page_attr_set(unsigned long *addr, int numpages,
 				       pgprot_t mask, int array)
 {
@@ -1880,10 +1891,24 @@ static inline int change_page_attr_set(unsigned long *addr, int numpages,
 		(array ? CPA_ARRAY : 0), NULL);
 }
 
+static inline int change_page_attr_set_pgd(pgd_t *pgd, unsigned long *addr, int numpages,
+				       pgprot_t mask, int array)
+{
+	return change_page_attr_set_clr_pgd(pgd, addr, numpages, mask, __pgprot(0), 0,
+		(array ? CPA_ARRAY : 0), NULL);
+}
+
 static inline int change_page_attr_clear(unsigned long *addr, int numpages,
 					 pgprot_t mask, int array)
 {
 	return change_page_attr_set_clr(addr, numpages, __pgprot(0), mask, 0,
+		(array ? CPA_ARRAY : 0), NULL);
+}
+
+static inline int change_page_attr_clear_pgd(pgd_t *pgd, unsigned long *addr, int numpages,
+					 pgprot_t mask, int array)
+{
+	return change_page_attr_set_clr_pgd(pgd, addr, numpages, __pgprot(0), mask, 0,
 		(array ? CPA_ARRAY : 0), NULL);
 }
 
@@ -2121,6 +2146,129 @@ int set_memory_global(unsigned long addr, int numpages)
 	return change_page_attr_set(&addr, numpages,
 				    __pgprot(_PAGE_GLOBAL), 0);
 }
+
+#ifdef CONFIG_KERNEL_REPLICATION
+int numa_set_memory_x(unsigned long addr, int numpages)
+{
+	int ret = 0;
+	int nid;
+
+	if (!(__supported_pte_mask & _PAGE_NX))
+		return 0;
+	for_each_replica(nid)
+		ret |= change_page_attr_clear_pgd(init_mm.pgd_numa[nid], &addr, numpages,
+						 __pgprot(_PAGE_NX), 0);
+
+	return ret;
+}
+
+int numa_set_memory_nx(unsigned long addr, int numpages)
+{
+	int ret = 0;
+	int nid;
+
+	if (!(__supported_pte_mask & _PAGE_NX))
+		return 0;
+	for_each_replica(nid)
+		ret |= change_page_attr_set_pgd(init_mm.pgd_numa[nid], &addr, numpages,
+						__pgprot(_PAGE_NX), 0);
+
+	return ret;
+}
+
+int numa_set_memory_ro(unsigned long addr, int numpages)
+{
+	int ret = 0;
+	int nid;
+
+	for_each_replica(nid)
+		ret |= change_page_attr_clear_pgd(init_mm.pgd_numa[nid], &addr, numpages,
+						  __pgprot(_PAGE_RW), 0);
+
+	return ret;
+}
+
+int numa_set_memory_rox(unsigned long addr, int numpages)
+{
+	int nid;
+
+	int ret = 0;
+	pgprot_t clr = __pgprot(_PAGE_RW);
+
+	if (__supported_pte_mask & _PAGE_NX)
+		clr.pgprot |= _PAGE_NX;
+
+	for_each_online_node(nid) {
+		ret |= change_page_attr_clear_pgd(init_mm.pgd_numa[nid], &addr, numpages, clr, 0);
+		if (!is_text_replicated())
+			break;
+	}
+	return ret;
+}
+
+int numa_set_memory_rw(unsigned long addr, int numpages)
+{
+	int ret = 0;
+	int nid;
+
+	for_each_replica(nid)
+		ret |= change_page_attr_set_pgd(init_mm.pgd_numa[nid], &addr, numpages,
+						__pgprot(_PAGE_RW), 0);
+
+	return ret;
+}
+
+int numa_set_memory_np(unsigned long addr, int numpages)
+{
+	int ret = 0;
+	int nid;
+
+	for_each_replica(nid)
+		ret |= change_page_attr_clear_pgd(init_mm.pgd_numa[nid], &addr, numpages,
+						  __pgprot(_PAGE_PRESENT), 0);
+
+	return ret;
+}
+
+int numa_set_memory_np_noalias(unsigned long addr, int numpages)
+{
+	int ret = 0;
+	int nid;
+	int cpa_flags = CPA_NO_CHECK_ALIAS;
+
+	for_each_replica(nid)
+		ret |= change_page_attr_set_clr_pgd(init_mm.pgd_numa[nid], &addr, numpages,
+						    __pgprot(0),
+						    __pgprot(_PAGE_PRESENT), 0,
+						    cpa_flags, NULL);
+
+	return ret;
+}
+
+int numa_set_memory_global(unsigned long addr, int numpages)
+{
+	int ret = 0;
+	int nid;
+
+	for_each_replica(nid)
+		ret |= change_page_attr_set_pgd(init_mm.pgd_numa[nid], &addr, numpages,
+						__pgprot(_PAGE_GLOBAL), 0);
+
+	return ret;
+}
+
+int numa_set_memory_nonglobal(unsigned long addr, int numpages)
+{
+	int ret = 0;
+	int nid;
+
+	for_each_replica(nid)
+		ret |= change_page_attr_clear_pgd(init_mm.pgd_numa[nid], &addr, numpages,
+						  __pgprot(_PAGE_GLOBAL), 0);
+
+	return ret;
+}
+#endif
 
 /*
  * __set_memory_enc_pgtable() is used for the hypervisors that get

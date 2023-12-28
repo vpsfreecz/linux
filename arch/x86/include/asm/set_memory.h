@@ -7,7 +7,9 @@
 #include <asm-generic/set_memory.h>
 
 #define set_memory_rox set_memory_rox
+#define numa_set_memory_rox numa_set_memory_rox
 int set_memory_rox(unsigned long addr, int numpages);
+int numa_set_memory_rox(unsigned long addr, int numpages);
 
 /*
  * The set_memory_* API can be used to change various attributes of a virtual
@@ -57,6 +59,18 @@ int set_memory_global(unsigned long addr, int numpages);
 int set_pages_array_uc(struct page **pages, int addrinarray);
 int set_pages_array_wc(struct page **pages, int addrinarray);
 int set_pages_array_wb(struct page **pages, int addrinarray);
+
+#ifdef CONFIG_KERNEL_REPLICATION
+int numa_set_memory_np(unsigned long addr, int numpages);
+int numa_set_memory_np_noalias(unsigned long addr, int numpages);
+int numa_set_memory_global(unsigned long addr, int numpages);
+int numa_set_memory_nonglobal(unsigned long addr, int numpages);
+#else
+#define numa_set_memory_np set_memory_np
+#define numa_set_memory_np_noalias set_memory_np_noalias
+#define numa_set_memory_global set_memory_global
+#define numa_set_memory_nonglobal set_memory_nonglobal
+#endif /* CONFIG_KERNEL_REPLICATION */
 
 /*
  * For legacy compatibility with the old APIs, a few functions

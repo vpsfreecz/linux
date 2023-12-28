@@ -24,6 +24,16 @@ static inline int set_memory_rox(unsigned long addr, int numpages)
 }
 #endif
 
+#ifndef numa_set_memory_rox
+static inline int numa_set_memory_rox(unsigned long addr, int numpages)
+{
+	int ret = numa_set_memory_ro(addr, numpages);
+	if (ret)
+		return ret;
+	return numa_set_memory_x(addr, numpages);
+}
+#endif
+
 #ifndef CONFIG_ARCH_HAS_SET_DIRECT_MAP
 static inline int set_direct_map_invalid_noflush(struct page *page)
 {
