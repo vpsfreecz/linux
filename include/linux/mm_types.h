@@ -22,6 +22,8 @@
 
 #include <asm/mmu.h>
 
+#include <linux/numa.h>
+
 #ifndef AT_VECTOR_SIZE_ARCH
 #define AT_VECTOR_SIZE_ARCH 0
 #endif
@@ -701,7 +703,14 @@ struct mm_struct {
 		unsigned long mmap_compat_legacy_base;
 #endif
 		unsigned long task_size;	/* size of task vm space */
-		pgd_t * pgd;
+#ifndef CONFIG_KERNEL_REPLICATION
+		pgd_t *pgd;
+#else
+		union {
+			pgd_t *pgd;
+			pgd_t *pgd_numa[MAX_NUMNODES];
+		};
+#endif
 
 #ifdef CONFIG_MEMBARRIER
 		/**
