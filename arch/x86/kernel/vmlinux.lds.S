@@ -159,11 +159,11 @@ SECTIONS
 	} :text = 0xcccccccc
 
 	/* End of text section, which should occupy whole number of pages */
+	. = ALIGN(HPAGE_SIZE); //For kernel replication
 	_etext = .;
-	. = ALIGN(PAGE_SIZE);
 
 	X86_ALIGN_RODATA_BEGIN
-	RO_DATA(PAGE_SIZE)
+	RO_DATA(HPAGE_SIZE)
 	X86_ALIGN_RODATA_END
 
 	/* Data */
