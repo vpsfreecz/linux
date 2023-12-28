@@ -18,6 +18,7 @@
 #include <linux/mmu_context.h>
 #include <linux/bsearch.h>
 #include <linux/sync_core.h>
+#include <linux/numa_replication.h>
 #include <asm/text-patching.h>
 #include <asm/alternative.h>
 #include <asm/sections.h>
@@ -1683,6 +1684,7 @@ void __init_or_module text_poke_early(void *addr, const void *opcode,
 				      size_t len)
 {
 	unsigned long flags;
+	int nid;
 
 	if (boot_cpu_has(X86_FEATURE_NX) &&
 	    is_module_text_address((unsigned long)addr)) {
@@ -1693,8 +1695,19 @@ void __init_or_module text_poke_early(void *addr, const void *opcode,
 		 */
 		memcpy(addr, opcode, len);
 	} else {
+		unsigned long iaddr = (unsigned long)addr;
+
 		local_irq_save(flags);
-		memcpy(addr, opcode, len);
+		if (is_text_replicated() && is_kernel_text(iaddr)) {
+			for_each_replica(nid) {
+				void *vaddr = numa_addr_in_replica(addr, nid);
+
+				memcpy(vaddr, opcode, len);
+			}
+		} else {
+			memcpy(addr, opcode, len);
+		}
+		local_irq_restore(flags);
 		sync_core();
 		local_irq_restore(flags);
 
@@ -1788,36 +1801,21 @@ typedef void text_poke_f(void *dst, const void *src, size_t len);
 
 static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t len)
 {
+	int nid;
 	bool cross_page_boundary = offset_in_page(addr) + len > PAGE_SIZE;
 	struct page *pages[2] = {NULL};
 	temp_mm_state_t prev;
 	unsigned long flags;
+	int size_in_poking_mm = PAGE_SIZE;
 	pte_t pte, *ptep;
 	spinlock_t *ptl;
 	pgprot_t pgprot;
-
+	bool has_replica = numa_addr_has_replica(addr);
 	/*
 	 * While boot memory allocator is running we cannot use struct pages as
 	 * they are not yet initialized. There is no way to recover.
 	 */
 	BUG_ON(!after_bootmem);
-
-	if (!core_kernel_text((unsigned long)addr)) {
-		pages[0] = vmalloc_to_page(addr);
-		if (cross_page_boundary)
-			pages[1] = vmalloc_to_page(addr + PAGE_SIZE);
-	} else {
-		pages[0] = virt_to_page(addr);
-		WARN_ON(!PageReserved(pages[0]));
-		if (cross_page_boundary)
-			pages[1] = virt_to_page(addr + PAGE_SIZE);
-	}
-	/*
-	 * If something went wrong, crash and burn since recovery paths are not
-	 * implemented.
-	 */
-	BUG_ON(!pages[0] || (cross_page_boundary && !pages[1]));
-
 	/*
 	 * Map the page without the global bit, as TLB flushing is done with
 	 * flush_tlb_mm_range(), which is intended for non-global PTEs.
@@ -1836,48 +1834,59 @@ static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t l
 
 	local_irq_save(flags);
 
-	pte = mk_pte(pages[0], pgprot);
-	set_pte_at(poking_mm, poking_addr, ptep, pte);
+	for_each_replica(nid) {
+		prev = use_temporary_mm(poking_mm);
 
-	if (cross_page_boundary) {
-		pte = mk_pte(pages[1], pgprot);
-		set_pte_at(poking_mm, poking_addr + PAGE_SIZE, ptep + 1, pte);
+		pages[0] = walk_to_page_node(nid, addr);
+		if (cross_page_boundary)
+			pages[1] = walk_to_page_node(nid, addr + PAGE_SIZE);
+
+		BUG_ON(!pages[0] || (cross_page_boundary && !pages[1]));
+
+		pte = mk_pte(pages[0], pgprot);
+		set_pte_at(poking_mm, poking_addr, ptep, pte);
+
+		if (cross_page_boundary) {
+			pte = mk_pte(pages[1], pgprot);
+			set_pte_at(poking_mm, poking_addr + PAGE_SIZE, ptep + 1, pte);
+		}
+		/*
+		 * Compiler barrier to ensure that PTE is set before func()
+		 */
+		barrier();
+
+		kasan_disable_current();
+		func((u8 *)poking_addr + offset_in_page(addr), src, len);
+		kasan_enable_current();
+
+		/*
+		 * Ensure that the PTE is only cleared after the instructions of memcpy
+		 * were issued by using a compiler barrier.
+		 */
+		barrier();
+
+		pte_clear(poking_mm, poking_addr, ptep);
+		if (cross_page_boundary)
+			pte_clear(poking_mm, poking_addr + PAGE_SIZE, ptep + 1);
+
+		/*
+		 * Loading the previous page-table hierarchy requires a serializing
+		 * instruction that already allows the core to see the updated version.
+		 * Xen-PV is assumed to serialize execution in a similar manner.
+		 */
+		unuse_temporary_mm(prev);
+
+		/*
+		 * Flushing the TLB might involve IPIs, which would require enabled
+		 * IRQs, but not if the mm is not used, as it is in this point.
+		 */
+
+		flush_tlb_mm_range(poking_mm, poking_addr, poking_addr +
+				(cross_page_boundary ? 2 : 1) * size_in_poking_mm,
+				PAGE_SHIFT, false);
+		if (!has_replica)
+			break;
 	}
-
-	/*
-	 * Loading the temporary mm behaves as a compiler barrier, which
-	 * guarantees that the PTE will be set at the time memcpy() is done.
-	 */
-	prev = use_temporary_mm(poking_mm);
-
-	kasan_disable_current();
-	func((u8 *)poking_addr + offset_in_page(addr), src, len);
-	kasan_enable_current();
-
-	/*
-	 * Ensure that the PTE is only cleared after the instructions of memcpy
-	 * were issued by using a compiler barrier.
-	 */
-	barrier();
-
-	pte_clear(poking_mm, poking_addr, ptep);
-	if (cross_page_boundary)
-		pte_clear(poking_mm, poking_addr + PAGE_SIZE, ptep + 1);
-
-	/*
-	 * Loading the previous page-table hierarchy requires a serializing
-	 * instruction that already allows the core to see the updated version.
-	 * Xen-PV is assumed to serialize execution in a similar manner.
-	 */
-	unuse_temporary_mm(prev);
-
-	/*
-	 * Flushing the TLB might involve IPIs, which would require enabled
-	 * IRQs, but not if the mm is not used, as it is in this point.
-	 */
-	flush_tlb_mm_range(poking_mm, poking_addr, poking_addr +
-			   (cross_page_boundary ? 2 : 1) * PAGE_SIZE,
-			   PAGE_SHIFT, false);
 
 	if (func == text_poke_memcpy) {
 		/*
