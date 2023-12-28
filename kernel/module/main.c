@@ -2718,6 +2718,12 @@ out:
 	return err;
 }
 
+static void module_replicate_rodata(struct module *mod)
+{
+	module_replicate_numa(mod->mem[MOD_TEXT].base);
+	module_replicate_numa(mod->mem[MOD_RODATA].base);
+}
+
 static int complete_formation(struct module *mod, struct load_info *info)
 {
 	int err;
@@ -2732,6 +2738,8 @@ static int complete_formation(struct module *mod, struct load_info *info)
 	/* These rely on module_mutex for list integrity. */
 	module_bug_finalize(info->hdr, info->sechdrs, mod);
 	module_cfi_finalize(info->hdr, info->sechdrs, mod);
+
+	module_replicate_rodata(mod);
 
 	module_enable_ro(mod, false);
 	module_enable_nx(mod);

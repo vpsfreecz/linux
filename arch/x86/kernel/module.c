@@ -65,27 +65,52 @@ static unsigned long int get_module_load_offset(void)
 }
 #endif
 
-void *module_alloc(unsigned long size)
+static void *__module_alloc(unsigned long size, unsigned long vm_flags, int nid)
 {
 	gfp_t gfp_mask = GFP_KERNEL;
 	void *p;
 
 	if (PAGE_ALIGN(size) > MODULES_LEN)
 		return NULL;
-
+	/*
+	 * In case replicas vmalloc should be able to unmap/reclaim them
+	 * somehow. Due to this fact it is necessary to account suck pages
+	 * separately. __vmalloc_not_replicated_per_pgd_range() function
+	 * perform this accounting using internal vmalloc buffer with size
+	 * equal to nr_pages * nr_online_nodes.
+	 */
 	p = __vmalloc_node_range(size, MODULE_ALIGN,
 				 MODULES_VADDR + get_module_load_offset(),
 				 MODULES_END, gfp_mask, PAGE_KERNEL,
-				 VM_FLUSH_RESET_PERMS | VM_DEFER_KMEMLEAK,
-				 NUMA_NO_NODE, __builtin_return_address(0));
+				 VM_FLUSH_RESET_PERMS | VM_DEFER_KMEMLEAK | vm_flags,
+				 nid, __builtin_return_address(0));
 
 	if (p && (kasan_alloc_module_shadow(p, size, gfp_mask) < 0)) {
 		vfree(p);
 		return NULL;
 	}
-
 	return p;
 }
+
+#ifdef CONFIG_KERNEL_REPLICATION
+void *module_alloc(unsigned long size)
+{
+	return __module_alloc(size, VM_NUMA_SHARED, 0);
+}
+
+void module_replicate_numa(void *ptr)
+{
+	gfp_t gfp_mask = GFP_KERNEL;
+
+	__vmalloc_node_replicate_range(ptr, gfp_mask,
+			PAGE_KERNEL, VM_DEFER_KMEMLEAK);
+}
+#else
+void *module_alloc(unsigned long size)
+{
+	return __module_alloc(size, 0, NUMA_NO_NODE);
+}
+#endif /*CONFIG_KERNEL_REPLICATION*/
 
 #ifdef CONFIG_X86_32
 int apply_relocate(Elf32_Shdr *sechdrs,
