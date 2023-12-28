@@ -456,7 +456,7 @@ void *alloc_insn_page(void)
 	 * TODO: Once additional kernel code protection mechanisms are set, ensure
 	 * that the page was not maliciously altered and it is still zeroed.
 	 */
-	set_memory_rox((unsigned long)page, 1);
+	numa_set_memory_rox((unsigned long)page, 1);
 
 	return page;
 }

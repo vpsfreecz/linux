@@ -917,15 +917,15 @@ void free_init_pages(const char *what, unsigned long begin, unsigned long end)
 		 * corresponding pages will be unmapped.
 		 */
 		kmemleak_free_part((void *)begin, end - begin);
-		set_memory_np(begin, (end - begin) >> PAGE_SHIFT);
+		numa_set_memory_np(begin, (end - begin) >> PAGE_SHIFT);
 	} else {
 		/*
 		 * We just marked the kernel text read only above, now that
 		 * we are going to free part of that, we need to make that
 		 * writeable and non-executable first.
 		 */
-		set_memory_nx(begin, (end - begin) >> PAGE_SHIFT);
-		set_memory_rw(begin, (end - begin) >> PAGE_SHIFT);
+		numa_set_memory_nx(begin, (end - begin) >> PAGE_SHIFT);
+		numa_set_memory_rw(begin, (end - begin) >> PAGE_SHIFT);
 
 		free_reserved_area((void *)begin, (void *)end,
 				   POISON_FREE_INITMEM, what);
@@ -961,7 +961,7 @@ void free_kernel_image_pages(const char *what, void *begin, void *end)
 	 * which can't be treated in this way for obvious reasons.
 	 */
 	if (IS_ENABLED(CONFIG_X86_64) && cpu_feature_enabled(X86_FEATURE_PTI))
-		set_memory_np_noalias(begin_ul, len_pages);
+		numa_set_memory_np_noalias(begin_ul, len_pages);
 }
 
 void __ref free_initmem(void)

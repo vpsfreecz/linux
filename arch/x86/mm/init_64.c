@@ -1379,7 +1379,7 @@ void mark_rodata_ro(void)
 
 	printk(KERN_INFO "Write protecting the kernel read-only data: %luk\n",
 	       (end - start) >> 10);
-	set_memory_ro(start, (end - start) >> PAGE_SHIFT);
+	numa_set_memory_ro(start, (end - start) >> PAGE_SHIFT);
 
 	kernel_set_to_readonly = 1;
 
@@ -1396,7 +1396,7 @@ void mark_rodata_ro(void)
 	 * has been zapped already via cleanup_highmem().
 	 */
 	all_end = roundup((unsigned long)_brk_end, PMD_SIZE);
-	set_memory_nx(text_end, (all_end - text_end) >> PAGE_SHIFT);
+	numa_set_memory_nx(text_end, (all_end - text_end) >> PAGE_SHIFT);
 
 	set_ftrace_ops_ro();
 

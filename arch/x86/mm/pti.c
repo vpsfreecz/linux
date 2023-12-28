@@ -580,7 +580,7 @@ static void pti_clone_kernel_text(void)
 	 */
 
 	/* Set the global bit for normal non-__init kernel text: */
-	set_memory_global(start, (end_global - start) >> PAGE_SHIFT);
+	numa_set_memory_global(start, (end_global - start) >> PAGE_SHIFT);
 }
 
 static void pti_set_kernel_image_nonglobal(void)
