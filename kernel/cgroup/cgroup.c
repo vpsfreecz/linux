@@ -211,11 +211,17 @@ static bool have_favordynmods __ro_after_init = IS_ENABLED(CONFIG_CGROUP_FAVOR_D
 
 /* cgroup namespace for init task */
 struct cgroup_namespace init_cgroup_ns = {
-	.ns.count	= REFCOUNT_INIT(2),
+	.ns.count	= REFCOUNT_INIT(3),
+	.parent		= &init_cgroup_ns,
 	.user_ns	= &init_user_ns,
 	.ns.ops		= &cgroupns_operations,
 	.ns.inum	= PROC_CGROUP_INIT_INO,
 	.root_cset	= &init_css_set,
+	.loadavg_virt_enabled = false,
+	.cgns_avenrun_list = LIST_HEAD_INIT(init_cgroup_ns.cgns_avenrun_list),
+	.nr_uninterruptible = 0,
+	.cgns_avenrun_lock = __RAW_SPIN_LOCK_UNLOCKED(init_cgroup_ns.cgns_avenrun_lock),
+	.avenrun	= { 0, 0, 0 },
 };
 
 static struct file_system_type cgroup2_fs_type;

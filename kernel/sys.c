@@ -2792,16 +2792,19 @@ static int do_sysinfo(struct sysinfo *info)
 	unsigned int mem_unit, bitcount;
 	struct timespec64 tp;
 	struct mem_cgroup *memcg;
+	uint nr_t = nr_threads;
 
 	memset(info, 0, sizeof(struct sysinfo));
 
 	ktime_get_boottime_ts64(&tp);
 	timens_add_boottime(&tp);
 	info->uptime = tp.tv_sec + (tp.tv_nsec ? 1 : 0);
+	if (get_avenrun_fake(current, info->loads, 0, SI_LOAD_SHIFT - FSHIFT))
+		nr_t = cgroup_ns_nr_threads(current);
+	else
+		get_avenrun(info->loads, 0, SI_LOAD_SHIFT - FSHIFT);
 
-	get_avenrun(info->loads, 0, SI_LOAD_SHIFT - FSHIFT);
-
-	info->procs = nr_threads;
+	info->procs = nr_t;
 
 	si_meminfo(info);
 	si_swapinfo(info);
