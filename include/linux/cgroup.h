@@ -766,11 +766,21 @@ static inline void cgroup_sk_free(struct sock_cgroup_data *skcd) {}
 
 #endif	/* CONFIG_CGROUP_DATA */
 
+struct task_group;
 struct cgroup_namespace {
 	struct ns_common	ns;
+	struct cgroup_namespace	*parent;
 	struct user_namespace	*user_ns;
 	struct ucounts		*ucounts;
 	struct css_set          *root_cset;
+
+	bool			loadavg_virt_enabled;
+	struct task_group	*loadavg_virt_task_group;
+	struct list_head	cgns_avenrun_list;
+	unsigned long		nr_threads;
+	raw_spinlock_t		cgns_avenrun_lock; /* Protects these below: */
+	unsigned long		nr_uninterruptible;
+	unsigned long		avenrun[3];
 };
 
 extern struct cgroup_namespace init_cgroup_ns;

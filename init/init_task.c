@@ -86,6 +86,7 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.mm		= NULL,
 	.active_mm	= &init_mm,
 	.faults_disabled_mapping = NULL,
+	.sched_contributed_to_load = NULL,
 	.restart_block	= {
 		.fn = do_no_restart_syscall,
 	},

@@ -2248,6 +2248,8 @@ __latent_entropy struct task_struct *copy_process(
 	 */
 	p->clear_child_tid = (clone_flags & CLONE_CHILD_CLEARTID) ? args->child_tid : NULL;
 
+	p->sched_contributed_to_load = NULL;
+
 	ftrace_graph_init_task(p);
 
 	rt_mutex_init_task(p);
@@ -2606,6 +2608,7 @@ __latent_entropy struct task_struct *copy_process(
 		}
 		attach_pid(p, PIDTYPE_PID);
 		nr_threads++;
+		inc_cgns_nr_threads(current);
 	}
 	total_forks++;
 	hlist_del_init(&delayed.node);
