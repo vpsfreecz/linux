@@ -65,6 +65,7 @@
 #include <linux/wait_api.h>
 #include <linux/workqueue_api.h>
 #include <linux/user_namespace.h>
+
 #include <linux/vpsadminos.h>
 
 #ifdef CONFIG_PREEMPT_DYNAMIC
@@ -3771,6 +3772,7 @@ static inline void ttwu_do_wakeup(struct task_struct *p)
 	trace_sched_wakeup(p);
 }
 
+void dec_cgns_nr_uninterruptible(struct task_struct *p);
 static void
 ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 		 struct rq_flags *rf)
@@ -3779,8 +3781,10 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 
 	lockdep_assert_rq_held(rq);
 
-	if (p->sched_contributes_to_load)
+	if (p->sched_contributes_to_load) {
 		rq->nr_uninterruptible--;
+		dec_cgns_nr_uninterruptible(p);
+	}
 
 #ifdef CONFIG_SMP
 	if (wake_flags & WF_MIGRATED)
@@ -6540,6 +6544,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 # define SM_MASK_PREEMPT	SM_PREEMPT
 #endif
 
+void inc_cgns_nr_uninterruptible(struct task_struct *p);
 /*
  * __schedule() is the main scheduler function.
  *
@@ -6639,9 +6644,10 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 				!(prev_state & TASK_NOLOAD) &&
 				!(prev_state & TASK_FROZEN);
 
-			if (prev->sched_contributes_to_load)
+			if (prev->sched_contributes_to_load) {
 				rq->nr_uninterruptible++;
-
+				inc_cgns_nr_uninterruptible(prev);
+			}
 			/*
 			 * __schedule()			ttwu()
 			 *   prev_state = prev->state;    if (p->on_rq && ...)
@@ -10849,6 +10855,230 @@ static u64 cpu_shares_read_u64(struct cgroup_subsys_state *css,
 	struct task_group *tg = css_tg(css);
 
 	return (u64) scale_load_down(tg->shares);
+}
+
+LIST_HEAD(cgns_avenrun_list);
+DEFINE_SPINLOCK(cgns_avenrun_lock);
+
+void cgroup_ns_track_loadavg(struct cgroup_namespace *ns)
+{
+	if (ns == &init_cgroup_ns)
+		return;
+
+	while (ns->parent != &init_cgroup_ns)
+		ns = ns->parent;
+
+	if (ns->loadavg_virt_enabled)
+		return;
+
+	spin_lock(&cgns_avenrun_lock);
+	list_add(&ns->cgns_avenrun_list, &cgns_avenrun_list);
+	ns->loadavg_virt_enabled = 1;
+	spin_unlock(&cgns_avenrun_lock);
+}
+
+void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns)
+{
+	if (ns == &init_cgroup_ns)
+		return;
+
+	if (!ns->loadavg_virt_enabled)
+		return;
+
+	spin_lock(&cgns_avenrun_lock);
+	list_del_init(&ns->cgns_avenrun_list);
+	ns->loadavg_virt_enabled = 0;
+	spin_unlock(&cgns_avenrun_lock);
+}
+
+unsigned long cgns_nr_running(struct cgroup_namespace *ns)
+{
+	unsigned long nr_active = 0;
+	struct task_group *tg = css_tg(ns->root_cset->subsys[cpu_cgrp_id]);
+	int i;
+
+	for_each_possible_cpu(i) {
+#ifdef CONFIG_FAIR_GROUP_SCHED
+		nr_active += tg->cfs_rq[i]->h_nr_running;
+#endif
+#ifdef CONFIG_RT_GROUP_SCHED
+		nr_active += tg->rt_rq[i]->rt_nr_running;
+#endif
+	}
+	return nr_active + atomic_long_read(&ns->nr_uninterruptible);
+}
+
+unsigned long cgroup_ns_nr_running(struct task_struct *p)
+{
+	struct cgroup_namespace *ns;
+
+	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
+		return nr_running();
+
+	ns = p->nsproxy->cgroup_ns;
+	while (ns->parent != &init_cgroup_ns)
+		ns = ns->parent;
+
+	if (!ns->loadavg_virt_enabled)
+		return nr_running();
+
+	return cgns_nr_running(ns);
+}
+
+void inc_cgns_nr_threads(struct task_struct *p)
+{
+	struct cgroup_namespace *ns;
+
+	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
+		return;
+
+	ns = p->nsproxy->cgroup_ns;
+	while (ns->parent != &init_cgroup_ns)
+		ns = ns->parent;
+
+	if (!ns->loadavg_virt_enabled)
+		return;
+
+	ns->nr_threads++;
+}
+
+void dec_cgns_nr_threads(struct task_struct *p)
+{
+	struct cgroup_namespace *ns;
+
+	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
+		return;
+
+	ns = p->nsproxy->cgroup_ns;
+	while (ns->parent != &init_cgroup_ns)
+		ns = ns->parent;
+
+	if (!ns->loadavg_virt_enabled)
+		return;
+
+	ns->nr_threads--;
+}
+
+unsigned long cgroup_ns_nr_threads(struct task_struct *p)
+{
+	struct cgroup_namespace *ns;
+
+	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
+		return nr_threads;
+
+	ns = p->nsproxy->cgroup_ns;
+	while (ns->parent != &init_cgroup_ns)
+		ns = ns->parent;
+
+	if (!ns->loadavg_virt_enabled)
+		return nr_threads;
+
+	return ns->nr_threads;
+}
+
+void inc_cgns_nr_uninterruptible(struct task_struct *p)
+{
+	struct cgroup_namespace *ns;
+
+	if (p->nsproxy && p->nsproxy->cgroup_ns)
+		ns = p->nsproxy->cgroup_ns;
+	else
+		return;
+
+	if (ns == &init_cgroup_ns)
+		return;
+
+	while (ns->parent != &init_cgroup_ns)
+		ns = ns->parent;
+
+	if (ns->loadavg_virt_enabled) {
+		atomic_long_inc(&ns->nr_uninterruptible);
+		p->sched_contributed_to_load = ns;
+	}
+}
+
+void dec_cgns_nr_uninterruptible(struct task_struct *p)
+{
+	struct cgroup_namespace *ns;
+
+	ns = p->sched_contributed_to_load;
+	if (!ns)
+		return;
+	BUG_ON(!ns->loadavg_virt_enabled);
+
+	atomic_long_dec(&ns->nr_uninterruptible);
+	p->sched_contributed_to_load = NULL;
+}
+
+void cgns_calc_avenrun(void)
+{
+	struct cgroup_namespace *ns;
+	unsigned long nr_active;
+
+	spin_lock(&cgns_avenrun_lock);
+	list_for_each_entry(ns, &cgns_avenrun_list, cgns_avenrun_list) {
+		nr_active = cgns_nr_running(ns);
+		nr_active = nr_active > 0 ? nr_active * FIXED_1 : 0;
+		ns->avenrun[0] = calc_load(ns->avenrun[0], EXP_1, nr_active);
+		ns->avenrun[1] = calc_load(ns->avenrun[1], EXP_5, nr_active);
+		ns->avenrun[2] = calc_load(ns->avenrun[2], EXP_15, nr_active);
+	}
+	spin_unlock(&cgns_avenrun_lock);
+}
+
+void get_avenrun_fake_ns(struct cgroup_namespace *ns, unsigned long *loads, unsigned long offset, int shift)
+{
+	struct task_group *tg;
+
+	tg = css_tg(ns->root_cset->subsys[cpu_cgrp_id]);
+
+	loads[0] = (ns->avenrun[0] + offset) << shift;
+	loads[1] = (ns->avenrun[1] + offset) << shift;
+	loads[2] = (ns->avenrun[2] + offset) << shift;
+}
+
+int get_avenrun_fake(struct task_struct *p, unsigned long *loads, unsigned long offset, int shift)
+{
+	struct cgroup_namespace *ns;
+
+	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
+		return 0;
+
+	ns = p->nsproxy->cgroup_ns;
+	while (ns->parent != &init_cgroup_ns)
+		ns = ns->parent;
+
+	if (!ns->loadavg_virt_enabled)
+		return 0;
+
+	get_avenrun_fake_ns(ns, loads, offset, shift);
+	return 1;
+}
+
+int virt_loadavg_proc_show(struct seq_file *m, void *v)
+{
+	unsigned long avnrun[3];
+	int nr_r; uint nr_t;
+	struct cgroup_namespace *ns;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	spin_lock(&cgns_avenrun_lock);
+	list_for_each_entry(ns, &cgns_avenrun_list, cgns_avenrun_list) {
+		get_avenrun_fake_ns(ns, avnrun, FIXED_1/200, 0);
+		nr_r = cgns_nr_running(ns);
+		nr_t = ns->nr_threads;
+
+		seq_printf(m, "%u\t%lu.%02lu %lu.%02lu %lu.%02lu %u/%d\n",
+			ns->ns.inum,
+			LOAD_INT(avnrun[0]), LOAD_FRAC(avnrun[0]),
+			LOAD_INT(avnrun[1]), LOAD_FRAC(avnrun[1]),
+			LOAD_INT(avnrun[2]), LOAD_FRAC(avnrun[2]),
+			nr_r, nr_t);
+	}
+	spin_unlock(&cgns_avenrun_lock);
+	return 0;
 }
 
 #ifdef CONFIG_CFS_BANDWIDTH
