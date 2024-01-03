@@ -34,14 +34,23 @@ static struct cgroup_namespace *alloc_cgroup_ns(void)
 	}
 	refcount_set(&new_ns->ns.count, 1);
 	new_ns->ns.ops = &cgroupns_operations;
+
+	INIT_LIST_HEAD(&new_ns->cgns_avenrun_list);
+	atomic_long_set(&new_ns->nr_uninterruptible, 0);
+	new_ns->avenrun[0] = 0;
+	new_ns->avenrun[1] = 0;
+	new_ns->avenrun[2] = 0;
+
 	return new_ns;
 }
 
 void free_cgroup_ns(struct cgroup_namespace *ns)
 {
+	cgroup_ns_untrack_loadavg(ns);
 	put_css_set(ns->root_cset);
 	dec_cgroup_namespaces(ns->ucounts);
 	put_user_ns(ns->user_ns);
+	put_cgroup_ns(ns->parent);
 	ns_free_inum(&ns->ns);
 	kfree(ns);
 }
@@ -86,6 +95,12 @@ struct cgroup_namespace *copy_cgroup_ns(unsigned long flags,
 	new_ns->user_ns = get_user_ns(user_ns);
 	new_ns->ucounts = ucounts;
 	new_ns->root_cset = cset;
+	get_cgroup_ns(old_ns);
+	new_ns->parent = old_ns;
+
+	if ((new_ns->user_ns->parent == &init_user_ns)
+	    && (new_ns->user_ns != &init_user_ns))
+		cgroup_ns_track_loadavg(new_ns);
 
 	return new_ns;
 }
