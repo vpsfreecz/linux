@@ -7,6 +7,7 @@
 #include <linux/time.h>
 #include <linux/time_namespace.h>
 #include <linux/kernel_stat.h>
+#include <linux/vpsadminos.h>
 #include "internal.h"
 
 static int uptime_proc_show(struct seq_file *m, void *v)
@@ -17,17 +18,20 @@ static int uptime_proc_show(struct seq_file *m, void *v)
 	u32 rem;
 	int i;
 
-	idle_nsec = 0;
+	ktime_get_boottime_ts64(&uptime);
+	timens_add_boottime(&uptime);
+
+	idle_nsec = fake_cputime_readout_idle(&uptime, current);
+	if (idle_nsec)
+		goto out;
+
 	for_each_possible_cpu(i) {
 		struct kernel_cpustat kcs;
 
 		kcpustat_cpu_fetch(&kcs, i);
 		idle_nsec += get_idle_time(&kcs, i);
 	}
-
-	ktime_get_boottime_ts64(&uptime);
-	timens_add_boottime(&uptime);
-
+out:
 	idle.tv_sec = div_u64_rem(idle_nsec, NSEC_PER_SEC, &rem);
 	idle.tv_nsec = rem;
 	seq_printf(m, "%lu.%02lu %lu.%02lu\n",

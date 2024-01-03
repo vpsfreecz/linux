@@ -25,11 +25,14 @@
 void legacy_timer_tick(unsigned long ticks)
 {
 	if (ticks) {
+		bool calc_load;
 		raw_spin_lock(&jiffies_lock);
 		write_seqcount_begin(&jiffies_seq);
-		do_timer(ticks);
+		calc_load = do_timer(ticks);
 		write_seqcount_end(&jiffies_seq);
 		raw_spin_unlock(&jiffies_lock);
+		if (calc_load)
+			cgns_calc_avenrun();
 		update_wall_time();
 	}
 	update_process_times(user_mode(get_irq_regs()));
