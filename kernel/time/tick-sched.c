@@ -58,6 +58,7 @@ static void tick_do_update_jiffies64(ktime_t now)
 {
 	unsigned long ticks = 1;
 	ktime_t delta, nextp;
+	bool calc_load = false;
 
 	/*
 	 * 64-bit can do a quick check without holding the jiffies lock and
@@ -143,9 +144,12 @@ static void tick_do_update_jiffies64(ktime_t now)
 	 */
 	write_seqcount_end(&jiffies_seq);
 
-	calc_global_load();
+	calc_load = calc_global_load();
 
 	raw_spin_unlock(&jiffies_lock);
+
+	if (calc_load)
+		cgns_calc_avenrun();
 	update_wall_time();
 }
 
