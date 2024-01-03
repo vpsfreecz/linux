@@ -11,13 +11,16 @@
 #include <linux/sched/cputime.h>
 #include "sched/sched.h"
 
+struct proc_dir_entry *proc_vpsadminos;
+
 static int __init vpsadminos_init(void)
 {
 	int ret;
 
 	ret = sysfs_create_mount_point(fs_kobj, "vpsadminos");
 
-	return ret;
+	proc_vpsadminos = proc_mkdir("vpsadminos", NULL);
+	return 0;
 }
 fs_initcall(vpsadminos_init);
 
@@ -227,6 +230,22 @@ void fake_cputime_readout(struct task_struct *p, u64 timestamp, u64 *user, u64 *
 		fake_cputime_readout_v2(p, timestamp, user, system, cpus);
 	else
 		fake_cputime_readout_v1(p, timestamp, user, system, cpus);
+}
+
+u64 fake_cputime_readout_idle(struct timespec64 *uptime, struct task_struct *p)
+{
+	u64 user = 0, system = 0;
+	int cpus;
+	unsigned long timestamp;
+
+	if (!p->nsproxy->cgroup_ns->loadavg_virt_enabled)
+		return 0;
+
+	timestamp = timespec64_to_ns(uptime);
+
+	fake_cputime_readout(p, timestamp, &user, &system, &cpus);
+
+	return (timestamp * cpus) - user - system;
 }
 
 void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 *system)
