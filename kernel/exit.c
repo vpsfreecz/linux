@@ -127,6 +127,7 @@ late_initcall(kernel_exit_sysfs_init);
 static void __unhash_process(struct task_struct *p, bool group_dead)
 {
 	nr_threads--;
+	dec_cgns_nr_threads(p);
 	detach_pid(p, PIDTYPE_PID);
 	if (group_dead) {
 		detach_pid(p, PIDTYPE_TGID);
