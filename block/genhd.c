@@ -1239,6 +1239,9 @@ static int diskstats_show(struct seq_file *seqf, void *v)
 	struct disk_stats stat;
 	unsigned long idx;
 
+	if (current_user_ns() != &init_user_ns)
+		return 0;
+
 	/*
 	if (&disk_to_dev(gp)->kobj.entry == block_class.devices.next)
 		seq_puts(seqf,	"major minor name"
