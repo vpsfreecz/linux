@@ -109,6 +109,8 @@ struct user_namespace {
 	long rlimit_max[UCOUNT_RLIMIT_COUNTS];
 
 	struct xarray		fake_sysctl_bufs;
+
+	ktime_t			created;
 } __randomize_layout;
 
 struct ucounts {
