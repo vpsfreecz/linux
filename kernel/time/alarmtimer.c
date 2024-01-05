@@ -27,6 +27,7 @@
 #include <linux/compat.h>
 #include <linux/module.h>
 #include <linux/time_namespace.h>
+#include <linux/user_namespace.h>
 
 #include "posix-timers.h"
 
