@@ -24,6 +24,7 @@
 #include <linux/compiler.h>
 #include <linux/audit.h>
 #include <linux/random.h>
+#include <linux/user_namespace.h>
 
 #include "tick-internal.h"
 #include "ntp_internal.h"
@@ -881,7 +882,14 @@ ktime_t ktime_get_with_offset(enum tk_offsets offs)
 	struct timekeeper *tk = &tk_core.timekeeper;
 	unsigned int seq;
 	ktime_t base, *offset = offsets[offs];
+	ktime_t fake;
 	u64 nsecs;
+	struct user_namespace *user_ns = current_user_ns();
+
+	if ((offs == TK_OFFS_BOOT) && (user_ns != &init_user_ns)) {
+		fake = ktime_sub(tk_core.timekeeper.offs_boot, user_ns->created);
+		offset = &fake;
+	}
 
 	WARN_ON(timekeeping_suspended);
 
@@ -902,7 +910,14 @@ ktime_t ktime_get_coarse_with_offset(enum tk_offsets offs)
 	struct timekeeper *tk = &tk_core.timekeeper;
 	unsigned int seq;
 	ktime_t base, *offset = offsets[offs];
+	ktime_t fake;
 	u64 nsecs;
+	struct user_namespace *user_ns = current_user_ns();
+
+	if ((offs == TK_OFFS_BOOT) && (user_ns != &init_user_ns)) {
+		fake = ktime_sub(tk_core.timekeeper.offs_boot, user_ns->created);
+		offset = &fake;
+	}
 
 	WARN_ON(timekeeping_suspended);
 

@@ -164,6 +164,8 @@ int create_user_ns(struct cred *new)
 	set_cred_user_ns(new, ns);
 
 	fake_sysctl_bufs_init(ns);
+
+	ns->created = ktime_get();
 	return 0;
 fail_keyring:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
