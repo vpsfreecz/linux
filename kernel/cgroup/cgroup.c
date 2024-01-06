@@ -217,8 +217,9 @@ struct cgroup_namespace init_cgroup_ns = {
 	.root_cset	= &init_css_set,
 	.loadavg_virt_enabled = false,
 	.cgns_avenrun_list = LIST_HEAD_INIT(init_cgroup_ns.cgns_avenrun_list),
-	.avenrun	= { 0, 0, 0 },
 	.nr_uninterruptible = ATOMIC_LONG_INIT(0),
+	.cgns_avenrun_lock = __RW_LOCK_UNLOCKED(init_cgroup_ns.cgns_avenrun_lock),
+	.avenrun	= { 0, 0, 0 },
 };
 
 static struct file_system_type cgroup2_fs_type;
