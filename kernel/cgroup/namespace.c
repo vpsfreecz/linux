@@ -50,6 +50,7 @@ void free_cgroup_ns(struct cgroup_namespace *ns)
 	put_css_set(ns->root_cset);
 	dec_cgroup_namespaces(ns->ucounts);
 	put_user_ns(ns->user_ns);
+	put_cgroup_ns(ns->parent);
 	ns_free_inum(&ns->ns);
 	kfree(ns);
 }
@@ -94,6 +95,7 @@ struct cgroup_namespace *copy_cgroup_ns(unsigned long flags,
 	new_ns->user_ns = get_user_ns(user_ns);
 	new_ns->ucounts = ucounts;
 	new_ns->root_cset = cset;
+	get_cgroup_ns(old_ns);
 	new_ns->parent = old_ns;
 
 	if ((new_ns->user_ns->parent == &init_user_ns)

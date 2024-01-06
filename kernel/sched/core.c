@@ -10982,6 +10982,9 @@ void inc_cgns_nr_uninterruptible(struct task_struct *p)
 	else
 		return;
 
+	if (ns == &init_cgroup_ns)
+		return;
+
 	while (ns->parent != &init_cgroup_ns)
 		ns = ns->parent;
 
