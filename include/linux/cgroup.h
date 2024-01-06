@@ -778,9 +778,10 @@ struct cgroup_namespace {
 
 	bool			loadavg_virt_enabled;
 	struct task_group	*loadavg_virt_task_group;
+	struct list_head	cgns_avenrun_list;
 	unsigned long		nr_threads;
 	atomic_long_t		nr_uninterruptible;
-	struct list_head	cgns_avenrun_list;
+	rwlock_t		cgns_avenrun_lock;
 	unsigned long		avenrun[3];
 };
 
