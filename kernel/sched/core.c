@@ -10862,6 +10862,8 @@ DEFINE_RWLOCK(cgns_avenrun_lock);
 
 void cgroup_ns_track_loadavg(struct cgroup_namespace *ns)
 {
+	unsigned long flags;
+
 	if (ns == &init_cgroup_ns)
 		return;
 
@@ -10871,31 +10873,37 @@ void cgroup_ns_track_loadavg(struct cgroup_namespace *ns)
 	if (ns->loadavg_virt_enabled)
 		return;
 
-	write_lock(&cgns_avenrun_lock);
+	write_lock_irqsave(&cgns_avenrun_lock, flags);
 	list_add(&ns->cgns_avenrun_list, &cgns_avenrun_list);
 	ns->loadavg_virt_enabled = 1;
-	write_unlock(&cgns_avenrun_lock);
+	write_unlock_irqrestore(&cgns_avenrun_lock, flags);
 }
 
 void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns)
 {
+	unsigned long flags;
+
 	if (ns == &init_cgroup_ns)
 		return;
 
 	if (!ns->loadavg_virt_enabled)
 		return;
 
-	write_lock(&cgns_avenrun_lock);
+	write_lock_irqsave(&cgns_avenrun_lock, flags);
 	list_del_init(&ns->cgns_avenrun_list);
 	ns->loadavg_virt_enabled = 0;
-	write_unlock(&cgns_avenrun_lock);
+	write_unlock_irqrestore(&cgns_avenrun_lock, flags);
 }
 
 unsigned long cgns_nr_running(struct cgroup_namespace *ns)
 {
-	unsigned long nr_active = 0;
-	struct task_group *tg = css_tg(ns->root_cset->subsys[cpu_cgrp_id]);
+	unsigned long flags, nr_active = 0;
+	struct task_group *tg;
 	int i;
+
+	rcu_read_lock();
+	tg = css_tg(ns->root_cset->subsys[cpu_cgrp_id]);
+	rcu_read_unlock();
 
 	for_each_possible_cpu(i) {
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -10905,7 +10913,10 @@ unsigned long cgns_nr_running(struct cgroup_namespace *ns)
 		nr_active += tg->rt_rq[i]->rt_nr_running;
 #endif
 	}
-	return nr_active + atomic_long_read(&ns->nr_uninterruptible);
+	read_lock_irqsave(&ns->cgns_avenrun_lock, flags);
+	nr_active += ns->nr_uninterruptible;
+	read_unlock_irqrestore(&ns->cgns_avenrun_lock, flags);
+	return nr_active;
 }
 
 unsigned long cgroup_ns_nr_running(struct task_struct *p)
@@ -10979,6 +10990,7 @@ unsigned long cgroup_ns_nr_threads(struct task_struct *p)
 void inc_cgns_nr_uninterruptible(struct task_struct *p)
 {
 	struct cgroup_namespace *ns;
+	unsigned long flags;
 
 	if (p->nsproxy && p->nsproxy->cgroup_ns)
 		ns = p->nsproxy->cgroup_ns;
@@ -10992,7 +11004,9 @@ void inc_cgns_nr_uninterruptible(struct task_struct *p)
 		ns = ns->parent;
 
 	if (ns->loadavg_virt_enabled) {
-		atomic_long_inc(&ns->nr_uninterruptible);
+		write_lock_irqsave(&ns->cgns_avenrun_lock, flags);
+		ns->nr_uninterruptible++;
+		write_unlock_irqrestore(&ns->cgns_avenrun_lock, flags);
 		p->sched_contributed_to_load = ns;
 	}
 }
@@ -11000,41 +11014,46 @@ void inc_cgns_nr_uninterruptible(struct task_struct *p)
 void dec_cgns_nr_uninterruptible(struct task_struct *p)
 {
 	struct cgroup_namespace *ns;
+	unsigned long flags;
 
 	ns = p->sched_contributed_to_load;
 	if (!ns)
 		return;
 	BUG_ON(!ns->loadavg_virt_enabled);
 
-	atomic_long_dec(&ns->nr_uninterruptible);
+	write_lock_irqsave(&ns->cgns_avenrun_lock, flags);
+	ns->nr_uninterruptible--;
+	write_unlock_irqrestore(&ns->cgns_avenrun_lock, flags);
 	p->sched_contributed_to_load = NULL;
 }
 
 void cgns_calc_avenrun(void)
 {
 	struct cgroup_namespace *ns;
-	unsigned long nr_active;
+	unsigned long flags, flags2, nr_active;
 
-	read_lock(&cgns_avenrun_lock);
+	read_lock_irqsave(&cgns_avenrun_lock, flags);
 	list_for_each_entry(ns, &cgns_avenrun_list, cgns_avenrun_list) {
 		nr_active = cgns_nr_running(ns);
 		nr_active = nr_active > 0 ? nr_active * FIXED_1 : 0;
-		write_lock(&ns->cgns_avenrun_lock);
+		write_lock_irqsave(&ns->cgns_avenrun_lock, flags2);
 		ns->avenrun[0] = calc_load(ns->avenrun[0], EXP_1, nr_active);
 		ns->avenrun[1] = calc_load(ns->avenrun[1], EXP_5, nr_active);
 		ns->avenrun[2] = calc_load(ns->avenrun[2], EXP_15, nr_active);
-		write_unlock(&ns->cgns_avenrun_lock);
+		write_unlock_irqrestore(&ns->cgns_avenrun_lock, flags2);
 	}
-	read_unlock(&cgns_avenrun_lock);
+	read_unlock_irqrestore(&cgns_avenrun_lock, flags);
 }
 
 void get_avenrun_fake_ns(struct cgroup_namespace *ns, unsigned long *loads, unsigned long offset, int shift)
 {
-	read_lock(&ns->cgns_avenrun_lock);
+	unsigned long flags;
+
+	read_lock_irqsave(&ns->cgns_avenrun_lock, flags);
 	loads[0] = (ns->avenrun[0] + offset) << shift;
 	loads[1] = (ns->avenrun[1] + offset) << shift;
 	loads[2] = (ns->avenrun[2] + offset) << shift;
-	read_unlock(&ns->cgns_avenrun_lock);
+	read_unlock_irqrestore(&ns->cgns_avenrun_lock, flags);
 }
 
 int get_avenrun_fake(struct task_struct *p, unsigned long *loads, unsigned long offset, int shift)
@@ -11057,14 +11076,14 @@ int get_avenrun_fake(struct task_struct *p, unsigned long *loads, unsigned long 
 
 int virt_loadavg_proc_show(struct seq_file *m, void *v)
 {
-	unsigned long avnrun[3];
+	unsigned long flags, avnrun[3];
 	int nr_r; uint nr_t;
 	struct cgroup_namespace *ns;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	read_lock(&cgns_avenrun_lock);
+	read_lock_irqsave(&cgns_avenrun_lock, flags);
 	list_for_each_entry(ns, &cgns_avenrun_list, cgns_avenrun_list) {
 		get_avenrun_fake_ns(ns, avnrun, FIXED_1/200, 0);
 		nr_r = cgns_nr_running(ns);
@@ -11077,7 +11096,7 @@ int virt_loadavg_proc_show(struct seq_file *m, void *v)
 			LOAD_INT(avnrun[2]), LOAD_FRAC(avnrun[2]),
 			nr_r, nr_t);
 	}
-	read_unlock(&cgns_avenrun_lock);
+	read_unlock_irqrestore(&cgns_avenrun_lock, flags);
 	return 0;
 }
 
