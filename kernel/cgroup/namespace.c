@@ -36,7 +36,7 @@ static struct cgroup_namespace *alloc_cgroup_ns(void)
 	new_ns->ns.ops = &cgroupns_operations;
 
 	INIT_LIST_HEAD(&new_ns->cgns_avenrun_list);
-	atomic_long_set(&new_ns->nr_uninterruptible, 0);
+	new_ns->nr_uninterruptible = 0;
 	new_ns->avenrun[0] = 0;
 	new_ns->avenrun[1] = 0;
 	new_ns->avenrun[2] = 0;
