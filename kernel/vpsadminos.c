@@ -24,11 +24,11 @@ static int __init vpsadminos_init(void)
 }
 fs_initcall(vpsadminos_init);
 
-int online_cpus_in_cpu_cgroup(struct task_struct *p)
+unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
 {
 	struct cgroup_subsys_state *css;
 	long quota, period;
-	int cpus = 0, maxcpus = INT_MAX;
+	int cpus = 0, mincpus = INT_MAX;
 
 	if (p->nsproxy->cgroup_ns == &init_cgroup_ns)
 		return 0;
@@ -45,10 +45,9 @@ up:
 		cpus = quota;
 		if (do_div(cpus, period))
 			cpus++;
+		if (cpus < mincpus)
+			mincpus = cpus;
 	}
-
-	if (cpus && maxcpus > cpus)
-		maxcpus = cpus;
 
 	if (css->parent && css->parent != css) {
 		css = css->parent;
@@ -56,7 +55,7 @@ up:
 	}
 
 	pr_debug("online_cpus_in_cpu_cgroup: debug @ line %d quota = %ld, period = %ld, cpus = %d\n", __LINE__, quota, period, cpus);
-	return maxcpus;
+	return (mincpus == INT_MAX) ? 0 : mincpus;
 }
 
 // Caller's responsibility to make sure p lives throughout

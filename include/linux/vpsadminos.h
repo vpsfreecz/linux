@@ -22,7 +22,7 @@ extern ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 extern void fake_sysctl_bufs_init(struct user_namespace *ns);
 extern void fake_sysctl_bufs_free(struct user_namespace *ns);
 
-extern int online_cpus_in_cpu_cgroup(struct task_struct *p);
+extern unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p);
 void fake_cputime_readout(struct task_struct *p, u64 timestamp, u64 *user, u64 *system, int *cpus);
 u64 fake_cputime_readout_idle(struct timespec64 *uptime, struct task_struct *p);
 void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 *system);
