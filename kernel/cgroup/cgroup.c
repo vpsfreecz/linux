@@ -218,7 +218,7 @@ struct cgroup_namespace init_cgroup_ns = {
 	.loadavg_virt_enabled = false,
 	.cgns_avenrun_list = LIST_HEAD_INIT(init_cgroup_ns.cgns_avenrun_list),
 	.nr_uninterruptible = 0,
-	.cgns_avenrun_lock = __RW_LOCK_UNLOCKED(init_cgroup_ns.cgns_avenrun_lock),
+	.cgns_avenrun_lock = __RAW_SPIN_LOCK_UNLOCKED(init_cgroup_ns.cgns_avenrun_lock),
 	.avenrun	= { 0, 0, 0 },
 };
 
