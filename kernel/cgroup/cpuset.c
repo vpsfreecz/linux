@@ -2928,7 +2928,7 @@ static int cpuset_common_seq_show(struct seq_file *sf, void *v)
 	cpumask_t fake_mask;
 
 	if (current->nsproxy->cgroup_ns != &init_cgroup_ns) {
-		if (!fake_cpumask(current, &fake_mask))
+		if (!fake_online_cpumask(current, &fake_mask))
 			goto orig;
 		switch (type) {
 		case FILE_CPULIST:
