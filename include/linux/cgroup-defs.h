@@ -510,6 +510,10 @@ struct cgroup {
 	 */
 	struct cgroup	*rstat_flush_next;
 
+	u64 rstat_cpu_fake_timestamp;
+	struct prev_cputime prev_cputime_real;
+	struct prev_cputime __percpu *prev_cputime_fake;
+
 	/* cgroup basic resource statistics */
 	struct cgroup_base_stat last_bstat;
 	struct cgroup_base_stat bstat;
