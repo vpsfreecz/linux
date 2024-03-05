@@ -1150,6 +1150,11 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 		tsk->cpus_ptr = &tsk->cpus_mask;
 	dup_user_cpus_ptr(tsk, orig, node);
 
+	if (orig->set_fake_cpu_mask) {
+		cpumask_copy(&tsk->fake_cpu_mask, &orig->fake_cpu_mask);
+		tsk->set_fake_cpu_mask = 1;
+	}
+
 	/*
 	 * One for the user space visible state that goes away when reaped.
 	 * One for the scheduler.
