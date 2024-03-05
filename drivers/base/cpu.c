@@ -21,6 +21,7 @@
 #include <linux/pm_qos.h>
 #include <linux/delay.h>
 #include <linux/sched/isolation.h>
+#include <linux/vpsadminos.h>
 
 #include "base.h"
 
@@ -216,7 +217,9 @@ static ssize_t show_cpus_attr(struct device *dev,
 			      char *buf)
 {
 	struct cpu_attr *ca = container_of(attr, struct cpu_attr, attr);
-
+	struct cpumask mask;
+	if (fake_online_cpumask(current, &mask))
+		return cpumap_print_to_pagebuf(true, buf, &mask);
 	return cpumap_print_to_pagebuf(true, buf, ca->map);
 }
 

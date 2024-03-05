@@ -845,6 +845,9 @@ struct task_struct {
 #endif
 	unsigned short			migration_flags;
 
+	bool				set_fake_cpu_mask;
+	cpumask_t			fake_cpu_mask;
+
 #ifdef CONFIG_PREEMPT_RCU
 	int				rcu_read_lock_nesting;
 	union rcu_special		rcu_read_unlock_special;
