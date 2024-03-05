@@ -3482,3 +3482,14 @@ extern u64 avg_vruntime(struct cfs_rq *cfs_rq);
 extern int entity_eligible(struct cfs_rq *cfs_rq, struct sched_entity *se);
 
 #endif /* _KERNEL_SCHED_SCHED_H */
+
+s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css, struct cftype *cft);
+u64 cpu_cfs_period_read_u64(struct cgroup_subsys_state *css, struct cftype *cft);
+u64 cpustat_fake_set_timestamp(struct cgroup_subsys_state *css, u64 new);
+void cpustat_fake_readout(struct cgroup_subsys_state *css, int cpu,
+				   u64 *user, u64 *system,
+				   u64 *user_old, u64 *system_old);
+void cpustat_fake_readout_percpu(struct cgroup_subsys_state *css,
+					  int cpu, u64 *user, u64 *system);
+void cpustat_fake_write(struct cgroup_subsys_state *css, int cpu,
+				 u64 user, u64 system);
