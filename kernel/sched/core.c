@@ -65,7 +65,6 @@
 #include <linux/wait_api.h>
 #include <linux/workqueue_api.h>
 #include <linux/user_namespace.h>
-
 #include <linux/vpsadminos.h>
 
 #ifdef CONFIG_PREEMPT_DYNAMIC
@@ -8399,7 +8398,7 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 
 	if (current->nsproxy->cgroup_ns != &init_cgroup_ns) {
 		struct cpumask fake_mask;
-		if (!fake_cpumask(p, &fake_mask))
+		if (!fake_online_cpumask(p, &fake_mask))
 			goto orig;
 		if (!check_same_owner(p)) {
 			rcu_read_lock();
@@ -8415,7 +8414,7 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 			goto out_put_task;
 		}
 		retval = 0;
-		set_fake_cpumask(p, in_mask);
+		set_fake_affinity_cpumask(p, in_mask);
 		goto out_put_task;
 	}
 orig:
@@ -8518,7 +8517,7 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
-	fake_cpumask(p, mask);
+	fake_affinity_cpumask(p, mask);
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 
 out_unlock:

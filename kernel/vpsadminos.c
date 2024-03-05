@@ -80,7 +80,7 @@ up:
 }
 
 // Caller's responsibility to make sure p lives throughout
-void set_fake_cpumask(struct task_struct *p, const struct cpumask *srcmask)
+void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcmask)
 {
 	if (!online_cpus_in_cpu_cgroup(p))
 		return;
@@ -89,15 +89,20 @@ void set_fake_cpumask(struct task_struct *p, const struct cpumask *srcmask)
 }
 
 // Caller's responsibility to make sure p lives throughout
-int fake_cpumask(struct task_struct *p, struct cpumask *dstmask)
+int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
 {
-	int cpus;
-	int cpu, enabled;
-
 	if (p->set_fake_cpu_mask) {
 		cpumask_copy(dstmask, &p->fake_cpu_mask);
 		return 1;
 	}
+	return 0;
+}
+
+// Caller's responsibility to make sure p lives throughout
+int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
+{
+	int cpus;
+	int cpu, enabled;
 
 	cpus = online_cpus_in_cpu_cgroup(p);
 	if (!cpus)
@@ -142,7 +147,7 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u6
 	*user = usr;
 	*system = sys;
 	*cpus = online_cpus_in_cpu_cgroup(p);
-	fake_cpumask(p, &cpu_fake_mask);
+	fake_online_cpumask(p, &cpu_fake_mask);
 
 	user_time = usr - usr_old;
 	system_time = sys - sys_old;
@@ -204,7 +209,7 @@ void fake_cputime_readout_v2(struct task_struct *p, u64 timestamp, u64 *user, u6
 	*user = usr;
 	*system = sys;
 	*cpus = online_cpus_in_cpu_cgroup(p);
-	fake_cpumask(p, &cpu_fake_mask);
+	fake_online_cpumask(p, &cpu_fake_mask);
 
 	user_time = usr - usr_old;
 	system_time = sys - sys_old;
