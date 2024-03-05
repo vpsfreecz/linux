@@ -134,7 +134,7 @@ static int show_stat(struct seq_file *p, void *v)
 
 fake_readout:
 	fake = 1;
-	uptime = ktime_get_ns();
+	uptime = ktime_get_boottime_ns();
 	fake_cputime_readout(current, uptime, &user, &system, &cpus);
 	idle = (uptime * cpus) - user - system;
 
@@ -151,7 +151,7 @@ cont_normal:
 	seq_put_decimal_ull(p, " ", nsec_to_clock_t(guest_nice));
 	seq_putc(p, '\n');
 
-	if (fake && fake_cpumask(current, &cpu_fake_mask))
+	if (fake && fake_online_cpumask(current, &cpu_fake_mask))
 		goto fake_online_cpus;
 
 	for_each_online_cpu(i) {

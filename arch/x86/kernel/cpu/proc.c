@@ -209,7 +209,7 @@ static void *c_start(struct seq_file *m, loff_t *pos)
 {
 	struct cpumask fake_mask;
 
-	if (fake_cpumask(current, &fake_mask)) {
+	if (fake_online_cpumask(current, &fake_mask)) {
 		*pos = cpumask_next(*pos - 1, &fake_mask);
 		if ((*pos) < online_cpus_in_cpu_cgroup(current))
 			return &cpu_data(*pos);

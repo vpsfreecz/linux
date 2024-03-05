@@ -1865,7 +1865,7 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 			int id = 0;
 			struct cpumask cpu_fake_mask;
 
-			if (!fake_cpumask(current, &cpu_fake_mask))
+			if (!fake_online_cpumask(current, &cpu_fake_mask))
 				goto orig;
 			sscanf(name, "cpu%d", &id);
 			if (!cpumask_test_cpu(id, &cpu_fake_mask))
