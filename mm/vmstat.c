@@ -28,6 +28,7 @@
 #include <linux/mm_inline.h>
 #include <linux/page_owner.h>
 #include <linux/sched/isolation.h>
+#include <linux/vpsadminos.h>
 
 #include "internal.h"
 
@@ -1900,6 +1901,20 @@ static int vmstat_show(struct seq_file *m, void *arg)
 {
 	unsigned long *l = arg;
 	unsigned long off = l - (unsigned long *)m->private;
+	unsigned long fake = 0;
+	struct mem_cgroup *mem;
+
+	if (strncmp(vmstat_text[off], "oom_kill", 8))
+		goto oom_orig;
+
+	mem = get_current_most_limited_memcg();
+	if (!mem)
+		goto oom_orig;
+
+	fake = atomic_long_read(&mem->memory_events[MEMCG_OOM_KILL]);
+	l = &fake;
+	mem_cgroup_put(mem);
+oom_orig:
 
 	seq_puts(m, vmstat_text[off]);
 	seq_put_decimal_ull(m, " ", *l);
