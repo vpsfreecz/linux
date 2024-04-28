@@ -148,9 +148,11 @@ static unsigned long shmem_default_max_inodes(void)
 {
 	unsigned long nr_pages = totalram_pages();
 	struct mem_cgroup *memcg = get_current_most_limited_memcg();
-	if (memcg)
-		return (u64)READ_ONCE(memcg->memory.max);
-
+	if (memcg) {
+		nr_pages = READ_ONCE(memcg->memory.max);
+		mem_cgroup_put(memcg);
+		return nr_pages;
+	}
 	return min3(nr_pages - totalhigh_pages(), nr_pages / 2,
 			ULONG_MAX / BOGO_INODE_SIZE);
 }
