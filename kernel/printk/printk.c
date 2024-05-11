@@ -725,14 +725,6 @@ int devkmsg_emit(struct syslog_namespace *ns, int facility, int level,
 	va_list args;
 	int r;
 
-	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
-		va_list args2;
-		va_copy(args2, args);
-		va_start(args2, fmt);
-		vprintk_emit_ns(&init_syslog_ns, facility, level, NULL, fmt, args2);
-		va_end(args2);
-	}
-
 	va_start(args, fmt);
 	r = vprintk_emit_ns(ns, facility, level, NULL, fmt, args);
 	va_end(args);
@@ -811,14 +803,13 @@ static ssize_t devkmsg_read(struct file *file, char __user *buf,
 {
 	struct devkmsg_user *user = file->private_data;
 	char *outbuf = &user->pbufs.outbuf[0];
-	struct syslog_namespace *ns = detect_syslog_namespace();
 	struct printk_message pmsg = {
 		.pbufs = &user->pbufs,
-		.ns = ns,
+		.ns = user->ns,
 	};
 	ssize_t ret;
 
-	if (!ns)
+	if (!pmsg.ns)
 		return -EFAULT;
 
 	ret = mutex_lock_interruptible(&user->lock);
@@ -942,7 +933,7 @@ static int devkmsg_open(struct inode *inode, struct file *file)
 {
 	struct devkmsg_user *user;
 	int err;
-	struct syslog_namespace *ns = detect_syslog_namespace();
+	struct syslog_namespace *ns = i_user_ns(inode)->syslog_ns;
 
 	if (!ns)
 		return -EFAULT;
@@ -1411,7 +1402,7 @@ static size_t info_print_prefix(const struct printk_info  *info, bool syslog,
  *
  *   - Add prefix for each line.
  *   - Drop truncated lines that no longer fit into the buffer.
- *   - Add the trailing newline that has been removed in vprintk_store().
+ *   - Add the trailing newline that has been removed in vprintk_store_ns().
  *   - Add a string terminator.
  *
  * Since the produced string is always terminated, the maximum possible
@@ -1486,7 +1477,7 @@ static size_t record_print_text(struct printk_record *r, bool syslog,
 		if (text_len == line_len) {
 			/*
 			 * This is the last line. Add the trailing newline
-			 * removed in vprintk_store().
+			 * removed in vprintk_store_ns().
 			 */
 			text[prefix_len + line_len] = '\n';
 			break;
@@ -2367,15 +2358,6 @@ out:
 	return ret;
 }
 
-__printf(4, 0)
-int vprintk_store(int facility, int level,
-		  const struct dev_printk_info *dev_info,
-		  const char *fmt, va_list args)
-{
-	return vprintk_store_ns(detect_syslog_namespace(), facility, level,
-				dev_info, fmt, args);
-}
-
 asmlinkage int vprintk_emit_ns(struct syslog_namespace *ns,
 			    int facility, int level,
 			    const struct dev_printk_info *dev_info,
@@ -2398,10 +2380,16 @@ asmlinkage int vprintk_emit_ns(struct syslog_namespace *ns,
 
 	printk_delay(level);
 
+	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
+		va_list args2;
+		va_copy(args2, args);
+		vprintk_store_ns(&init_syslog_ns, facility, level, dev_info, fmt, args2);
+	}
+
 	printed_len = vprintk_store_ns(ns, facility, level, dev_info, fmt, args);
 
 	/* If called from the scheduler, we can not call up(). */
-	if (!in_sched) {
+	if (!in_sched && (syslog_ns_print_to_init_ns || (ns == &init_syslog_ns))) {
 		/*
 		 * The caller may be holding system-critical or
 		 * timing-sensitive locks. Disable preemption during
@@ -2422,7 +2410,7 @@ asmlinkage int vprintk_emit_ns(struct syslog_namespace *ns,
 	}
 
 	if (in_sched)
-		defer_console_output();
+		defer_console_output(ns);
 	else
 		wake_up_klogd(ns);
 
@@ -2455,15 +2443,6 @@ asmlinkage __visible int _printk(const char *fmt, ...)
 {
 	va_list args;
 	int r;
-	struct syslog_namespace *ns = detect_syslog_namespace();
-
-	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
-		va_list args2;
-		va_copy(args2, args);
-		va_start(args2, fmt);
-		vprintk_ns(&init_syslog_ns, fmt, args2);
-		va_end(args2);
-	}
 
 	va_start(args, fmt);
 	r = vprintk(fmt, args);
@@ -2479,14 +2458,6 @@ asmlinkage __visible int ns_printk(struct syslog_namespace *ns, const char *fmt,
 {
 	va_list args;
 	int r;
-
-	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
-		va_list args2;
-		va_copy(args2, args);
-		va_start(args2, fmt);
-		vprintk_ns(&init_syslog_ns, fmt, args2);
-		va_end(args2);
-	}
 
 	va_start(args, fmt);
 	r = vprintk_ns(ns, fmt, args);
@@ -4011,12 +3982,10 @@ bool pr_flush(int timeout_ms, bool reset_on_progress)
 #define PRINTK_PENDING_OUTPUT	0x02
 
 static DEFINE_PER_CPU(int, printk_pending);
-static DEFINE_PER_CPU(struct syslog_namespace *, printk_pending_ns);
 
 static void wake_up_klogd_work_func(struct irq_work *irq_work)
 {
 	int pending = this_cpu_xchg(printk_pending, 0);
-	struct syslog_namespace *ns = this_cpu_read(printk_pending_ns);
 
 	if (pending & PRINTK_PENDING_OUTPUT) {
 		/* If trylock fails, someone else is doing the printing */
@@ -4025,7 +3994,7 @@ static void wake_up_klogd_work_func(struct irq_work *irq_work)
 	}
 
 	if (pending & PRINTK_PENDING_WAKEUP)
-		wake_up_interruptible(&ns->log_wait);
+		wake_up_interruptible(&init_syslog_ns.log_wait);
 }
 
 static DEFINE_PER_CPU(struct irq_work, wake_up_klogd_work) =
@@ -4035,6 +4004,13 @@ static void __wake_up_klogd(struct syslog_namespace *ns, int val)
 {
 	if (!printk_percpu_data_ready())
 		return;
+
+	if (ns != &init_syslog_ns) {
+		if (wq_has_sleeper(&ns->log_wait))
+			wake_up_interruptible(&ns->log_wait);
+		if (!syslog_ns_print_to_init_ns)
+			return;
+	}
 
 	preempt_disable();
 	/*
@@ -4048,10 +4024,9 @@ static void __wake_up_klogd(struct syslog_namespace *ns, int val)
 	 *
 	 * This pairs with devkmsg_read:A and syslog_print:A.
 	 */
-	if (wq_has_sleeper(&ns->log_wait) || /* LMM(__wake_up_klogd:A) */
+	if (wq_has_sleeper(&init_syslog_ns.log_wait) || /* LMM(__wake_up_klogd:A) */
 	    (val & PRINTK_PENDING_OUTPUT)) {
 		this_cpu_or(printk_pending, val);
-		this_cpu_write(printk_pending_ns, ns);
 		irq_work_queue(this_cpu_ptr(&wake_up_klogd_work));
 	}
 	preempt_enable();
@@ -4084,23 +4059,23 @@ void wake_up_klogd(struct syslog_namespace *ns)
  *
  * Context: Any context.
  */
-void defer_console_output(void)
+void defer_console_output(struct syslog_namespace *ns)
 {
 	/*
 	 * New messages may have been added directly to the ringbuffer
-	 * using vprintk_store(), so wake any waiters as well.
+	 * using vprintk_store_ns(), so wake any waiters as well.
 	 */
-	__wake_up_klogd(&init_syslog_ns, PRINTK_PENDING_WAKEUP | PRINTK_PENDING_OUTPUT);
+	__wake_up_klogd(ns, PRINTK_PENDING_WAKEUP | PRINTK_PENDING_OUTPUT);
 }
 
 void printk_trigger_flush(void)
 {
-	defer_console_output();
+	defer_console_output(detect_syslog_namespace());
 }
 
 int vprintk_deferred(const char *fmt, va_list args)
 {
-	return vprintk_emit(0, LOGLEVEL_SCHED, NULL, fmt, args);
+	return vprintk_emit_ns(detect_syslog_namespace(), 0, LOGLEVEL_SCHED, NULL, fmt, args);
 }
 
 int _printk_deferred(const char *fmt, ...)
@@ -4341,7 +4316,7 @@ EXPORT_SYMBOL_GPL(kmsg_dump_get_line);
 bool kmsg_dump_get_buffer(struct kmsg_dump_iter *iter, bool syslog,
 			  char *buf, size_t size, size_t *len_out)
 {
-	struct syslog_namespace *ns = detect_syslog_namespace();
+	struct syslog_namespace *ns = &init_syslog_ns;
 	u64 min_seq = latched_seq_read_nolock(&ns->clear_seq);
 	struct printk_info info;
 	struct printk_record r;

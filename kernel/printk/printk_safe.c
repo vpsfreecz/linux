@@ -29,8 +29,6 @@ void __printk_safe_exit(void)
 
 asmlinkage int vprintk(const char *fmt, va_list args)
 {
-	struct syslog_namespace *ns = detect_syslog_namespace();
-
 #ifdef CONFIG_KGDB_KDB
 	/* Allow to pass printk() to kdb but avoid a recursion. */
 	if (unlikely(kdb_trap_printk && kdb_printf_cpu < 0))
@@ -41,10 +39,13 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	 * Use the main logbuf even in NMI. But avoid calling console
 	 * drivers that might have their own locks.
 	 */
-	if (this_cpu_read(printk_context) || in_nmi())
+	if (in_nmi())
+		return vprintk_emit_ns(&init_syslog_ns, 0, LOGLEVEL_SCHED, NULL, fmt, args);
+
+	if (this_cpu_read(printk_context))
 		return vprintk_deferred(fmt, args);
 
 	/* No obstacles. */
-	return vprintk_ns(ns, fmt, args);
+	return vprintk_default(fmt, args);
 }
 EXPORT_SYMBOL(vprintk);

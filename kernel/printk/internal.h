@@ -38,11 +38,6 @@ int devkmsg_sysctl_set_loglvl(struct ctl_table *table, int write,
 /* the maximum size allowed to be reserved for a record */
 #define PRINTKRB_RECORD_MAX	1024
 
-__printf(4, 0)
-int vprintk_store(int facility, int level,
-		  const struct dev_printk_info *dev_info,
-		  const char *fmt, va_list args);
-
 __printf(5, 0)
 int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 		  const struct dev_printk_info *dev_info,
@@ -67,7 +62,8 @@ bool printk_percpu_data_ready(void);
 		local_irq_restore(flags);	\
 	} while (0)
 
-void defer_console_output(void);
+struct syslog_namespace;
+void defer_console_output(struct syslog_namespace *ns);
 
 u16 printk_parse_prefix(const char *text, int *level,
 			enum printk_info_flags *flags);
