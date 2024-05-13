@@ -109,7 +109,7 @@ void free_syslog_ns(struct kref *kref)
 }
 
 struct syslog_namespace *clone_syslog_ns(struct user_namespace *user_ns,
-						struct syslog_namespace *old_ns)
+					 struct syslog_namespace *old_ns, char *name)
 {
 	struct syslog_namespace *ns;
 	struct ucounts *ucounts;
@@ -146,6 +146,8 @@ struct syslog_namespace *clone_syslog_ns(struct user_namespace *user_ns,
 	ns->user_ns = get_user_ns(user_ns);
 	ns->parent = get_syslog_ns(old_ns);
 
+	scnprintf(ns->name, sizeof(ns->name), "%s", name);
+
 	mutex_init(&ns->syslog_lock);
 	init_waitqueue_head(&ns->log_wait);
 	spin_lock_init(&ns->dump_list_lock);
@@ -171,7 +173,7 @@ fail:
 
 }
 
-struct syslog_namespace *copy_syslog_ns(bool new,
+struct syslog_namespace *copy_syslog_ns(bool new, char *name,
 				  struct user_namespace *user_ns,
 				  struct syslog_namespace *old_ns)
 {
@@ -181,7 +183,7 @@ struct syslog_namespace *copy_syslog_ns(bool new,
 	if (!new)
 		return old_ns;
 
-	new_ns = clone_syslog_ns(user_ns, old_ns);
+	new_ns = clone_syslog_ns(user_ns, old_ns, name);
 	put_syslog_ns(old_ns);
 
 	return new_ns;
@@ -192,13 +194,11 @@ static struct ns_common *syslogns_get(struct task_struct *task)
 	struct syslog_namespace *ns = NULL;
 	struct nsproxy *nsproxy;
 
-	task_lock(task);
 	nsproxy = task->nsproxy;
 	if (nsproxy) {
 		ns = nsproxy->syslog_ns;
 		get_syslog_ns(ns);
 	}
-	task_unlock(task);
 
 	return ns ? &ns->ns : NULL;
 }

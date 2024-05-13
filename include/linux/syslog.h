@@ -36,13 +36,13 @@ struct syslog_namespace;
 #define SYSLOG_ACTION_SIZE_BUFFER   10
 /* Create a new syslog namespace for the current process */
 #define SYSLOG_ACTION_NEW_NS        11
-#define SYSLOG_ACTION_COPY_NS       12
 
 #define SYSLOG_FROM_READER	     0
 #define SYSLOG_FROM_PROC	     1
 
+#define SYSLOG_NS_NAME_MAX_LENGHT   12
+
 int do_syslog(int type, char __user *buf, int count, int source,
 			struct syslog_namespace *ns);
-extern wait_queue_head_t log_wait;
 
 #endif /* _LINUX_SYSLOG_H */

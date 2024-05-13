@@ -602,9 +602,9 @@ static int check_syslog_permissions(int type, int source,
 			|| type == SYSLOG_ACTION_CONSOLE_LEVEL)
 		ns = &init_syslog_ns;
 
-	/* create a new syslog ns */
-	if (type == SYSLOG_ACTION_NEW_NS || type == SYSLOG_ACTION_COPY_NS)
-		return 0;
+	if (type == SYSLOG_ACTION_NEW_NS &&
+	    !ns_capable(ns->user_ns, CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (syslog_action_restricted(type, ns)) {
 		if (ns_capable(ns->user_ns, CAP_SYSLOG))
@@ -933,7 +933,7 @@ static int devkmsg_open(struct inode *inode, struct file *file)
 {
 	struct devkmsg_user *user;
 	int err;
-	struct syslog_namespace *ns = i_user_ns(inode)->syslog_ns;
+	struct syslog_namespace *ns = file->f_cred->user_ns->syslog_ns;
 
 	if (!ns)
 		return -EFAULT;
@@ -1846,22 +1846,32 @@ int do_syslog(int type, char __user *buf, int len, int source,
 	case SYSLOG_ACTION_SIZE_BUFFER:
 		error = ns->log_buf_len;
 		break;
-	case SYSLOG_ACTION_COPY_NS:
-#ifdef CONFIG_SYSLOG_NS
-		pr_debug("syslog_ns: next setns(0) will copy syslog ns\n");
-		task_lock(current);
-		current->syslog_ns_for_child = 1;
-		task_unlock(current);
-#else
-		error = -EINVAL;
-#endif
-		break;
 	case SYSLOG_ACTION_NEW_NS:
 #ifdef CONFIG_SYSLOG_NS
-		pr_debug("syslog_ns: new syslog ns will be created next clone(0)\n");
-		task_lock(current);
-		current->syslog_ns_for_child = 2;
-		task_unlock(current);
+		if (len > SYSLOG_NS_NAME_MAX_LENGHT) {
+			error = -ENAMETOOLONG;
+			break;
+		}
+		if (!len) {
+			error = -EINVAL;
+			break;
+		}
+		current->syslog_ns_for_child = true;
+		char *tmp;
+		tmp = kmalloc(len, GFP_KERNEL);
+		if (!tmp) {
+			error = -ENOMEM;
+			break;
+		}
+		if (copy_from_user(tmp, buf, len)) {
+			kfree(tmp);
+			error = -EFAULT;
+			break;
+		}
+		strncpy(current->syslog_ns_for_child_name, tmp, len);
+		kfree(tmp);
+		error = 0;
+		pr_debug("syslog_ns: new syslog ns %s will be created next clone(0)\n", current->syslog_ns_for_child_name);
 #else
 		error = -EINVAL;
 #endif
@@ -1876,7 +1886,7 @@ int do_syslog(int type, char __user *buf, int len, int source,
 
 SYSCALL_DEFINE3(syslog, int, type, char __user *, buf, int, len)
 {
-	struct syslog_namespace *ns = detect_syslog_namespace();
+	struct syslog_namespace *ns = current_syslog_ns();
 
 	if (!ns)
 		return -EFAULT;
@@ -2213,8 +2223,8 @@ u16 printk_parse_prefix(const char *text, int *level,
 	return prefix_len;
 }
 
-__printf(5, 0)
-static u16 printk_sprint(char *text, u16 size, int facility,
+__printf(6, 0)
+static u16 printk_sprint_tagged(struct syslog_namespace *tag, char *text, u16 size, int facility,
 			 enum printk_info_flags *flags, const char *fmt,
 			 va_list args)
 {
@@ -2239,13 +2249,31 @@ static u16 printk_sprint(char *text, u16 size, int facility,
 		}
 	}
 
+	if (tag) {
+		u16 name_len = strlen(tag->name);
+		u16 tag_len = name_len + 5; // "[ tag ] "
+		memmove(text + tag_len, text, text_len);
+		memcpy(text, "[ ", 2);
+		memcpy(text + 2, tag->name, name_len);
+		memcpy(text + 2 + name_len, " ] ", 3);
+		text_len += tag_len;
+	}
+
 	trace_console(text, text_len);
 
 	return text_len;
 }
 
 __printf(5, 0)
-int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
+static u16 printk_sprint(char *text, u16 size, int facility,
+			 enum printk_info_flags *flags, const char *fmt,
+			 va_list args)
+{
+	return printk_sprint_tagged(NULL, text, size, facility, flags, fmt, args);
+}
+
+__printf(6, 0)
+int vprintk_store_ns_tagged(struct syslog_namespace *ns, struct syslog_namespace *tag, int facility, int level,
 		  const struct dev_printk_info *dev_info,
 		  const char *fmt, va_list args)
 {
@@ -2285,6 +2313,9 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 	va_copy(args2, args);
 	reserve_size = vsnprintf(&prefix_buf[0], sizeof(prefix_buf), fmt, args2) + 1;
 	va_end(args2);
+
+	if (tag)
+		reserve_size += SYSLOG_NS_NAME_MAX_LENGHT + 5; // "[ tag ] "
 
 	if (reserve_size > PRINTKRB_RECORD_MAX)
 		reserve_size = PRINTKRB_RECORD_MAX;
@@ -2334,7 +2365,7 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 	}
 
 	/* fill message */
-	text_len = printk_sprint(&r.text_buf[0], reserve_size, facility, &flags, fmt, args);
+	text_len = printk_sprint_tagged(tag, &r.text_buf[0], reserve_size, facility, &flags, fmt, args);
 	if (trunc_msg_len)
 		memcpy(&r.text_buf[text_len], trunc_msg, trunc_msg_len);
 	r.info->text_len = text_len + trunc_msg_len;
@@ -2356,6 +2387,14 @@ int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 out:
 	printk_exit_irqrestore(recursion_ptr, irqflags);
 	return ret;
+}
+
+__printf(5, 0)
+int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
+		  const struct dev_printk_info *dev_info,
+		  const char *fmt, va_list args)
+{
+	return vprintk_store_ns_tagged(ns, NULL, facility, level, dev_info, fmt, args);
 }
 
 asmlinkage int vprintk_emit_ns(struct syslog_namespace *ns,
@@ -2383,9 +2422,9 @@ asmlinkage int vprintk_emit_ns(struct syslog_namespace *ns,
 	if (syslog_ns_print_to_init_ns && ns != &init_syslog_ns) {
 		va_list args2;
 		va_copy(args2, args);
-		vprintk_store_ns(&init_syslog_ns, facility, level, dev_info, fmt, args2);
+		vprintk_store_ns_tagged(&init_syslog_ns, ns, facility, level, dev_info, fmt, args2);
+		va_end(args2);
 	}
-
 	printed_len = vprintk_store_ns(ns, facility, level, dev_info, fmt, args);
 
 	/* If called from the scheduler, we can not call up(). */
@@ -2422,7 +2461,7 @@ asmlinkage int vprintk_emit(int facility, int level,
 			    const struct dev_printk_info *dev_info,
 			    const char *fmt, va_list args)
 {
-	return vprintk_emit_ns(detect_syslog_namespace(), facility, level,
+	return vprintk_emit_ns(current_syslog_ns(), facility, level,
 		               dev_info, fmt, args);
 }
 EXPORT_SYMBOL(vprintk_emit);
@@ -2435,7 +2474,7 @@ EXPORT_SYMBOL_GPL(vprintk_ns);
 
 int vprintk_default(const char *fmt, va_list args)
 {
-	return vprintk_emit_ns(detect_syslog_namespace(), 0, LOGLEVEL_DEFAULT, NULL, fmt, args);
+	return vprintk_emit_ns(current_syslog_ns(), 0, LOGLEVEL_DEFAULT, NULL, fmt, args);
 }
 EXPORT_SYMBOL_GPL(vprintk_default);
 
@@ -4070,12 +4109,12 @@ void defer_console_output(struct syslog_namespace *ns)
 
 void printk_trigger_flush(void)
 {
-	defer_console_output(detect_syslog_namespace());
+	defer_console_output(current_syslog_ns());
 }
 
 int vprintk_deferred(const char *fmt, va_list args)
 {
-	return vprintk_emit_ns(detect_syslog_namespace(), 0, LOGLEVEL_SCHED, NULL, fmt, args);
+	return vprintk_emit_ns(current_syslog_ns(), 0, LOGLEVEL_SCHED, NULL, fmt, args);
 }
 
 int _printk_deferred(const char *fmt, ...)
@@ -4401,6 +4440,7 @@ struct syslog_namespace init_syslog_ns = {
 	.ucounts = NULL,
 	.kref = KREF_INIT(4),
 	.parent = NULL,
+	.name = "init_ns",
 	.log_wait = __WAIT_QUEUE_HEAD_INITIALIZER(init_syslog_ns.log_wait),
 	.log_buf_len = __LOG_BUF_LEN,
 	.log_buf = __log_buf,

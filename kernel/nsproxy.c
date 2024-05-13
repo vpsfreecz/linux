@@ -72,7 +72,6 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 {
 	struct nsproxy *new_nsp;
 	int err;
-	bool new_syslogns = false;
 
 	new_nsp = create_nsproxy();
 	if (!new_nsp)
@@ -124,39 +123,19 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 	}
 	new_nsp->time_ns = get_time_ns(tsk->nsproxy->time_ns);
 
-	/* Will tsk be always the same as reported from current? */
-	task_lock(tsk);
-	if (tsk->syslog_ns_for_child == 2)
-		new_syslogns = true;
-	tsk->syslog_ns_for_child = 0;
-	task_unlock(tsk);
-
-	/* copy syslog ns */
-	new_nsp->syslog_ns = copy_syslog_ns(new_syslogns, user_ns,
-				      tsk->nsproxy->syslog_ns);
+	new_nsp->syslog_ns = copy_syslog_ns(tsk->syslog_ns_for_child, tsk->syslog_ns_for_child_name,
+				            user_ns, tsk->nsproxy->syslog_ns);
+	tsk->syslog_ns_for_child = false;
+	memset(tsk->syslog_ns_for_child_name, 0, sizeof(tsk->syslog_ns_for_child_name));
 	if (IS_ERR(new_nsp->syslog_ns)) {
 		err = PTR_ERR(new_nsp->syslog_ns);
 		goto out_syslog;
 	}
-
-	if (new_syslogns) {
-		pr_debug("Overriding syslog namespace in net_ns %p\n",
-			 new_nsp->net_ns);
-		pr_debug("\t%p new_nsp->net_ns->user_ns\n",
-			 new_nsp->net_ns->user_ns);
-		pr_debug("\t%p used syslog_ns\n",
-			 new_nsp->syslog_ns);
-		pr_debug("\t%p &init_syslog_ns\n",
-			 &init_syslog_ns);
-		pr_debug("\t%p &init_user_ns\n",
-			 &init_user_ns);
-		put_syslog_ns(new_nsp->net_ns->user_ns->syslog_ns);
-		new_nsp->net_ns->user_ns->syslog_ns = get_syslog_ns(new_nsp->syslog_ns);
-	}
-
 	return new_nsp;
 
 out_syslog:
+	if (new_nsp->time_ns_for_children)
+		put_time_ns(new_nsp->time_ns_for_children);
 out_time:
 	put_net(new_nsp->net_ns);
 out_net:

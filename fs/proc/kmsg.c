@@ -21,23 +21,15 @@
 
 static int kmsg_open(struct inode * inode, struct file * file)
 {
-	struct syslog_namespace *ns;
+	struct syslog_namespace *ns = file->f_cred->user_ns->syslog_ns;
 
-	if (!current->nsproxy)
-		return -EFAULT;
-	ns = current->nsproxy->syslog_ns;
-
+	file->private_data = ns;
 	return do_syslog(SYSLOG_ACTION_OPEN, NULL, 0, SYSLOG_FROM_PROC, ns);
 }
 
 static int kmsg_release(struct inode * inode, struct file * file)
 {
-	struct syslog_namespace *ns;
-
-	if (!current->nsproxy)
-		return -EFAULT;
-
-	ns = current->nsproxy->syslog_ns;
+	struct syslog_namespace *ns = file->private_data;
 
 	(void) do_syslog(SYSLOG_ACTION_CLOSE, NULL, 0, SYSLOG_FROM_PROC, ns);
 	return 0;
@@ -46,28 +38,17 @@ static int kmsg_release(struct inode * inode, struct file * file)
 static ssize_t kmsg_read(struct file *file, char __user *buf,
 			 size_t count, loff_t *ppos)
 {
-	struct syslog_namespace *ns;
-
-	if (!current->nsproxy)
-		return -EFAULT;
-
-	ns = current->nsproxy->syslog_ns;
+	struct syslog_namespace *ns = file->private_data;
 
 	if ((file->f_flags & O_NONBLOCK) &&
 	    !do_syslog(SYSLOG_ACTION_SIZE_UNREAD, NULL, 0, SYSLOG_FROM_PROC, ns))
 		return -EAGAIN;
-	return do_syslog(SYSLOG_ACTION_READ, buf, count, SYSLOG_FROM_PROC,
-					current->nsproxy->syslog_ns);
+	return do_syslog(SYSLOG_ACTION_READ, buf, count, SYSLOG_FROM_PROC, ns);
 }
 
 static __poll_t kmsg_poll(struct file *file, poll_table *wait)
 {
-	struct syslog_namespace *ns;
-
-	if (!current->nsproxy)
-		return -EFAULT;
-
-	ns = current->nsproxy->syslog_ns;
+	struct syslog_namespace *ns = file->private_data;
 
 	poll_wait(file, &ns->log_wait, wait);
 	if (do_syslog(SYSLOG_ACTION_SIZE_UNREAD, NULL, 0, SYSLOG_FROM_PROC, ns))
