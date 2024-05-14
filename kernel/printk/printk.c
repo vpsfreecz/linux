@@ -603,8 +603,8 @@ static int check_syslog_permissions(int type, int source,
 		ns = &init_syslog_ns;
 
 	if (type == SYSLOG_ACTION_NEW_NS &&
-	    !ns_capable(ns->user_ns, CAP_SYS_ADMIN))
-		return -EPERM;
+	    current_user_ns() == &init_user_ns)
+		return 0;
 
 	if (syslog_action_restricted(type, ns)) {
 		if (ns_capable(ns->user_ns, CAP_SYSLOG))
@@ -2252,13 +2252,17 @@ static u16 printk_sprint_tagged(struct syslog_namespace *tag, char *text, u16 si
 	if (tag) {
 		u16 name_len = strlen(tag->name);
 		u16 tag_len = name_len + 5; // "[ tag ] "
+
+		if (text_len + tag_len > size)
+			goto out;
+
 		memmove(text + tag_len, text, text_len);
 		memcpy(text, "[ ", 2);
 		memcpy(text + 2, tag->name, name_len);
 		memcpy(text + 2 + name_len, " ] ", 3);
 		text_len += tag_len;
 	}
-
+out:
 	trace_console(text, text_len);
 
 	return text_len;

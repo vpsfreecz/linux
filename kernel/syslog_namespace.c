@@ -115,16 +115,6 @@ struct syslog_namespace *clone_syslog_ns(struct user_namespace *user_ns,
 	struct ucounts *ucounts;
 	int err;
 
-	if (!ns_capable(user_ns, CAP_SYSLOG)) {
-		if (ns_capable(user_ns, CAP_SYS_ADMIN)) {
-			pr_warn_once("%s (%d): Attempt to access syslog with "
-				"CAP_SYS_ADMIN but no CAP_SYSLOG "
-				"(deprecated).\n",
-				current->comm, task_pid_nr(current));
-		} else
-			return ERR_PTR(-EPERM);
-	}
-
 	err = -ENOSPC;
 	ucounts = inc_syslog_namespaces(user_ns);
 	if (!ucounts)
@@ -194,11 +184,13 @@ static struct ns_common *syslogns_get(struct task_struct *task)
 	struct syslog_namespace *ns = NULL;
 	struct nsproxy *nsproxy;
 
+	task_lock(task);
 	nsproxy = task->nsproxy;
 	if (nsproxy) {
 		ns = nsproxy->syslog_ns;
 		get_syslog_ns(ns);
 	}
+	task_unlock(task);
 
 	return ns ? &ns->ns : NULL;
 }
