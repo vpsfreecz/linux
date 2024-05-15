@@ -782,7 +782,7 @@ static int
 spa_state_data(char *buf, size_t size, void *data)
 {
 	spa_t *spa = (spa_t *)data;
-	(void) snprintf(buf, size, "%s\n", spa_state_to_name(spa));
+	(void) snprintf(buf, size, "%s YOLO\n", spa_state_to_name(spa));
 	return (0);
 }
 
