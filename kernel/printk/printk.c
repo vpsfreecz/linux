@@ -1848,7 +1848,7 @@ int do_syslog(int type, char __user *buf, int len, int source,
 		break;
 	case SYSLOG_ACTION_NEW_NS:
 #ifdef CONFIG_SYSLOG_NS
-		if (len > SYSLOG_NS_NAME_MAX_LENGHT) {
+		if (len > SYSLOG_NS_NAME_MAX_LENGTH) {
 			error = -ENAMETOOLONG;
 			break;
 		}
@@ -1868,8 +1868,7 @@ int do_syslog(int type, char __user *buf, int len, int source,
 			error = -EFAULT;
 			break;
 		}
-		strncpy(current->syslog_ns_for_child_name, tmp, len);
-		kfree(tmp);
+		current->syslog_ns_for_child_name = tmp;
 		error = 0;
 		pr_debug("syslog_ns: new syslog ns %s will be created next clone(0)\n", current->syslog_ns_for_child_name);
 #else
@@ -2250,7 +2249,7 @@ static u16 printk_sprint_tagged(struct syslog_namespace *tag, char *text, u16 si
 	}
 
 	if (tag) {
-		u16 name_len = strlen(tag->name);
+		u16 name_len = strnlen(tag->name, SYSLOG_NS_NAME_MAX_LENGTH);
 		u16 tag_len = name_len + 5; // "[ tag ] "
 
 		if (text_len + tag_len > size)
@@ -2319,7 +2318,7 @@ int vprintk_store_ns_tagged(struct syslog_namespace *ns, struct syslog_namespace
 	va_end(args2);
 
 	if (tag)
-		reserve_size += SYSLOG_NS_NAME_MAX_LENGHT + 5; // "[ tag ] "
+		reserve_size += SYSLOG_NS_NAME_MAX_LENGTH + 5; // "[ tag ] "
 
 	if (reserve_size > PRINTKRB_RECORD_MAX)
 		reserve_size = PRINTKRB_RECORD_MAX;

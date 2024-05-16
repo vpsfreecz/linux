@@ -45,7 +45,7 @@ struct syslog_namespace {
 	struct kref		kref;
 	struct syslog_namespace	*parent;
 
-	char			name[SYSLOG_NS_NAME_MAX_LENGHT];
+	char			*name;
 
 	/*
 	 * The next printk record to read after the last 'clear' command. There are

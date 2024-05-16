@@ -1506,7 +1506,7 @@ struct task_struct {
 	struct bpf_run_ctx		*bpf_ctx;
 #endif
 	bool				syslog_ns_for_child;
-	char				syslog_ns_for_child_name[SYSLOG_NS_NAME_MAX_LENGHT];
+	char				*syslog_ns_for_child_name;
 
 #ifdef CONFIG_GCC_PLUGIN_STACKLEAK
 	unsigned long			lowest_stack;

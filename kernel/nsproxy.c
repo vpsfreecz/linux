@@ -126,7 +126,10 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 	new_nsp->syslog_ns = copy_syslog_ns(tsk->syslog_ns_for_child, tsk->syslog_ns_for_child_name,
 				            user_ns, tsk->nsproxy->syslog_ns);
 	tsk->syslog_ns_for_child = false;
-	memset(tsk->syslog_ns_for_child_name, 0, sizeof(tsk->syslog_ns_for_child_name));
+	if (tsk->syslog_ns_for_child_name) {
+		kfree(tsk->syslog_ns_for_child_name);
+		tsk->syslog_ns_for_child_name = NULL;
+	}
 	if (IS_ERR(new_nsp->syslog_ns)) {
 		err = PTR_ERR(new_nsp->syslog_ns);
 		goto out_syslog;

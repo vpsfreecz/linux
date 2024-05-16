@@ -136,7 +136,7 @@ struct syslog_namespace *clone_syslog_ns(struct user_namespace *user_ns,
 	ns->user_ns = get_user_ns(user_ns);
 	ns->parent = get_syslog_ns(old_ns);
 
-	scnprintf(ns->name, sizeof(ns->name), "%s", name);
+	ns->name = kstrdup(name, GFP_KERNEL);
 
 	mutex_init(&ns->syslog_lock);
 	init_waitqueue_head(&ns->log_wait);
