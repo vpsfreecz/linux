@@ -53,12 +53,12 @@ int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 	ns->log_buf_len = new_log_buf_len;
 
 	descs_size = descs_count * sizeof(struct prb_desc);
-	descs = kvmalloc(descs_size, GFP_KERNEL);
+	descs = kvzalloc(descs_size, GFP_KERNEL);
 	if (unlikely(!descs))
 		goto fail_free_log_buf;
 
 	infos_size = descs_count * sizeof(struct printk_info);
-	infos = kvmalloc(infos_size, GFP_KERNEL);
+	infos = kvzalloc(infos_size, GFP_KERNEL);
 	if (unlikely(!infos))
 		goto fail_free_descs;
 
