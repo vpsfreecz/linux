@@ -108,22 +108,31 @@ void nfsd_percpu_counters_destroy(struct percpu_counter counters[], int num)
 		percpu_counter_destroy(&counters[i]);
 }
 
-int nfsd_stat_counters_init(void)
+static int nfsd_stat_counters_init(void)
 {
 	return nfsd_percpu_counters_init(nfsdstats.counter, NFSD_STATS_COUNTERS_NUM);
 }
 
-void nfsd_stat_counters_destroy(void)
+static void nfsd_stat_counters_destroy(void)
 {
 	nfsd_percpu_counters_destroy(nfsdstats.counter, NFSD_STATS_COUNTERS_NUM);
 }
 
-void nfsd_proc_stat_init(struct net *net)
+int nfsd_stat_init(void)
 {
-	svc_proc_register(net, &nfsd_svcstats, &nfsd_proc_ops);
+	int err;
+
+	err = nfsd_stat_counters_init();
+	if (err)
+		return err;
+
+	svc_proc_register(&init_net, &nfsd_svcstats, &nfsd_proc_ops);
+
+	return 0;
 }
 
-void nfsd_proc_stat_shutdown(struct net *net)
+void nfsd_stat_shutdown(void)
 {
-	svc_proc_unregister(net, "nfsd");
+	nfsd_stat_counters_destroy();
+	svc_proc_unregister(&init_net, "nfsd");
 }
