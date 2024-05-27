@@ -593,6 +593,13 @@ unsigned long vm_mmap(struct file *file, unsigned long addr,
 }
 EXPORT_SYMBOL(vm_mmap);
 
+enum {
+	KVMALLOC_NORECLAIM = 1,
+	KVMALLOC_NORECLAIM_ALWAYS_WAKE_KSWAPD = 2,
+};
+
+int kvmalloc_noreclaim __read_mostly = 0;
+
 /**
  * kvmalloc_node - attempt to allocate physically contiguous memory, but upon
  * failure, fall back to non-contiguous (vmalloc) allocation.
@@ -624,8 +631,23 @@ void *kvmalloc_node_noprof(size_t size, gfp_t flags, int node)
 	if (size > PAGE_SIZE) {
 		kmalloc_flags |= __GFP_NOWARN;
 
-		if (!(kmalloc_flags & __GFP_RETRY_MAYFAIL))
-			kmalloc_flags |= __GFP_NORETRY;
+		switch (kvmalloc_noreclaim) {
+		case KVMALLOC_NORECLAIM_ALWAYS_WAKE_KSWAPD:
+			if (kmalloc_flags & __GFP_DIRECT_RECLAIM)
+				kmalloc_flags |= __GFP_KSWAPD_RECLAIM;
+			/* fall through */
+		case KVMALLOC_NORECLAIM:
+			/*
+			 * Not even once!
+			 * ... in direct path, but let's still (possibly)
+			 * allow kswapd to kick in
+			 */
+			kmalloc_flags &= ~__GFP_DIRECT_RECLAIM;
+			break;
+		default:
+			if (!(kmalloc_flags & __GFP_RETRY_MAYFAIL))
+				kmalloc_flags |= __GFP_NORETRY;
+		}
 
 		/* nofail semantic is implemented by the vmalloc fallback */
 		kmalloc_flags &= ~__GFP_NOFAIL;
