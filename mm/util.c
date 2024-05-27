@@ -608,6 +608,13 @@ unsigned long vm_mmap(struct file *file, unsigned long addr,
 }
 EXPORT_SYMBOL(vm_mmap);
 
+enum {
+	KVMALLOC_NORECLAIM = 1,
+	KVMALLOC_NORECLAIM_ALWAYS_WAKE_KSWAPD = 2,
+};
+
+int kvmalloc_noreclaim __read_mostly = 0;
+
 static gfp_t kmalloc_gfp_adjust(gfp_t flags, size_t size)
 {
 	/*
@@ -622,6 +629,24 @@ static gfp_t kmalloc_gfp_adjust(gfp_t flags, size_t size)
 
 		if (!(flags & __GFP_RETRY_MAYFAIL))
 			flags |= __GFP_NORETRY;
+
+		switch (kvmalloc_noreclaim) {
+		case KVMALLOC_NORECLAIM_ALWAYS_WAKE_KSWAPD:
+			if (flags & __GFP_DIRECT_RECLAIM)
+				flags |= __GFP_KSWAPD_RECLAIM;
+			/* fall through */
+		case KVMALLOC_NORECLAIM:
+			/*
+			 * Not even once!
+			 * ... in direct path, but let's still (possibly)
+			 * allow kswapd to kick in
+			 */
+			flags &= ~__GFP_DIRECT_RECLAIM;
+			break;
+		default:
+			if (!(flags & __GFP_RETRY_MAYFAIL))
+				flags |= __GFP_NORETRY;
+		}
 
 		/* nofail semantic is implemented by the vmalloc fallback */
 		flags &= ~__GFP_NOFAIL;
