@@ -1898,6 +1898,15 @@ static struct ctl_table kern_table[] = {
 		.extra2         = SYSCTL_ONE,
 	},
 	{
+		.procname       = "kvmalloc_noreclaim",
+		.data           = &kvmalloc_noreclaim,
+		.maxlen         = sizeof(kvmalloc_noreclaim),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec_minmax,
+		.extra1         = SYSCTL_ZERO,
+		.extra2         = SYSCTL_TWO,
+	},
+	{
 		.procname	= "ngroups_max",
 		.data		= (void *)&ngroups_max,
 		.maxlen		= sizeof (int),
