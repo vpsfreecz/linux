@@ -787,6 +787,8 @@ extern void *kvmalloc_node_noprof(size_t size, gfp_t flags, int node) __alloc_si
 #define kvmalloc_noprof(_size, _flags)		kvmalloc_node_noprof(_size, _flags, NUMA_NO_NODE)
 #define kvzalloc(_size, _flags)			kvmalloc(_size, (_flags)|__GFP_ZERO)
 
+extern int kvmalloc_noreclaim;
+
 #define kvzalloc_node(_size, _flags, _node)	kvmalloc_node(_size, (_flags)|__GFP_ZERO, _node)
 
 static inline __alloc_size(1, 2) void *
