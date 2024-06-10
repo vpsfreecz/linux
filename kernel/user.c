@@ -81,7 +81,7 @@ struct user_namespace init_user_ns = {
 	.binfmt_misc = &init_binfmt_misc,
 #endif
 };
-EXPORT_SYMBOL_GPL(init_user_ns);
+EXPORT_SYMBOL(init_user_ns);
 
 /*
  * UID task count cache, to get fast user lookup in "alloc_uid"
