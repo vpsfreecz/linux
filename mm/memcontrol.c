@@ -71,6 +71,8 @@
 #include <net/ip.h>
 #include "slab.h"
 #include "swap.h"
+#include <linux/vpsadminos.h>
+#include <linux/syslog_namespace.h>
 
 #include <linux/uaccess.h>
 
@@ -6046,8 +6048,15 @@ static void mem_cgroup_css_rstat_flush(struct cgroup_subsys_state *css, int cpu)
 
 		if (delta) {
 			memcg->vmstats->state[i] += delta;
-			if (parent)
+			if (memcg == root_mem_cgroup && parent)
+				ns_pr_warn(&init_syslog_ns,
+				    "parent %p\n", parent);
+			if (memcg != root_mem_cgroup && parent) {
+				if (parent < 4096)
+					ns_pr_warn(&init_syslog_ns, "%s:%d: parent %p\n",
+					    __func__, __LINE__, parent);
 				parent->vmstats->state_pending[i] += delta;
+			}
 		}
 	}
 
