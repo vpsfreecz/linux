@@ -3780,7 +3780,7 @@ static void mem_cgroup_css_rstat_flush(struct cgroup_subsys_state *css, int cpu)
 
 		if (delta) {
 			memcg->vmstats->state[i] += delta;
-			if (parent)
+			if (memcg != root_mem_cgroup && parent)
 				parent->vmstats->state_pending[i] += delta;
 		}
 	}
