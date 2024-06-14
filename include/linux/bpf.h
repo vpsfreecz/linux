@@ -2180,6 +2180,7 @@ static inline void bpf_map_dec_elem_count(struct bpf_map *map)
 }
 
 extern int sysctl_unprivileged_bpf_disabled;
+extern int sysctl_unprivileged_bpf_time_adjust_nsec;
 
 static inline bool bpf_allow_ptr_leaks(void)
 {
