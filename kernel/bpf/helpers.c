@@ -172,10 +172,21 @@ const struct bpf_func_proto bpf_get_numa_node_id_proto = {
 	.ret_type	= RET_INTEGER,
 };
 
+int sysctl_unprivileged_bpf_time_adjust_nsec __read_mostly = 5 * NSEC_PER_MSEC;
+
+inline u64 bpf_time_maybe_adjust_unprivileged(u64 time)
+{
+	/* Round the time down to nearest 2.5us for non-privileged users */
+	if (sysctl_unprivileged_bpf_time_adjust_nsec && (current_user_ns() != &init_user_ns))
+		return time - (time % sysctl_unprivileged_bpf_time_adjust_nsec);
+
+	return time;
+}
+
 BPF_CALL_0(bpf_ktime_get_ns)
 {
 	/* NMI safe access to clock monotonic */
-	return ktime_get_mono_fast_ns();
+	return bpf_time_maybe_adjust_unprivileged(ktime_get_mono_fast_ns());
 }
 
 const struct bpf_func_proto bpf_ktime_get_ns_proto = {
@@ -187,7 +198,7 @@ const struct bpf_func_proto bpf_ktime_get_ns_proto = {
 BPF_CALL_0(bpf_ktime_get_boot_ns)
 {
 	/* NMI safe access to clock boottime */
-	return ktime_get_boot_fast_ns();
+	return bpf_time_maybe_adjust_unprivileged(ktime_get_boot_fast_ns());
 }
 
 const struct bpf_func_proto bpf_ktime_get_boot_ns_proto = {
@@ -198,7 +209,7 @@ const struct bpf_func_proto bpf_ktime_get_boot_ns_proto = {
 
 BPF_CALL_0(bpf_ktime_get_coarse_ns)
 {
-	return ktime_get_coarse_ns();
+	return bpf_time_maybe_adjust_unprivileged(ktime_get_coarse_ns());
 }
 
 const struct bpf_func_proto bpf_ktime_get_coarse_ns_proto = {
@@ -210,7 +221,7 @@ const struct bpf_func_proto bpf_ktime_get_coarse_ns_proto = {
 BPF_CALL_0(bpf_ktime_get_tai_ns)
 {
 	/* NMI safe access to clock tai */
-	return ktime_get_tai_fast_ns();
+	return bpf_time_maybe_adjust_unprivileged(ktime_get_tai_fast_ns());
 }
 
 const struct bpf_func_proto bpf_ktime_get_tai_ns_proto = {
