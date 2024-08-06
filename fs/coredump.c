@@ -998,6 +998,8 @@ static int proc_dostring_coredump(struct ctl_table *table, int write,
 		return -EPERM;
 
 	tmp.data = ns->core_pattern;
+	tmp.maxlen = ns->core_name_size;
+
 	error = proc_dostring(&tmp, write, buffer, lenp, ppos);
 
 	if (!error)
