@@ -176,6 +176,13 @@ int create_user_ns(struct cred *new)
 	set_cred_user_ns(new, ns);
 
 	fake_sysctl_bufs_init(ns);
+
+	ns->core_uses_pid = parent_ns->core_uses_pid;
+	ns->core_pipe_limit = parent_ns->core_pipe_limit;
+	atomic_set(&ns->core_dump_count, 0);
+	ns->core_name_size = parent_ns->core_name_size;
+	ns->core_pattern = kmemdup(parent_ns->core_pattern, parent_ns->core_name_size, GFP_KERNEL);
+	ns->core_file_note_size_limit = parent_ns->core_file_note_size_limit;
 	return 0;
 fail_keyring:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
@@ -239,6 +246,7 @@ static void free_user_ns(struct work_struct *work)
 		key_free_user_ns(ns);
 		ns_free_inum(&ns->ns);
 		fake_sysctl_bufs_free(ns);
+		kfree(ns->core_pattern);
 		kmem_cache_free(user_ns_cachep, ns);
 		dec_user_namespaces(ucounts);
 		ns = parent;
