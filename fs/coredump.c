@@ -54,6 +54,8 @@
 
 #include <trace/events/sched.h>
 
+#include <linux/vpsadminos.h>
+
 static bool dump_vma_snapshot(struct coredump_params *cprm);
 static void free_vma_snapshot(struct coredump_params *cprm);
 
@@ -61,16 +63,10 @@ static void free_vma_snapshot(struct coredump_params *cprm);
 /* Define a reasonable max cap */
 #define CORE_FILE_NOTE_SIZE_MAX (16*1024*1024)
 
-static int core_uses_pid;
-static unsigned int core_pipe_limit;
-static unsigned int core_sort_vma;
-static char core_pattern[CORENAME_MAX_SIZE] = "core";
-static int core_name_size = CORENAME_MAX_SIZE;
-unsigned int core_file_note_size_limit = CORE_FILE_NOTE_SIZE_DEFAULT;
-
 struct core_name {
 	char *corename;
 	int used, size;
+	struct user_namespace *ns;
 };
 
 static int expand_corename(struct core_name *cn, int size)
@@ -83,8 +79,8 @@ static int expand_corename(struct core_name *cn, int size)
 	if (!corename)
 		return -ENOMEM;
 
-	if (size > core_name_size) /* racy but harmless */
-		core_name_size = size;
+	if (size > cn->ns->core_name_size) /* racy but harmless */
+		cn->ns->core_name_size = size;
 
 	cn->size = size;
 	cn->corename = corename;
@@ -209,7 +205,7 @@ static int format_corename(struct core_name *cn, struct coredump_params *cprm,
 			   size_t **argv, int *argc)
 {
 	const struct cred *cred = current_cred();
-	const char *pat_ptr = core_pattern;
+	const char *pat_ptr = cn->ns->core_pattern;
 	int ispipe = (*pat_ptr == '|');
 	bool was_space = false;
 	int pid_in_pattern = 0;
@@ -217,12 +213,12 @@ static int format_corename(struct core_name *cn, struct coredump_params *cprm,
 
 	cn->used = 0;
 	cn->corename = NULL;
-	if (expand_corename(cn, core_name_size))
+	if (expand_corename(cn, cn->ns->core_name_size))
 		return -ENOMEM;
 	cn->corename[0] = '\0';
 
 	if (ispipe) {
-		int argvs = sizeof(core_pattern) / 2;
+		int argvs = sizeof(cn->ns->core_pattern) / 2;
 		(*argv) = kmalloc_array(argvs, sizeof(**argv), GFP_KERNEL);
 		if (!(*argv))
 			return -ENOMEM;
@@ -355,7 +351,7 @@ out:
 	 * If core_pattern does not include a %p (as is the default)
 	 * and core_uses_pid is set, then .%pid will be appended to
 	 * the filename. Do not do this for piped commands. */
-	if (!ispipe && !pid_in_pattern && core_uses_pid) {
+	if (!ispipe && !pid_in_pattern && cn->ns->core_uses_pid) {
 		err = cn_printf(cn, ".%d", task_tgid_vnr(current));
 		if (err)
 			return err;
@@ -524,7 +520,7 @@ static int umh_pipe_setup(struct subprocess_info *info, struct cred *new)
 void do_coredump(const kernel_siginfo_t *siginfo)
 {
 	struct core_state core_state;
-	struct core_name cn;
+	struct core_name cn = { .ns = current_1stlvl_user_ns() };
 	struct mm_struct *mm = current->mm;
 	struct linux_binfmt * binfmt;
 	const struct cred *old_cred;
@@ -536,7 +532,6 @@ void do_coredump(const kernel_siginfo_t *siginfo)
 	/* require nonrelative corefile path and be extra careful */
 	bool need_suid_safe = false;
 	bool core_dumped = false;
-	static atomic_t core_dump_count = ATOMIC_INIT(0);
 	struct coredump_params cprm = {
 		.siginfo = siginfo,
 		.limit = rlimit(RLIMIT_CORE),
@@ -613,8 +608,8 @@ void do_coredump(const kernel_siginfo_t *siginfo)
 		}
 		cprm.limit = RLIM_INFINITY;
 
-		dump_count = atomic_inc_return(&core_dump_count);
-		if (core_pipe_limit && (core_pipe_limit < dump_count)) {
+		dump_count = atomic_inc_return(&cn.ns->core_dump_count);
+		if (cn.ns->core_pipe_limit && (cn.ns->core_pipe_limit < dump_count)) {
 			coredump_report_failure("over core_pipe_limit, skipping core dump");
 			goto fail_dropcount;
 		}
@@ -770,14 +765,14 @@ void do_coredump(const kernel_siginfo_t *siginfo)
 		file_end_write(cprm.file);
 		free_vma_snapshot(&cprm);
 	}
-	if (ispipe && core_pipe_limit)
+	if (ispipe && cn.ns->core_pipe_limit)
 		wait_for_dump_helpers(cprm.file);
 close_fail:
 	if (cprm.file)
 		filp_close(cprm.file, NULL);
 fail_dropcount:
 	if (ispipe)
-		atomic_dec(&core_dump_count);
+		atomic_dec(&cn.ns->core_dump_count);
 fail_unlock:
 	kfree(argv);
 	kfree(cn.corename);
@@ -973,8 +968,10 @@ EXPORT_SYMBOL(dump_align);
 
 void validate_coredump_safety(void)
 {
+	struct user_namespace *ns = current_1stlvl_user_ns();
+
 	if (suid_dumpable == SUID_DUMP_ROOT &&
-	    core_pattern[0] != '/' && core_pattern[0] != '|') {
+	    ns->core_pattern[0] != '/' && ns->core_pattern[0] != '|') {
 
 		coredump_report_failure("Unsafe core_pattern used with fs.suid_dumpable=2: "
 			"pipe handler or fully qualified core dump path required. "
@@ -985,7 +982,17 @@ void validate_coredump_safety(void)
 static int proc_dostring_coredump(const struct ctl_table *table, int write,
 		  void *buffer, size_t *lenp, loff_t *ppos)
 {
-	int error = proc_dostring(table, write, buffer, lenp, ppos);
+	int error;
+	struct user_namespace *ns = current_1stlvl_user_ns();
+	struct ctl_table tmp;
+
+	if (write && !ns_capable(ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	tmp.data = ns->core_pattern;
+	tmp.maxlen = ns->core_name_size;
+
+	error = proc_dostring(&tmp, write, buffer, lenp, ppos);
 
 	if (!error)
 		validate_coredump_safety();
@@ -995,43 +1002,120 @@ static int proc_dostring_coredump(const struct ctl_table *table, int write,
 static const unsigned int core_file_note_size_min = CORE_FILE_NOTE_SIZE_DEFAULT;
 static const unsigned int core_file_note_size_max = CORE_FILE_NOTE_SIZE_MAX;
 
+static int proc_dointvec_pipe_limit(const struct ctl_table *table, int write,
+				     void *buffer, size_t *lenp, loff_t *ppos)
+{
+	int error;
+	struct user_namespace *ns = current_1stlvl_user_ns();
+	struct ctl_table tmp;
+
+	if (write && !ns_capable(ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	tmp.data = &ns->core_pipe_limit;
+	tmp.maxlen = sizeof(unsigned int);
+
+	error = proc_dointvec(&tmp, write, buffer, lenp, ppos);
+
+	return error;
+}
+
+
+static int proc_dointvec_uses_pid(const struct ctl_table *table, int write,
+				  void *buffer, size_t *lenp, loff_t *ppos)
+{
+	int error;
+	struct user_namespace *ns = current_1stlvl_user_ns();
+	struct ctl_table tmp;
+
+	if (write && !ns_capable(ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	tmp.data = &ns->core_uses_pid;
+	tmp.maxlen = sizeof(int);
+
+	error = proc_dointvec(&tmp, write, buffer, lenp, ppos);
+
+	return error;
+}
+
+static int proc_douintvec_note_size_limit(const struct ctl_table *table, int write,
+				  void *buffer, size_t *lenp, loff_t *ppos)
+{
+	int error;
+	struct user_namespace *ns = current_1stlvl_user_ns();
+	struct ctl_table tmp;
+
+	if (write && !ns_capable(ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	tmp.data = &ns->core_file_note_size_limit;
+	tmp.maxlen = sizeof(unsigned int);
+	tmp.extra1 = (unsigned int *)&core_file_note_size_min;
+	tmp.extra2 = (unsigned int *)&core_file_note_size_max;
+
+	error = proc_douintvec_minmax(&tmp, write, buffer, lenp, ppos);
+
+	return error;
+}
+
+static int proc_douintvec_core_sort_vma(const struct ctl_table *table, int write,
+					void *buffer, size_t *lenp, loff_t *ppos)
+{
+	int error;
+	struct user_namespace *ns = current_1stlvl_user_ns();
+	struct ctl_table tmp;
+
+	if (write && !ns_capable(ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	tmp.data = &ns->core_sort_vma;
+	tmp.maxlen = sizeof(int);
+	tmp.extra1 = SYSCTL_ZERO;
+	tmp.extra2 = SYSCTL_ONE;
+
+	error = proc_douintvec_minmax(&tmp, write, buffer, lenp, ppos);
+
+	return error;
+}
+
 static struct ctl_table coredump_sysctls[] = {
 	{
 		.procname	= "core_uses_pid",
-		.data		= &core_uses_pid,
+		.data		= NULL,
 		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
+		.mode		= 0666,
+		.proc_handler	= proc_dointvec_uses_pid,
 	},
 	{
 		.procname	= "core_pattern",
-		.data		= core_pattern,
+		.data		= NULL,
 		.maxlen		= CORENAME_MAX_SIZE,
-		.mode		= 0644,
+		.mode		= 0666,
 		.proc_handler	= proc_dostring_coredump,
 	},
 	{
 		.procname	= "core_pipe_limit",
-		.data		= &core_pipe_limit,
+		.data		= NULL,
 		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
+		.mode		= 0666,
+		.proc_handler	= proc_dointvec_pipe_limit,
 	},
 	{
 		.procname       = "core_file_note_size_limit",
-		.data           = &core_file_note_size_limit,
+		.data           = NULL,
 		.maxlen         = sizeof(unsigned int),
 		.mode           = 0644,
-		.proc_handler	= proc_douintvec_minmax,
+		.proc_handler	= proc_douintvec_note_size_limit,
 		.extra1		= (unsigned int *)&core_file_note_size_min,
 		.extra2		= (unsigned int *)&core_file_note_size_max,
 	},
 	{
 		.procname	= "core_sort_vma",
-		.data		= &core_sort_vma,
+		.data		= NULL,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_douintvec_minmax,
+		.proc_handler	= proc_douintvec_core_sort_vma,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
 	},
@@ -1213,6 +1297,7 @@ static bool dump_vma_snapshot(struct coredump_params *cprm)
 	struct mm_struct *mm = current->mm;
 	VMA_ITERATOR(vmi, mm, 0);
 	int i = 0;
+	struct user_namespace *ns = current_1stlvl_user_ns();
 
 	/*
 	 * Once the stack expansion code is fixed to not change VMA bounds
@@ -1265,7 +1350,7 @@ static bool dump_vma_snapshot(struct coredump_params *cprm)
 		cprm->vma_data_size += m->dump_size;
 	}
 
-	if (core_sort_vma)
+	if (ns->core_sort_vma)
 		sort(cprm->vma_meta, cprm->vma_count, sizeof(*cprm->vma_meta),
 		     cmp_vma_size, NULL);
 
