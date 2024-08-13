@@ -12,6 +12,7 @@
 #include <linux/err.h>
 #include <linux/xarray.h>
 #include <linux/cred.h>
+#include <linux/binfmts.h>
 
 #define UID_GID_MAP_MAX_BASE_EXTENTS 5
 #define UID_GID_MAP_MAX_EXTENTS 340
@@ -117,6 +118,13 @@ struct user_namespace {
 #endif
 
 	struct xarray		fake_sysctl_bufs;
+
+	int			core_uses_pid;
+	unsigned int		core_pipe_limit;
+	atomic_t		core_dump_count;
+	char			*core_pattern;
+	int			core_name_size;
+	int			core_file_note_size_limit;
 } __randomize_layout;
 
 struct ucounts {
