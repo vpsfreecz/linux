@@ -11,6 +11,8 @@ struct filename;
 struct coredump_params;
 
 #define CORENAME_MAX_SIZE 128
+#define CORE_FILE_NOTE_SIZE_DEFAULT (4*1024*1024)
+#define CORE_FILE_NOTE_SIZE_MAX (16*1024*1024)
 
 /*
  * This structure is used to hold the arguments that are used when loading binaries.
