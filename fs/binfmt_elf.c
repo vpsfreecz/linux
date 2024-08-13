@@ -1596,7 +1596,7 @@ static int fill_files_note(struct memelfnote *note, struct coredump_params *cprm
 	names_ofs = (2 + 3 * count) * sizeof(data[0]);
  alloc:
 	/* paranoia check */
-	if (size >= core_file_note_size_limit) {
+	if (size >= current_user_ns()->core_file_note_size_limit) {
 		pr_warn_once("coredump Note size too large: %u (does kernel.core_file_note_size_limit sysctl need adjustment?\n",
 			      size);
 		return -EINVAL;
