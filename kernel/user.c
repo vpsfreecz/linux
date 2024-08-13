@@ -6,7 +6,7 @@
  *
  * We have a per-user structure to keep track of how many
  * processes, files etc the user has claimed, in order to be
- * able to have per-user limits for system resources. 
+ * able to have per-user limits for system resources.
  */
 
 #include <linux/init.h>
@@ -30,6 +30,8 @@ struct binfmt_misc init_binfmt_misc = {
 };
 EXPORT_SYMBOL_GPL(init_binfmt_misc);
 #endif
+
+char init_core_pattern[CORENAME_MAX_SIZE] = "core";
 
 /*
  * userns count is 1 for root user, 1 for init_uts_ns,
@@ -82,6 +84,12 @@ struct user_namespace init_user_ns = {
 #if IS_ENABLED(CONFIG_BINFMT_MISC)
 	.binfmt_misc = &init_binfmt_misc,
 #endif
+	.core_uses_pid = 0,
+	.core_pipe_limit = 0,
+	.core_dump_count = ATOMIC_INIT(0),
+	.core_pattern = init_core_pattern,
+	.core_name_size = CORENAME_MAX_SIZE,
+	.core_file_note_size_limit = CORE_FILE_NOTE_SIZE_DEFAULT,
 };
 EXPORT_SYMBOL(init_user_ns);
 
