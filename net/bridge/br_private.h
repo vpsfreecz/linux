@@ -626,7 +626,7 @@ struct br_input_skb_cb {
 #endif
 
 #define br_printk(level, br, format, args...)	\
-	printk(level "%s: " format, (br)->dev->name, ##args)
+	ns_printk(dev_net((br)->dev)->user_ns->syslog_ns, level "%s: " format, (br)->dev->name, ##args)
 
 #define br_err(__br, format, args...)			\
 	br_printk(KERN_ERR, __br, format, ##args)

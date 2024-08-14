@@ -55,6 +55,7 @@ struct kmsg_dumper {
 };
 
 #ifdef CONFIG_PRINTK
+
 void kmsg_dump(enum kmsg_dump_reason reason);
 
 bool kmsg_dump_get_line(struct kmsg_dump_iter *iter, bool syslog,
