@@ -178,6 +178,8 @@ static inline struct task_struct *alloc_task_struct_node(int node)
 
 static inline void free_task_struct(struct task_struct *tsk)
 {
+	if (tsk->syslog_ns_for_child_name)
+		kfree(tsk->syslog_ns_for_child_name);
 	kmem_cache_free(task_struct_cachep, tsk);
 }
 

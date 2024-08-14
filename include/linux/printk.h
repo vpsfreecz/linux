@@ -9,6 +9,7 @@
 #include <linux/ratelimit_types.h>
 #include <linux/once_lite.h>
 
+struct syslog_namespace;
 extern const char linux_banner[];
 extern const char linux_proc_banner[];
 
@@ -119,6 +120,9 @@ struct va_format {
  */
 #define DEPRECATED	"[Deprecated]: "
 
+asmlinkage __printf(2, 3) __cold
+int ns_printk(struct syslog_namespace *ns, const char *fmt, ...);
+
 /*
  * Dummy printk for disabled debugging statements to use whilst maintaining
  * gcc's format checking.
@@ -146,6 +150,11 @@ int vprintk_emit(int facility, int level,
 		 const struct dev_printk_info *dev_info,
 		 const char *fmt, va_list args);
 
+asmlinkage __printf(5, 0)
+int vprintk_emit_ns(struct syslog_namespace *ns, int facility, int level,
+		 const struct dev_printk_info *dev_info,
+		 const char *fmt, va_list args);
+
 asmlinkage __printf(1, 0)
 int vprintk(const char *fmt, va_list args);
 
@@ -167,6 +176,8 @@ extern void __printk_safe_exit(void);
 #define printk_deferred_enter __printk_safe_enter
 #define printk_deferred_exit __printk_safe_exit
 
+extern bool pr_flush(int timeout_ms, bool reset_on_progress);
+
 /*
  * Please don't use printk_ratelimit(), because it shares ratelimiting state
  * with all other unrelated printk_ratelimit() callsites.  Instead use
@@ -180,7 +191,7 @@ extern bool printk_timed_ratelimit(unsigned long *caller_jiffies,
 extern int printk_delay_msec;
 extern int dmesg_restrict;
 
-extern void wake_up_klogd(void);
+extern void wake_up_klogd(struct syslog_namespace *ns);
 
 char *log_buf_addr_get(void);
 u32 log_buf_len_get(void);
@@ -228,7 +239,7 @@ static inline bool printk_timed_ratelimit(unsigned long *caller_jiffies,
 	return false;
 }
 
-static inline void wake_up_klogd(void)
+static inline void wake_up_klogd(struct syslog_namespace *ns)
 {
 }
 
@@ -470,6 +481,22 @@ struct pi_entry {
  * This macro expands to a printk with KERN_EMERG loglevel. It uses pr_fmt() to
  * generate the format string.
  */
+#define ns_pr_emerg(ns, fmt, ...) \
+	ns_printk(ns, KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_alert(ns, fmt, ...) \
+	ns_printk(ns, KERN_ALERT pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_crit(ns, fmt, ...) \
+	ns_printk(ns, KERN_CRIT pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_err(ns, fmt, ...) \
+	ns_printk(ns, KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_warning(ns, fmt, ...) \
+	ns_printk(ns, KERN_WARNING pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_warn ns_pr_warning
+#define ns_pr_notice(ns, fmt, ...) \
+	ns_printk(ns, KERN_NOTICE pr_fmt(fmt), ##__VA_ARGS__)
+#define ns_pr_info(ns, fmt, ...) \
+	ns_printk(ns, KERN_INFO pr_fmt(fmt), ##__VA_ARGS__)
+
 #define pr_emerg(fmt, ...) \
 	printk(KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
 /**
@@ -544,6 +571,8 @@ struct pi_entry {
  */
 #define pr_cont(fmt, ...) \
 	printk(KERN_CONT fmt, ##__VA_ARGS__)
+#define ns_pr_cont(ns, fmt, ...) \
+	ns_printk(ns, KERN_CONT fmt, ##__VA_ARGS__)
 
 /**
  * pr_devel - Print a debug-level message conditionally
