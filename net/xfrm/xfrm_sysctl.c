@@ -56,8 +56,7 @@ int __net_init xfrm_sysctl_init(struct net *net)
 	table[2].data = &net->xfrm.sysctl_larval_drop;
 	table[3].data = &net->xfrm.sysctl_acq_expires;
 
-	/* Don't export sysctls to unprivileged users */
-	if (net->user_ns != &init_user_ns) {
+	if (net->user_ns != &init_user_ns && net->user_ns->parent != &init_user_ns) {
 		table[0].procname = NULL;
 		table_size = 0;
 	}
