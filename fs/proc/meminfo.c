@@ -36,7 +36,7 @@ static void show_val_kb(struct seq_file *m, const char *s, unsigned long num)
 					global_zone_page_state(x) : 0
 #define virtual_node_page_state(x) (!memcg) ? \
 					global_node_page_state(x) : \
-					memcg_page_state(memcg, x)
+					memcg_page_state_nowarn(memcg, x)
 static int meminfo_proc_show(struct seq_file *m, void *v)
 {
 	struct sysinfo i;
