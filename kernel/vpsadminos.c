@@ -138,7 +138,7 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u6
 	system_time = sys - sys_old;
 	run_time = user_time + system_time;
 
-	if (!run_time)
+	if (!run_time || !timestamp_old)
 		return;
 
 	usr_frac = 10000 * user_time;
