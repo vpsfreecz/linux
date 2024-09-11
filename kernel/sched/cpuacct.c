@@ -404,11 +404,17 @@ void cpustat_fake_readout(struct cgroup_subsys_state *css, int cpu,
 	if (ca == &root_cpuacct)
 		BUG();
 
+	pr_warn("%s:%d: *user_old = %llu\n", __func__, __LINE__, cpustat_old[CPUTIME_USER]);
+	pr_warn("%s:%d: *system_old = %llu\n", __func__, __LINE__, cpustat_old[CPUTIME_SYSTEM]);
+
 	*user_old = cpustat_old[CPUTIME_USER];
 	*system_old = cpustat_old[CPUTIME_SYSTEM];
 
 	*user = cpustat[CPUTIME_USER];
 	*system = cpustat[CPUTIME_SYSTEM];
+
+	pr_warn("%s:%d: cpustat_old[CPUTIME_USER] = %llu\n", __func__, __LINE__, *user);
+	pr_warn("%s:%d: cpustat_old[CPUTIME_SYSTEM] = %llu\n", __func__, __LINE__, *system);
 
 	cpustat_old[CPUTIME_USER] = *user;
 	cpustat_old[CPUTIME_SYSTEM] = *system;

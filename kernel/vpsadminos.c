@@ -115,6 +115,7 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u6
 	struct cpumask cpu_fake_mask;
 
 	timestamp_old = cpustat_fake_set_timestamp(css, timestamp);
+	pr_warn("%s:%d: timestamp_old = %llu, timestamp = %llu\n", __func__, __LINE__, timestamp_old, timestamp);
 	elapsed = timestamp - timestamp_old;
 	if (!elapsed)
 		return;
@@ -131,6 +132,7 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u6
 	*system = sys;
 	*cpus = online_cpus_in_cpu_cgroup(p);
 	fake_online_cpumask(p, &cpu_fake_mask);
+	pr_warn("%s:%d: cpus = %d\n", __func__, __LINE__, *cpus);
 
 	user_time = usr - usr_old;
 	system_time = sys - sys_old;
@@ -142,6 +144,8 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u6
 	usr_frac = 10000 * user_time;
 	do_div(usr_frac, run_time);
 	sys_frac = 10000 - usr_frac;
+	pr_warn("%s:%d: usr_frac = %llu, sys_frac = %llu\n", __func__, __LINE__, usr_frac, sys_frac);
+	pr_warn("%s:%d: elapsed = %llu, run_time = %llu\n", __func__, __LINE__, elapsed, run_time);
 
 	for_each_cpu(i, &cpu_fake_mask) {
 		if (run_time >= elapsed) {
@@ -149,15 +153,19 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u6
 			do_div(usr, 10000);
 			sys = elapsed - usr;
 			run_time -= elapsed;
+			pr_warn("%s:%d: (run_time >= elapsed) usr = %llu, sys = %llu, run_time = %llu, i = %d\n", __func__, __LINE__, usr, sys, run_time, i);
 		} else if (run_time) {
 			usr = run_time * usr_frac;
 			do_div(usr, 10000);
 			sys = run_time - usr;
 			run_time = 0;
+			pr_warn("%s:%d: (run_time) usr = %llu, sys = %llu, run_time = %llu, i = %d\n", __func__, __LINE__, usr, sys, run_time, i);
 		} else {
 			usr = 0;
 			sys = 0;
+			pr_warn("%s:%d: (else) usr = %llu, sys = %llu, i = %d\n", __func__, __LINE__, usr, sys, i);
 		}
+		pr_warn("%s:%d: cpustat_fake_write(css, %d, %llu, %llu)\n", __func__, __LINE__, i, usr, sys);
 		cpustat_fake_write(css, i, usr, sys);
 	}
 }
@@ -189,22 +197,26 @@ void fake_cputime_readout_v2(struct task_struct *p, u64 timestamp, u64 *user, u6
 	} else
 		return;
 
+
 	*user = usr;
 	*system = sys;
 	*cpus = online_cpus_in_cpu_cgroup(p);
 	fake_online_cpumask(p, &cpu_fake_mask);
+	pr_warn("%s:%d: cpus = %d\n", __func__, __LINE__, *cpus);
 
+	pr_warn("%s:%d: usr = %llu, sys = %llu, usr_old = %llu, sys_old = %llu\n", __func__, __LINE__, usr, sys, usr_old, sys_old);
 	user_time = usr - usr_old;
 	system_time = sys - sys_old;
 	run_time = user_time + system_time;
-
+	pr_warn("%s:%d: user_time = %llu, system_time = %llu, run_time = %llu\n", __func__, __LINE__, user_time, system_time, run_time);
 	if (!run_time)
 		return;
 
 	usr_frac = 10000 * user_time;
 	do_div(usr_frac, run_time);
 	sys_frac = 10000 - usr_frac;
-
+	pr_warn("%s:%d: usr_frac = %llu, sys_frac = %llu\n", __func__, __LINE__, usr_frac, sys_frac);
+	pr_warn("%s:%d: elapsed = %llu, run_time = %llu\n", __func__, __LINE__, elapsed, run_time);
 	for_each_cpu(i, &cpu_fake_mask) {
 		struct prev_cputime *cputime_fake = per_cpu_ptr(cgrp->prev_cputime_fake, i);	
 
@@ -213,14 +225,17 @@ void fake_cputime_readout_v2(struct task_struct *p, u64 timestamp, u64 *user, u6
 			do_div(usr, 10000);
 			sys = elapsed - usr;
 			run_time -= elapsed;
+			pr_warn("%s:%d: (run_time >= elapsed) usr = %llu, sys = %llu, run_time = %llu, i = %d\n", __func__, __LINE__, usr, sys, run_time, i);
 		} else if (run_time) {
 			usr = run_time * usr_frac;
 			do_div(usr, 10000);
 			sys = run_time - usr;
 			run_time = 0;
+			pr_warn("%s:%d: (run_time) usr = %llu, sys = %llu, run_time = %llu, i = %d\n", __func__, __LINE__, usr, sys, run_time, i);
 		} else {
 			usr = 0;
 			sys = 0;
+			pr_warn("%s:%d: (else) usr = %llu, sys = %llu, i = %d\n", __func__, __LINE__, usr, sys, i);
 		}
 		cputime_fake->utime += usr;
 		cputime_fake->stime += sys;
