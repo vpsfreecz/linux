@@ -14,6 +14,7 @@
 #include <linux/irqnr.h>
 #include <linux/sched/cputime.h>
 #include <linux/tick.h>
+#include <linux/vpsadminos.h>
 
 #ifndef arch_irq_stat_cpu
 #define arch_irq_stat_cpu(cpu) 0
@@ -88,6 +89,9 @@ static int show_stat(struct seq_file *p, void *v)
 	u64 sum_softirq = 0;
 	unsigned int per_softirq_sums[NR_SOFTIRQS] = {0};
 	struct timespec64 boottime;
+	int fake = 0, cpus;
+	u64 uptime;
+	struct cpumask cpu_fake_mask;
 
 	user = nice = system = idle = iowait =
 		irq = softirq = steal = 0;
@@ -95,6 +99,9 @@ static int show_stat(struct seq_file *p, void *v)
 	getboottime64(&boottime);
 	/* shift boot timestamp according to the timens offset */
 	timens_sub_boottime(&boottime);
+
+	if (current->nsproxy->cgroup_ns != &init_cgroup_ns)
+		goto fake_readout;
 
 	for_each_possible_cpu(i) {
 		struct kernel_cpustat kcpustat;
@@ -123,7 +130,15 @@ static int show_stat(struct seq_file *p, void *v)
 		}
 	}
 	sum += arch_irq_stat();
+	goto cont_normal;
 
+fake_readout:
+	fake = 1;
+	uptime = ktime_get_boottime_ns();
+	fake_cputime_readout(current, uptime, &user, &system, &cpus);
+	idle = (uptime * cpus) - user - system;
+
+cont_normal:
 	seq_put_decimal_ull(p, "cpu  ", nsec_to_clock_t(user));
 	seq_put_decimal_ull(p, " ", nsec_to_clock_t(nice));
 	seq_put_decimal_ull(p, " ", nsec_to_clock_t(system));
@@ -135,6 +150,9 @@ static int show_stat(struct seq_file *p, void *v)
 	seq_put_decimal_ull(p, " ", nsec_to_clock_t(guest));
 	seq_put_decimal_ull(p, " ", nsec_to_clock_t(guest_nice));
 	seq_putc(p, '\n');
+
+	if (fake && fake_online_cpumask(current, &cpu_fake_mask))
+		goto fake_online_cpus;
 
 	for_each_online_cpu(i) {
 		struct kernel_cpustat kcpustat;
@@ -169,7 +187,28 @@ static int show_stat(struct seq_file *p, void *v)
 	seq_put_decimal_ull(p, "intr ", (unsigned long long)sum);
 
 	show_all_irqs(p);
+	goto cont_normal_cpus;
 
+fake_online_cpus:
+	for_each_cpu(i, &cpu_fake_mask) {
+		fake_cputime_readout_percpu(current, i, &user, &system);
+		idle = uptime - user - system;
+		seq_printf(p, "cpu%d", i);
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(user));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(nice));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(system));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(idle));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(iowait));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(irq));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(softirq));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(steal));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(guest));
+		seq_put_decimal_ull(p, " ", nsec_to_clock_t(guest_nice));
+		seq_putc(p, '\n');
+	}
+	seq_put_decimal_ull(p, "intr ", (unsigned long long)sum);
+
+cont_normal_cpus:
 	seq_printf(p,
 		"\nctxt %llu\n"
 		"btime %llu\n"
