@@ -65,6 +65,8 @@
 #include <linux/vtime.h>
 #include <linux/wait_api.h>
 #include <linux/workqueue_api.h>
+#include <linux/user_namespace.h>
+#include <linux/vpsadminos.h>
 
 #ifdef CONFIG_PREEMPT_DYNAMIC
 # ifdef CONFIG_GENERIC_ENTRY
@@ -8440,6 +8442,22 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	if (p->flags & PF_NO_SETAFFINITY)
 		return -EINVAL;
 
+	if (current->nsproxy->cgroup_ns != &init_cgroup_ns) {
+		struct cpumask fake_mask;
+		if (!fake_online_cpumask(p, &fake_mask))
+			goto orig;
+		if (!check_same_owner(p)) {
+			guard(rcu)();
+			if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
+				return -EPERM;
+		}
+		if (!cpumask_subset(in_mask, &fake_mask))
+			return -EINVAL;
+		set_fake_affinity_cpumask(p, in_mask);
+		return 0;
+	}
+
+orig:
 	if (!check_same_owner(p)) {
 		guard(rcu)();
 		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
@@ -8523,7 +8541,8 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 		return retval;
 
 	guard(raw_spinlock_irqsave)(&p->pi_lock);
-	cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
+	if (!fake_affinity_cpumask(p, mask))
+		cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
 
 	return 0;
 }
@@ -11010,7 +11029,7 @@ static long tg_get_cfs_burst(struct task_group *tg)
 	return burst_us;
 }
 
-static s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css,
+s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css,
 				  struct cftype *cft)
 {
 	return tg_get_cfs_quota(css_tg(css));
@@ -11022,7 +11041,7 @@ static int cpu_cfs_quota_write_s64(struct cgroup_subsys_state *css,
 	return tg_set_cfs_quota(css_tg(css), cfs_quota_us);
 }
 
-static u64 cpu_cfs_period_read_u64(struct cgroup_subsys_state *css,
+u64 cpu_cfs_period_read_u64(struct cgroup_subsys_state *css,
 				   struct cftype *cft)
 {
 	return tg_get_cfs_period(css_tg(css));

@@ -393,6 +393,11 @@ int cgroup_rstat_init(struct cgroup *cgrp)
 			return -ENOMEM;
 	}
 
+	cgrp->prev_cputime_fake = alloc_percpu(struct prev_cputime);
+	if (!cgrp->prev_cputime_fake)
+		return -ENOMEM;
+	cgrp->rstat_cpu_fake_timestamp = 0;
+
 	/* ->updated_children list is self terminated */
 	for_each_possible_cpu(cpu) {
 		struct cgroup_rstat_cpu *rstatc = cgroup_rstat_cpu(cgrp, cpu);
@@ -420,6 +425,7 @@ void cgroup_rstat_exit(struct cgroup *cgrp)
 	}
 
 	free_percpu(cgrp->rstat_cpu);
+	free_percpu(cgrp->prev_cputime_fake);
 	cgrp->rstat_cpu = NULL;
 }
 
