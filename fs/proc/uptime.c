@@ -21,7 +21,7 @@ static int uptime_proc_show(struct seq_file *m, void *v)
 	ktime_get_boottime_ts64(&uptime);
 	timens_add_boottime(&uptime);
 
-	idle_nsec = fake_cputime_readout_idle(&uptime, current);
+	idle_nsec = fake_cputime_readout_idle(ktime_get_boottime_ns(), current);
 	if (idle_nsec)
 		goto out;
 
