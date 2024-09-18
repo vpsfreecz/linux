@@ -1396,6 +1396,11 @@ static int nfs_fs_context_validate(struct fs_context *fc)
 	int port = 0;
 	int ret;
 
+	if ((fc->user_ns != &init_user_ns) &&
+	    !(ctx->flags & NFS_MOUNT_SOFTERR)) {
+		ctx->flags |= NFS_MOUNT_SOFT;
+	}
+
 	if (!fc->source)
 		goto out_no_device_name;
 
