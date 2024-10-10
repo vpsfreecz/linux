@@ -10906,7 +10906,6 @@ unsigned long cgns_nr_running(struct cgroup_namespace *ns)
 
 	rcu_read_lock();
 	tg = css_tg(ns->root_cset->subsys[cpu_cgrp_id]);
-	rcu_read_unlock();
 
 	for_each_possible_cpu(i) {
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -10919,6 +10918,7 @@ unsigned long cgns_nr_running(struct cgroup_namespace *ns)
 	raw_spin_lock_irqsave(&ns->cgns_avenrun_lock, flags);
 	nr_active += ns->nr_uninterruptible;
 	raw_spin_unlock_irqrestore(&ns->cgns_avenrun_lock, flags);
+	rcu_read_unlock();
 	return nr_active;
 }
 
