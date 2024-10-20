@@ -9,6 +9,7 @@
 #include <linux/cpumask.h>
 #include <linux/printk.h>
 #include <linux/kprobes.h>
+#include <linux/syslog_namespace.h>
 
 #include "internal.h"
 
@@ -67,7 +68,7 @@ asmlinkage int vprintk(const char *fmt, va_list args)
 	 * drivers that might have their own locks.
 	 */
 	if (is_printk_legacy_deferred())
-		return vprintk_deferred(fmt, args);
+		return vprintk_emit_ns(&init_syslog_ns, 0, LOGLEVEL_SCHED, NULL, fmt, args);
 
 	/* No obstacles. */
 	return vprintk_default(fmt, args);

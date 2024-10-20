@@ -5,6 +5,7 @@
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
 #include <linux/user_namespace.h>
+#include <linux/syslog_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/highuid.h>
 #include <linux/cred.h>
@@ -145,9 +146,22 @@ int create_user_ns(struct cred *new)
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_SIGPENDING, rlimit(RLIMIT_SIGPENDING));
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_MEMLOCK, rlimit(RLIMIT_MEMLOCK));
 	ns->ucounts = ucounts;
-
+	ns->syslog_ns = get_syslog_ns(current->nsproxy->syslog_ns);
+	pr_debug("create_user_ns sees following syslog_ns:\n\tdetected: %p\n\tinit: %p\n\tparent_ns->syslog_ns: %p\n",
+		ns->syslog_ns, &init_syslog_ns, parent_ns->syslog_ns);
+	pr_debug("create_user_ns sees following user_ns:\n\tcurrent: %p\n\tinit: %p\n\tparent_ns: %p\n",
+		ns, &init_user_ns, parent_ns);
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
 	mutex_lock(&userns_state_mutex);
+	if ((ns->syslog_ns != &init_syslog_ns) &&
+	    (ns->syslog_ns->user_ns == &init_user_ns)) {
+		pr_debug("Overriding syslog_ns->user_ns to %p, it was going to be %p\n",
+			ns, ns->syslog_ns->user_ns);
+		put_user_ns(ns->syslog_ns->user_ns);
+		ns->syslog_ns->user_ns = get_user_ns(ns);
+	} else
+		pr_debug("Not overriding b/c ns->syslog_ns is %p and ns->syslog_ns->user_ns is %p, while init_syslog_ns->user_ns is %p\n",
+			ns->syslog_ns, ns->syslog_ns->user_ns, init_syslog_ns.user_ns);
 	ns->flags = parent_ns->flags;
 	mutex_unlock(&userns_state_mutex);
 
@@ -220,6 +234,7 @@ static void free_user_ns(struct work_struct *work)
 #if IS_ENABLED(CONFIG_BINFMT_MISC)
 		kfree(ns->binfmt_misc);
 #endif
+		put_syslog_ns(ns->syslog_ns);
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		ns_free_inum(&ns->ns);
