@@ -47,6 +47,7 @@
 #include <linux/livepatch_sched.h>
 #include <linux/uidgid_types.h>
 #include <asm/kmap_size.h>
+#include <linux/syslog.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -1521,7 +1522,10 @@ struct task_struct {
 	struct bpf_run_ctx		*bpf_ctx;
 #endif
 	/* Used by BPF for per-TASK xdp storage */
-	struct bpf_net_context		*bpf_net_context;
+	struct bpf_net_context          *bpf_net_context;
+
+	bool				syslog_ns_for_child;
+	char				*syslog_ns_for_child_name;
 
 #ifdef CONFIG_GCC_PLUGIN_STACKLEAK
 	unsigned long			lowest_stack;
