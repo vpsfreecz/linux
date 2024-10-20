@@ -37,6 +37,7 @@
 #include <linux/kcsan.h>
 #include <linux/rv.h>
 #include <asm/kmap_size.h>
+#include <linux/syslog.h>
 
 /* task_struct member predeclarations (sorted alphabetically): */
 struct audit_context;
@@ -1487,6 +1488,9 @@ struct task_struct {
 	/* Used for BPF run context */
 	struct bpf_run_ctx		*bpf_ctx;
 #endif
+
+	bool				syslog_ns_for_child;
+	char				*syslog_ns_for_child_name;
 
 #ifdef CONFIG_GCC_PLUGIN_STACKLEAK
 	unsigned long			lowest_stack;
