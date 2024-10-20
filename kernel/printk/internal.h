@@ -3,6 +3,9 @@
  * internal.h - printk internal definitions
  */
 #include <linux/percpu.h>
+#include <linux/types.h>
+#include <linux/syslog_namespace.h>
+#include <linux/printk_ringbuffer.h>
 
 #if defined(CONFIG_PRINTK) && defined(CONFIG_SYSCTL)
 void __init printk_sysctl_init(void);
@@ -29,17 +32,19 @@ int devkmsg_sysctl_set_loglvl(struct ctl_table *table, int write,
 /* the maximum size allowed to be reserved for a record */
 #define PRINTKRB_RECORD_MAX	1024
 
-/* Flags for a single printk record. */
-enum printk_info_flags {
-	LOG_NEWLINE	= 2,	/* text ended with a newline */
-	LOG_CONT	= 8,	/* text is a fragment of a continuation line */
-};
+struct printk_ringbuffer;
+struct dev_printk_info;
 
-__printf(4, 0)
-int vprintk_store(int facility, int level,
+extern struct printk_ringbuffer *prb;
+extern bool printk_kthreads_running;
+
+__printf(5, 0)
+int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 		  const struct dev_printk_info *dev_info,
 		  const char *fmt, va_list args);
 
+__printf(2, 0) int vprintk_ns(struct syslog_namespace *ns,
+		  const char *fmt, va_list args);
 __printf(1, 0) int vprintk_default(const char *fmt, va_list args);
 __printf(1, 0) int vprintk_deferred(const char *fmt, va_list args);
 
@@ -57,7 +62,9 @@ bool printk_percpu_data_ready(void);
 		local_irq_restore(flags);	\
 	} while (0)
 
-void defer_console_output(void);
+
+struct syslog_namespace;
+void defer_console_output(struct syslog_namespace *ns);
 
 u16 printk_parse_prefix(const char *text, int *level,
 			enum printk_info_flags *flags);
@@ -102,6 +109,7 @@ struct printk_message {
 	unsigned int		outbuf_len;
 	u64			seq;
 	unsigned long		dropped;
+	struct syslog_namespace *ns;
 };
 
 bool other_cpu_in_panic(void);
