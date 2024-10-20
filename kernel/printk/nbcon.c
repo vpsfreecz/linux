@@ -19,8 +19,8 @@
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/printk_ringbuffer.h>
 #include "internal.h"
-#include "printk_ringbuffer.h"
 /*
  * Printk console printing implementation for consoles which does not depend
  * on the legacy style console_lock mechanism.
@@ -164,7 +164,7 @@ u64 nbcon_seq_read(struct console *con)
 {
 	unsigned long nbcon_seq = atomic_long_read(&ACCESS_PRIVATE(con, nbcon_seq));
 
-	return __ulseq_to_u64seq(prb, nbcon_seq);
+	return __ulseq_to_u64seq(init_syslog_ns.prb, nbcon_seq);
 }
 
 /**
@@ -183,7 +183,7 @@ void nbcon_seq_force(struct console *con, u64 seq)
 	 * the lower 32 bits of the sequence number are stored. The upper 32 bits
 	 * are derived from the sequence numbers available in the ringbuffer.
 	 */
-	u64 valid_seq = max_t(u64, seq, prb_first_valid_seq(prb));
+	u64 valid_seq = max_t(u64, seq, prb_first_valid_seq(init_syslog_ns.prb));
 
 	atomic_long_set(&ACCESS_PRIVATE(con, nbcon_seq), __u64seq_to_ulseq(valid_seq));
 }
@@ -995,7 +995,7 @@ static bool nbcon_emit_next_record(struct nbcon_write_context *wctxt, bool use_a
 	 * message to let the user know the record is replayed.
 	 */
 	ulseq = atomic_long_read(&ACCESS_PRIVATE(con, nbcon_prev_seq));
-	if (__ulseq_to_u64seq(prb, ulseq) == pmsg.seq) {
+	if (__ulseq_to_u64seq(init_syslog_ns.prb, ulseq) == pmsg.seq) {
 		console_prepend_replay(&pmsg);
 	} else {
 		/*
@@ -1151,7 +1151,7 @@ static bool nbcon_kthread_should_wakeup(struct console *con, struct nbcon_contex
 		/* Bring the sequence in @ctxt up to date */
 		ctxt->seq = nbcon_seq_read(con);
 
-		ret = prb_read_valid(prb, ctxt->seq, NULL);
+		ret = prb_read_valid(init_syslog_ns.prb, ctxt->seq, NULL);
 	}
 
 	console_srcu_read_unlock(cookie);
@@ -1560,8 +1560,8 @@ again:
 	 */
 	printk_get_console_flush_type(&ft);
 	if (!ft.nbcon_offload &&
-	    prb_read_valid(prb, nbcon_seq_read(con), NULL)) {
-		stop_seq = prb_next_reserve_seq(prb);
+	    prb_read_valid(init_syslog_ns.prb, nbcon_seq_read(con), NULL)) {
+		stop_seq = prb_next_reserve_seq(init_syslog_ns.prb);
 		goto again;
 	}
 }
@@ -1606,7 +1606,7 @@ static void __nbcon_atomic_flush_pending(u64 stop_seq, bool allow_unsafe_takeove
  */
 void nbcon_atomic_flush_pending(void)
 {
-	__nbcon_atomic_flush_pending(prb_next_reserve_seq(prb), false);
+	__nbcon_atomic_flush_pending(prb_next_reserve_seq(init_syslog_ns.prb), false);
 }
 
 /**
@@ -1618,7 +1618,7 @@ void nbcon_atomic_flush_pending(void)
  */
 void nbcon_atomic_flush_unsafe(void)
 {
-	__nbcon_atomic_flush_pending(prb_next_reserve_seq(prb), true);
+	__nbcon_atomic_flush_pending(prb_next_reserve_seq(init_syslog_ns.prb), true);
 }
 
 /**
@@ -1685,7 +1685,7 @@ bool nbcon_alloc(struct console *con)
 	 * that practically speaking it will have nothing to print until a
 	 * desired initial sequence number has been set via nbcon_seq_force().
 	 */
-	atomic_long_set(&ACCESS_PRIVATE(con, nbcon_seq), ULSEQ_MAX(prb));
+	atomic_long_set(&ACCESS_PRIVATE(con, nbcon_seq), ULSEQ_MAX(init_syslog_ns.prb));
 
 	if (con->flags & CON_BOOT) {
 		/*
@@ -1797,13 +1797,13 @@ void nbcon_device_release(struct console *con)
 	printk_get_console_flush_type(&ft);
 	if (console_is_usable(con, console_srcu_read_flags(con), true) &&
 	    !ft.nbcon_offload &&
-	    prb_read_valid(prb, nbcon_seq_read(con), NULL)) {
+	    prb_read_valid(init_syslog_ns.prb, nbcon_seq_read(con), NULL)) {
 		/*
 		 * If nbcon_atomic flushing is not available, fallback to
 		 * using the legacy loop.
 		 */
 		if (ft.nbcon_atomic) {
-			__nbcon_atomic_flush_pending_con(con, prb_next_reserve_seq(prb), false);
+			__nbcon_atomic_flush_pending_con(con, prb_next_reserve_seq(init_syslog_ns.prb), false);
 		} else if (ft.legacy_direct) {
 			if (console_trylock())
 				console_unlock();
