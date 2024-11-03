@@ -10,6 +10,7 @@
 #include <linux/sched.h>
 #include <linux/cpuset.h>
 #include <linux/sched/debug.h>
+#include <linux/vpsadminos.h>
 
 #include <uapi/linux/sched/types.h>
 
@@ -1336,6 +1337,23 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	if (p->flags & PF_NO_SETAFFINITY)
 		return -EINVAL;
 
+	if (current->nsproxy->cgroup_ns != &init_cgroup_ns) {
+		struct cpumask fake_mask;
+		if (!fake_online_cpumask(p, &fake_mask))
+			goto orig;
+		if (!check_same_owner(p)) {
+		       guard(rcu)();
+			if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
+				return -EPERM;
+		}
+		if (!cpumask_subset(in_mask, &fake_mask))
+			return -EINVAL;
+		set_fake_affinity_cpumask(p, in_mask);
+		return 0;
+	}
+
+orig:
+
 	if (!check_same_owner(p)) {
 		guard(rcu)();
 		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
@@ -1419,7 +1437,8 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 		return retval;
 
 	guard(raw_spinlock_irqsave)(&p->pi_lock);
-	cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
+	if (!fake_affinity_cpumask(p, mask))
+		cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
 
 	return 0;
 }
