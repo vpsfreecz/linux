@@ -2415,10 +2415,10 @@ EXPORT_SYMBOL(ktime_get_coarse_ts64);
 /*
  * Must hold jiffies_lock
  */
-bool do_timer(unsigned long ticks)
+void do_timer(unsigned long ticks)
 {
 	jiffies_64 += ticks;
-	return calc_global_load();
+	calc_global_load();
 }
 
 /**

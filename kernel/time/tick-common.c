@@ -85,8 +85,6 @@ int tick_is_oneshot_available(void)
  */
 static void tick_periodic(int cpu)
 {
-	bool calc_load = false;
-
 	if (READ_ONCE(tick_do_timer_cpu) == cpu) {
 		raw_spin_lock(&jiffies_lock);
 		write_seqcount_begin(&jiffies_seq);
@@ -94,11 +92,9 @@ static void tick_periodic(int cpu)
 		/* Keep track of the next tick event */
 		tick_next_period = ktime_add_ns(tick_next_period, TICK_NSEC);
 
-		calc_load = do_timer(1);
+		do_timer(1);
 		write_seqcount_end(&jiffies_seq);
 		raw_spin_unlock(&jiffies_lock);
-		if (calc_load)
-			cgns_calc_avenrun();
 		update_wall_time();
 	}
 
