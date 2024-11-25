@@ -777,7 +777,7 @@ struct cgroup_namespace {
 	struct task_group	*loadavg_virt_task_group;
 	struct list_head	cgns_avenrun_list;
 	unsigned long		nr_threads;
-	raw_spinlock_t		cgns_avenrun_lock; /* Protects these below: */
+	spinlock_t		cgns_avenrun_lock; /* Protects these below: */
 	unsigned long		nr_uninterruptible;
 	unsigned long		avenrun[3];
 };
