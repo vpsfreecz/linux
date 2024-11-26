@@ -16,8 +16,12 @@
 char old_uname[65];
 char new_uname[65];
 
+extern int cgns_avenrund_start(void);
+extern void cgns_avenrund_stop(void);
+
 static int patch(patch_object *obj)
 {
+	cgns_avenrund_start();
 	scnprintf(new_uname, 64, "%s.%s", LIVEPATCH_ORIG_KERNEL_VERSION,
 	    LIVEPATCH_NAME);
 	scnprintf(old_uname, 64, "%s", init_uts_ns.name.release);
@@ -28,6 +32,7 @@ KPATCH_PRE_PATCH_CALLBACK(patch);
 static void unpatch(patch_object *obj)
 {
 	scnprintf(init_uts_ns.name.release, 64, "%s", old_uname);
+	cgns_avenrund_stop();
 }
 KPATCH_POST_UNPATCH_CALLBACK(unpatch);
 
