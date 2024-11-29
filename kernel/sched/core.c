@@ -9078,7 +9078,8 @@ static u64 cpu_shares_read_u64(struct cgroup_subsys_state *css,
 }
 
 LIST_HEAD(cgns_avenrun_list);
-spinlock_t cgns_avenrun_lock = __SPIN_LOCK_UNLOCKED(&cgns_avenrun_lock);
+static DEFINE_MUTEX(cgns_avenrun_lock);
+
 static struct task_struct *cgns_avenrund_task;
 
 static unsigned long cgns_nr_running(struct cgroup_namespace *ns)
@@ -9099,9 +9100,9 @@ static unsigned long cgns_nr_running(struct cgroup_namespace *ns)
 	}
 	rcu_read_unlock();
 
-	spin_lock(&ns->cgns_avenrun_lock);
+	mutex_lock(&ns->cgns_avenrun_lock);
 	nr_active += ns->nr_uninterruptible;
-	spin_unlock(&ns->cgns_avenrun_lock);
+	mutex_unlock(&ns->cgns_avenrun_lock);
 
 	return nr_active;
 }
@@ -9190,9 +9191,9 @@ void inc_cgns_nr_uninterruptible(struct task_struct *p)
 		ns = ns->parent;
 
 	if (ns->loadavg_virt_enabled) {
-		spin_lock(&ns->cgns_avenrun_lock);
+		mutex_lock(&ns->cgns_avenrun_lock);
 		ns->nr_uninterruptible++;
-		spin_unlock(&ns->cgns_avenrun_lock);
+		mutex_unlock(&ns->cgns_avenrun_lock);
 		p->sched_contributed_to_load = ns;
 	}
 }
@@ -9206,9 +9207,9 @@ void dec_cgns_nr_uninterruptible(struct task_struct *p)
 		return;
 	BUG_ON(!ns->loadavg_virt_enabled);
 
-	spin_lock(&ns->cgns_avenrun_lock);
+	mutex_lock(&ns->cgns_avenrun_lock);
 	ns->nr_uninterruptible--;
-	spin_unlock(&ns->cgns_avenrun_lock);
+	mutex_unlock(&ns->cgns_avenrun_lock);
 	p->sched_contributed_to_load = NULL;
 }
 
@@ -9217,17 +9218,17 @@ void cgns_calc_avenrun(void)
 	struct cgroup_namespace *ns;
 	unsigned long nr_active;
 
-	spin_lock(&cgns_avenrun_lock);
+	mutex_lock(&cgns_avenrun_lock);
 	list_for_each_entry(ns, &cgns_avenrun_list, cgns_avenrun_list) {
 		nr_active = cgns_nr_running(ns);
 		nr_active = nr_active > 0 ? nr_active * FIXED_1 : 0;
-		spin_lock(&ns->cgns_avenrun_lock);
+		mutex_lock(&ns->cgns_avenrun_lock);
 		ns->avenrun[0] = calc_load(ns->avenrun[0], EXP_1, nr_active);
 		ns->avenrun[1] = calc_load(ns->avenrun[1], EXP_5, nr_active);
 		ns->avenrun[2] = calc_load(ns->avenrun[2], EXP_15, nr_active);
-		spin_unlock(&ns->cgns_avenrun_lock);
+		mutex_unlock(&ns->cgns_avenrun_lock);
 	}
-	spin_unlock(&cgns_avenrun_lock);
+	mutex_unlock(&cgns_avenrun_lock);
 }
 
 static int cgns_avenrund(void *data)
@@ -9277,10 +9278,10 @@ void cgroup_ns_track_loadavg(struct cgroup_namespace *ns)
 
 	cgns_avenrund_start();
 
-	spin_lock(&cgns_avenrun_lock);
+	mutex_lock(&cgns_avenrun_lock);
 	list_add(&ns->cgns_avenrun_list, &cgns_avenrun_list);
 	ns->loadavg_virt_enabled = 1;
-	spin_unlock(&cgns_avenrun_lock);
+	mutex_unlock(&cgns_avenrun_lock);
 }
 
 void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns)
@@ -9293,12 +9294,12 @@ void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns)
 	if (!ns->loadavg_virt_enabled)
 		return;
 
-	spin_lock(&cgns_avenrun_lock);
+	mutex_lock(&cgns_avenrun_lock);
 	list_del_init(&ns->cgns_avenrun_list);
 	ns->loadavg_virt_enabled = 0;
 	if (list_empty(&cgns_avenrun_list))
 		stop_avenrund = true;
-	spin_unlock(&cgns_avenrun_lock);
+	mutex_unlock(&cgns_avenrun_lock);
 
 	if (stop_avenrund)
 		cgns_avenrund_stop();
@@ -9306,11 +9307,11 @@ void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns)
 
 static void get_avenrun_fake_ns(struct cgroup_namespace *ns, unsigned long *loads, unsigned long offset, int shift)
 {
-	spin_lock(&ns->cgns_avenrun_lock);
+	mutex_lock(&ns->cgns_avenrun_lock);
 	loads[0] = (ns->avenrun[0] + offset) << shift;
 	loads[1] = (ns->avenrun[1] + offset) << shift;
 	loads[2] = (ns->avenrun[2] + offset) << shift;
-	spin_unlock(&ns->cgns_avenrun_lock);
+	mutex_unlock(&ns->cgns_avenrun_lock);
 }
 
 int get_avenrun_fake(struct task_struct *p, unsigned long *loads, unsigned long offset, int shift)
@@ -9340,7 +9341,7 @@ int virt_loadavg_proc_show(struct seq_file *m, void *v)
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	spin_lock(&cgns_avenrun_lock);
+	mutex_lock(&cgns_avenrun_lock);
 	list_for_each_entry(ns, &cgns_avenrun_list, cgns_avenrun_list) {
 		get_avenrun_fake_ns(ns, avnrun, FIXED_1/200, 0);
 		nr_r = cgns_nr_running(ns);
@@ -9353,7 +9354,7 @@ int virt_loadavg_proc_show(struct seq_file *m, void *v)
 			LOAD_INT(avnrun[2]), LOAD_FRAC(avnrun[2]),
 			nr_r, nr_t);
 	}
-	spin_unlock(&cgns_avenrun_lock);
+	mutex_unlock(&cgns_avenrun_lock);
 	return 0;
 }
 

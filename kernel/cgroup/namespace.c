@@ -40,7 +40,7 @@ static struct cgroup_namespace *alloc_cgroup_ns(void)
 	new_ns->avenrun[0] = 0;
 	new_ns->avenrun[1] = 0;
 	new_ns->avenrun[2] = 0;
-	spin_lock_init(&new_ns->cgns_avenrun_lock);
+	mutex_init(&new_ns->cgns_avenrun_lock);
 
 	return new_ns;
 }
