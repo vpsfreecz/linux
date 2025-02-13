@@ -184,6 +184,7 @@ void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcm
 {
 	if (!online_cpus_in_cpu_cgroup(p))
 		return;
+	pr_warn("want srcmask: %*pbl\n", cpumask_pr_args(srcmask));
 	cpumask_copy(&p->fake_cpu_mask, srcmask);
 	p->set_fake_cpu_mask = 1;
 }
