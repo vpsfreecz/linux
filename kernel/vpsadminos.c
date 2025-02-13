@@ -140,18 +140,24 @@ unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
 {
 	struct cgroup_subsys_state *css;
 	long quota, period;
-	int cpus = 0, mincpus = INT_MAX;
+	unsigned int cpus = 0, mincpus = UINT_MAX;
 
 	if (!p->nsproxy)
 		return 0;
 
-	if (p->nsproxy->cgroup_ns == &init_cgroup_ns)
+	rcu_read_lock();
+
+	if (p->nsproxy->cgroup_ns == &init_cgroup_ns) {
+		rcu_read_unlock();
 		return 0;
+	}
 
 	css = p->nsproxy->cgroup_ns->root_cset->subsys[cpu_cgrp_id];
 
-	if (!css)
+	if (!css) {
+		rcu_read_unlock();
 		return 0;
+	}
 up:
 	quota = cpu_cfs_quota_read_s64(css, NULL);
 	period = cpu_cfs_period_read_u64(css, NULL);
@@ -160,7 +166,7 @@ up:
 		cpus = quota;
 		if (do_div(cpus, period))
 			cpus++;
-		if (cpus < mincpus)
+		if (cpus < mincpus && cpus > 0)
 			mincpus = cpus;
 	}
 
@@ -168,7 +174,7 @@ up:
 		css = css->parent;
 		goto up;
 	}
-
+	rcu_read_unlock();
 	pr_debug("online_cpus_in_cpu_cgroup: debug @ line %d quota = %ld, period = %ld, cpus = %d\n", __LINE__, quota, period, cpus);
 	return (mincpus == UINT_MAX) ? 0 : mincpus;
 }
