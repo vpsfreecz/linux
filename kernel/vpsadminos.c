@@ -184,6 +184,7 @@ void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcm
 {
 	if (!online_cpus_in_cpu_cgroup(p))
 		return;
+	dump_stack();
 	pr_warn("want srcmask: %*pbl\n", cpumask_pr_args(srcmask));
 	cpumask_copy(&p->fake_cpu_mask, srcmask);
 	p->set_fake_cpu_mask = 1;
@@ -214,15 +215,19 @@ int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
 // Caller's responsibility to make sure p lives throughout
 int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
 {
+	int ret = fake_online_cpumask(p, dstmask);
+	if (!ret)
+		return 0;
+	
 	if (p->set_fake_cpu_mask) {
 		pr_warn("p->fake_cpu_mask: %*pbl\n", cpumask_pr_args(&p->fake_cpu_mask));
 		cpumask_copy(dstmask, &p->fake_cpu_mask);
 		return 1;
 	}
-	int ret = fake_online_cpumask(p, dstmask);
 
 	pr_warn("dstmask: %*pbl\n", cpumask_pr_args(dstmask));
-	return ret;
+	dump_stack();
+	return 1;
 }
 
 void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u64 *system, int *cpus)
