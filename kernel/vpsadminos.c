@@ -170,7 +170,7 @@ up:
 	}
 
 	pr_debug("online_cpus_in_cpu_cgroup: debug @ line %d quota = %ld, period = %ld, cpus = %d\n", __LINE__, quota, period, cpus);
-	return (mincpus == INT_MAX) ? 0 : mincpus;
+	return (mincpus == UINT_MAX) ? 0 : mincpus;
 }
 
 // Caller's responsibility to make sure p lives throughout
