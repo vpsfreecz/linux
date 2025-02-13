@@ -214,11 +214,14 @@ int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
 int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
 {
 	if (p->set_fake_cpu_mask) {
+		pr_warn("p->fake_cpu_mask: %*pbl\n", cpumask_pr_args(&p->fake_cpu_mask));
 		cpumask_copy(dstmask, &p->fake_cpu_mask);
 		return 1;
 	}
+	int ret = fake_online_cpumask(p, dstmask);
 
-	return fake_online_cpumask(p, dstmask);
+	pr_warn("dstmask: %*pbl\n", cpumask_pr_args(dstmask));
+	return ret;
 }
 
 void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u64 *system, int *cpus)
