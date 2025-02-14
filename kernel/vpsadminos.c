@@ -182,10 +182,15 @@ up:
 // Caller's responsibility to make sure p lives throughout
 void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcmask)
 {
-	if (!online_cpus_in_cpu_cgroup(p))
-		return;
-	dump_stack();
+	unsigned int want_cpus = cpumask_weight(srcmask);
+	unsigned int online_cpus = online_cpus_in_cpu_cgroup(p);
 	pr_warn("want srcmask: %*pbl\n", cpumask_pr_args(srcmask));
+	if (want_cpus > online_cpus || want_cpus == 0) {
+		pr_warn("want_cpus: %d, online_cpus: %d\n", want_cpus, online_cpus);
+		fake_online_cpumask(p, &p->fake_cpu_mask);
+		p->set_fake_cpu_mask = 1;
+		return;
+	}
 	cpumask_copy(&p->fake_cpu_mask, srcmask);
 	p->set_fake_cpu_mask = 1;
 }
@@ -194,7 +199,7 @@ void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcm
 int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
 {
 	int cpus;
-	int cpu, enabled;
+	unsigned int cpu, enabled;
 
 	cpus = online_cpus_in_cpu_cgroup(p);
 	if (!cpus)
@@ -214,20 +219,18 @@ int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
 
 // Caller's responsibility to make sure p lives throughout
 int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
-{
-	int ret = fake_online_cpumask(p, dstmask);
-	if (!ret)
-		return 0;
-	
+{	
 	if (p->set_fake_cpu_mask) {
 		pr_warn("p->fake_cpu_mask: %*pbl\n", cpumask_pr_args(&p->fake_cpu_mask));
-		dump_stack();
 		cpumask_copy(dstmask, &p->fake_cpu_mask);
 		return 1;
 	}
 
+	int ret = fake_online_cpumask(p, dstmask);
+	if (!ret)
+		return 0;
+
 	pr_warn("dstmask: %*pbl\n", cpumask_pr_args(dstmask));
-	dump_stack();
 	return 1;
 }
 
