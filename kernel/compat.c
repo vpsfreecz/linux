@@ -158,7 +158,7 @@ COMPAT_SYSCALL_DEFINE3(sched_getaffinity, compat_pid_t,  pid, unsigned int, len,
 	ret = sched_getaffinity(pid, mask);
 	if (ret == 0) {
 		unsigned int retlen = min(len, cpumask_size());
-
+		pr_warn("getaffinity: mask: %*pbl\n", cpumask_pr_args(mask));
 		if (compat_put_bitmap(user_mask_ptr, cpumask_bits(mask), retlen * 8))
 			ret = -EFAULT;
 		else
