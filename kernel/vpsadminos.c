@@ -189,16 +189,16 @@ int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
 	if (!cpus)
 		return 0;
 
-	enabled = 0;
-	for_each_online_cpu(cpu) {
-		if (enabled == cpus)
-			cpumask_clear_cpu(cpu, dstmask);
-		else {
+	enabled = cpus;
+	for_each_possible_cpu(cpu) {
+		if (cpus > 0) {
 			cpumask_set_cpu(cpu, dstmask);
-			enabled++;
+			cpus--;
+		} else {
+			cpumask_clear_cpu(cpu, dstmask);
 		}
 	}
-	return enabled;
+	return enabled - cpus;
 }
 
 
