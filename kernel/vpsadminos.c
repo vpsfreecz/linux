@@ -209,7 +209,7 @@ int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
 			enabled++;
 		}
 	}
-	return 1;
+	return enabled;
 }
 
 // Caller's responsibility to make sure p lives throughout
@@ -221,6 +221,7 @@ int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
 	
 	if (p->set_fake_cpu_mask) {
 		pr_warn("p->fake_cpu_mask: %*pbl\n", cpumask_pr_args(&p->fake_cpu_mask));
+		dump_stack();
 		cpumask_copy(dstmask, &p->fake_cpu_mask);
 		return 1;
 	}
