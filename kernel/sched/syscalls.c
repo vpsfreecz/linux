@@ -1371,9 +1371,13 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 		return retval;
 
 	guard(raw_spinlock_irqsave)(&p->pi_lock);
-	if (!fake_affinity_cpumask(p, mask))
+	if (!fake_affinity_cpumask(p, mask)) {
+		pr_warn("sched_getaffinity: fallback to vanilla\n");
 		cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
-
+	} else {
+		pr_warn("sched_getaffinity: fake_affinity_cpumask\n");
+	}
+	pr_warn("sched_getaffinity: %*pbl\n", cpumask_pr_args(mask));
 	return 0;
 }
 
