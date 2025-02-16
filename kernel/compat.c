@@ -233,6 +233,7 @@ long compat_put_bitmap(compat_ulong_t __user *umask, unsigned long *mask,
 
 	while (nr_compat_longs > 1) {
 		unsigned long m = *mask++;
+		pr_warn("compat_put_bitmap: m: %lx\n", m);
 		unsafe_put_user((compat_ulong_t)m, umask++, Efault);
 		unsafe_put_user(m >> BITS_PER_COMPAT_LONG, umask++, Efault);
 		nr_compat_longs -= 2;
