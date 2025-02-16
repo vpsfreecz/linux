@@ -238,8 +238,10 @@ long compat_put_bitmap(compat_ulong_t __user *umask, unsigned long *mask,
 		unsafe_put_user(m >> BITS_PER_COMPAT_LONG, umask++, Efault);
 		nr_compat_longs -= 2;
 	}
-	if (nr_compat_longs)
+	if (nr_compat_longs) {
+		pr_warn("compat_put_bitmap: *mask: %lx\n", *mask);
 		unsafe_put_user((compat_ulong_t)*mask, umask++, Efault);
+	}
 	user_write_access_end();
 	return 0;
 Efault:
