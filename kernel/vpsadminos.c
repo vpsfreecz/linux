@@ -221,9 +221,10 @@ void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcm
 // Caller's responsibility to make sure p lives throughout
 int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
 {	
+	memset(dstmask, 0, sizeof(*dstmask));
 	if (p->set_fake_cpu_mask) {
-		pr_warn("p->fake_cpu_mask: %*pbl\n", cpumask_pr_args(&p->fake_cpu_mask));
 		cpumask_copy(dstmask, &p->fake_cpu_mask);
+		pr_warn("p->fake_cpu_mask: %*pbl, dstmask: %*pbl\n", cpumask_pr_args(&p->fake_cpu_mask), cpumask_pr_args(dstmask));
 		return 1;
 	}
 
