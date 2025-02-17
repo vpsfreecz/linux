@@ -223,7 +223,7 @@ int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
 {	
 	memset(dstmask, 0, sizeof(*dstmask));
 	if (p->set_fake_cpu_mask) {
-		cpumask_and(dstmask, &p->fake_cpu_mask);
+		cpumask_and(dstmask, &p->fake_cpu_mask, cpu_active_mask);
 		pr_warn("p->fake_cpu_mask: %*pbl, dstmask: %*pbl\n", cpumask_pr_args(&p->fake_cpu_mask), cpumask_pr_args(dstmask));
 		return 1;
 	}
