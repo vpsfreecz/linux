@@ -140,18 +140,24 @@ unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
 {
 	struct cgroup_subsys_state *css;
 	long quota, period;
-	int cpus = 0, mincpus = INT_MAX;
+	unsigned int cpus = 0, mincpus = UINT_MAX;
 
 	if (!p->nsproxy)
 		return 0;
 
-	if (p->nsproxy->cgroup_ns == &init_cgroup_ns)
+	rcu_read_lock();
+
+	if (p->nsproxy->cgroup_ns == &init_cgroup_ns) {
+		rcu_read_unlock();
 		return 0;
+	}
 
 	css = p->nsproxy->cgroup_ns->root_cset->subsys[cpu_cgrp_id];
 
-	if (!css)
+	if (!css) {
+		rcu_read_unlock();
 		return 0;
+	}
 up:
 	quota = cpu_cfs_quota_read_s64(css, NULL);
 	period = cpu_cfs_period_read_u64(css, NULL);
@@ -160,7 +166,7 @@ up:
 		cpus = quota;
 		if (do_div(cpus, period))
 			cpus++;
-		if (cpus < mincpus)
+		if (cpus < mincpus && cpus > 0)
 			mincpus = cpus;
 	}
 
@@ -169,50 +175,60 @@ up:
 		goto up;
 	}
 
-	pr_debug("online_cpus_in_cpu_cgroup: debug @ line %d quota = %ld, period = %ld, cpus = %d\n", __LINE__, quota, period, cpus);
-	return (mincpus == INT_MAX) ? 0 : mincpus;
-}
+	rcu_read_unlock();
 
-// Caller's responsibility to make sure p lives throughout
-void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcmask)
-{
-	if (!online_cpus_in_cpu_cgroup(p))
-		return;
-	cpumask_copy(&p->fake_cpu_mask, srcmask);
-	p->set_fake_cpu_mask = 1;
+	pr_debug("online_cpus_in_cpu_cgroup: debug @ line %d quota = %ld, period = %ld, cpus = %d\n", __LINE__, quota, period, cpus);
+	return (mincpus == UINT_MAX) ? 0 : mincpus;
 }
 
 // Caller's responsibility to make sure p lives throughout
 int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
 {
-	int cpus;
-	int cpu, enabled;
+	unsigned int cpus, cpu, want;
 
 	cpus = online_cpus_in_cpu_cgroup(p);
 	if (!cpus)
 		return 0;
 
-	enabled = 0;
-	for_each_online_cpu(cpu) {
-		if (enabled == cpus)
-			cpumask_clear_cpu(cpu, dstmask);
-		else {
+	want = cpus;
+	for_each_possible_cpu(cpu) {
+		if (cpus > 0) {
 			cpumask_set_cpu(cpu, dstmask);
-			enabled++;
+			cpus--;
+		} else {
+			cpumask_clear_cpu(cpu, dstmask);
 		}
 	}
-	return 1;
+	return want - cpus;
+}
+
+
+// Caller's responsibility to make sure p lives throughout
+void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcmask)
+{
+	unsigned int want_cpus = cpumask_weight(srcmask);
+	unsigned int online_cpus = online_cpus_in_cpu_cgroup(p);
+
+	p->set_fake_cpu_mask = 1;
+	if (want_cpus > online_cpus || want_cpus == online_cpus || want_cpus == 0)
+		fake_online_cpumask(p, &p->fake_cpu_mask);
+	else
+		cpumask_copy(&p->fake_cpu_mask, srcmask);
 }
 
 // Caller's responsibility to make sure p lives throughout
 int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
 {
 	if (p->set_fake_cpu_mask) {
-		cpumask_copy(dstmask, &p->fake_cpu_mask);
+		cpumask_and(dstmask, &p->fake_cpu_mask, cpu_active_mask);
 		return 1;
 	}
 
-	return fake_online_cpumask(p, dstmask);
+	int ret = fake_online_cpumask(p, dstmask);
+	if (!ret)
+		return 0;
+
+	return 1;
 }
 
 void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp, u64 *user, u64 *system, int *cpus)
