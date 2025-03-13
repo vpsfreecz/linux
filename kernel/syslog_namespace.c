@@ -28,7 +28,7 @@ static void dec_syslog_namespaces(struct ucounts *ucounts)
 int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 			     unsigned long new_log_buf_len)
 {
-	struct printk_ringbuffer *prb;
+	struct printk_ringbuffer *ns_prb;
 	struct printk_info *infos;
 	unsigned int descs_count;
 	struct prb_desc *descs;
@@ -41,8 +41,8 @@ int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 		return -EINVAL;
 	}
 
-	prb = kvzalloc(sizeof(struct printk_ringbuffer), GFP_KERNEL);
-	if (unlikely(!prb))
+	ns_prb = kvzalloc(sizeof(struct printk_ringbuffer), GFP_KERNEL);
+	if (unlikely(!ns_prb))
 		goto fail_no_mem;
 
 	log_buf = kvzalloc(new_log_buf_len, GFP_KERNEL);
@@ -62,12 +62,16 @@ int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 	if (unlikely(!infos))
 		goto fail_free_descs;
 
-	prb_init(prb,
+	prb_init(ns_prb,
 		 log_buf, ilog2(ns->log_buf_len),
 		 descs, ilog2(descs_count),
 		 infos);
 
-	ns->prb = prb;
+	ns->prb = ns_prb;
+
+	if (ns == &init_syslog_ns)
+		prb = ns_prb;
+
 	return 0;
 
 fail_free_descs:
@@ -75,7 +79,7 @@ fail_free_descs:
 fail_free_log_buf:
 	kvfree(log_buf);
 fail_free_prb:
-	kvfree(prb);
+	kvfree(ns_prb);
 fail_no_mem:
 	pr_err("syslog_ns_setup_log_buf: cannot allocate memory\n");
 	return -ENOMEM;
