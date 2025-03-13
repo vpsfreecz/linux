@@ -75,6 +75,8 @@ struct syslog_namespace {
 };
 
 extern struct syslog_namespace init_syslog_ns;
+extern struct printk_ringbuffer *init_prb;
+extern struct latched_seq init_clear_seq;
 
 static inline struct syslog_namespace *current_syslog_ns(void)
 {

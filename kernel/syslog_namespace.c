@@ -68,6 +68,7 @@ int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 		 infos);
 
 	ns->prb = prb;
+	init_prb = prb;
 	return 0;
 
 fail_free_descs:
