@@ -1015,9 +1015,10 @@ void log_buf_vmcoreinfo_setup(void)
 	struct dev_printk_info *dev_info = NULL;
 	struct syslog_namespace *ns = &init_syslog_ns;
 
-	VMCOREINFO_SYMBOL(init_prb);
+
+	VMCOREINFO_SYMBOL(prb);
 	VMCOREINFO_SYMBOL(printk_rb_static);
-	VMCOREINFO_SYMBOL(init_clear_seq);
+	VMCOREINFO_SYMBOL(clear_seq);
 
 	/*
 	 * Export struct size and field offsets. User space tools can
@@ -5016,9 +5017,9 @@ void console_try_replay_all(void)
 	}
 }
 
-struct printk_ringbuffer *init_prb = &printk_rb_static;
+struct printk_ringbuffer *prb = &printk_rb_static;
 
-struct latched_seq init_clear_seq = {
+struct latched_seq clear_seq = {
 	.latch		= SEQCNT_LATCH_ZERO(clear_seq.latch),
 	.val[0]		= 0,
 	.val[1]		= 0,

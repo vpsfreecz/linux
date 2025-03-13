@@ -28,7 +28,6 @@ static void dec_syslog_namespaces(struct ucounts *ucounts)
 int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 			     unsigned long new_log_buf_len)
 {
-	struct printk_ringbuffer *prb;
 	struct printk_info *infos;
 	unsigned int descs_count;
 	struct prb_desc *descs;
@@ -68,7 +67,6 @@ int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 		 infos);
 
 	ns->prb = prb;
-	init_prb = prb;
 	return 0;
 
 fail_free_descs:
