@@ -38,4 +38,9 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 extern void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcmask);
 extern int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask);
 extern int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask);
+
+u64 fake_cputime_readout_idle(u64 timestamp, struct task_struct *p);
+extern struct proc_dir_entry *proc_vpsadminos;
+extern int virt_loadavg_proc_show(struct seq_file *m, void *v);
+
 #endif
