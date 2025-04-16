@@ -1498,7 +1498,9 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 		ctx->rdma = true;
 		break;
 	}
-	/* case Opt_ignore: - is ignored as expected ... */
+
+	if (fc->user_ns != &init_user_ns)
+		ctx->retry = 0;
 
 	return 0;
 
