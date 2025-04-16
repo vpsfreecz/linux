@@ -1752,7 +1752,9 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 			goto cifs_parse_mount_err;
 		break;
 	}
-	/* case Opt_ignore: - is ignored as expected ... */
+
+	if (fc->user_ns != &init_user_ns)
+		ctx->retry = 0;
 
 	if (ctx->multiuser && ctx->upcall_target == UPTARGET_MOUNT) {
 		cifs_errorf(fc, "multiuser mount option not supported with upcalltarget set as 'mount'\n");
