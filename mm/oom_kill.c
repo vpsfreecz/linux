@@ -1182,6 +1182,18 @@ bool out_of_memory(struct oom_control *oc)
 	select_bad_process(oc);
 	/* Found nothing?!?! */
 	if (!oc->chosen) {
+		if (is_memcg_oom(oc)) {
+			/*
+			 * Tough luck, we are out of memory in this memcg
+			 * we can't tolerate this over prolonged periods, so
+			 * might as well go ahead and kill this process now.
+			 */
+			 get_task_struct(current);
+			 oc->chosen = current;
+			 oom_kill_process(oc, "Memory cgroup out of memory: killing allocating task");
+			 return true;
+		}
+
 		dump_header(oc);
 		pr_warn("Out of memory and no killable processes...\n");
 		/*
