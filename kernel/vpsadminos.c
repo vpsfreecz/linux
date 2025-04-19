@@ -440,7 +440,7 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 	if (cgroup_subsys_on_dfl(cpuacct_cgrp_subsys)) {
 		struct cgroup *cgrp;
 		struct nsproxy *nsproxy;
-		struct prev_cputime *cputime_fake = per_cpu_ptr(cgrp->prev_cputime_fake, cpu);
+		struct prev_cputime *cputime_fake;
 
 		rcu_read_unlock();
 		task_lock(p);
@@ -459,6 +459,7 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 		task_unlock(p);
 		rcu_read_unlock();
 
+		cputime_fake = per_cpu_ptr(cgrp->prev_cputime_fake, cpu);
 		*user = cputime_fake->utime;
 		*system = cputime_fake->stime;
 
