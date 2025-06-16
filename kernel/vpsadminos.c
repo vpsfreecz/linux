@@ -11,6 +11,7 @@
 #include <linux/sched/cputime.h>
 #include "sched/sched.h"
 #include <linux/utsname.h>
+#include <linux/syslog_namespace.h>
 #include <linux/vpsadminos-livepatch.h>
 #include "kpatch-macros.h"
 char old_uname[65];
@@ -22,6 +23,8 @@ static int patch(patch_object *obj)
 	    LIVEPATCH_NAME);
 	scnprintf(old_uname, 64, "%s", init_uts_ns.name.release);
 	scnprintf(init_uts_ns.name.release, 64, "%s", new_uname);
+
+	prb = &init_syslog_ns.prb;
 	return 0;
 }
 KPATCH_PRE_PATCH_CALLBACK(patch);
