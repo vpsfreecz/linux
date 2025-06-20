@@ -1228,6 +1228,7 @@ void __init setup_log_buf(int early)
 	}
 
 	ns->prb = &printk_rb_dynamic;
+	prb = &printk_rb_dynamic;
 
 	local_irq_restore(flags);
 
