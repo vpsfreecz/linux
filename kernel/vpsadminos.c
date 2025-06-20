@@ -439,7 +439,7 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 		struct nsproxy *nsproxy;
 		struct prev_cputime *cputime_fake;
 
-		rcu_read_unlock();
+		rcu_read_lock();
 		task_lock(p);
 		nsproxy = p->nsproxy;
 		if (!nsproxy || !nsproxy->cgroup_ns) {
@@ -466,7 +466,7 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 		struct cgroup_subsys_state *css;
 		struct nsproxy *nsproxy;
 
-		rcu_read_unlock();
+		rcu_read_lock();
 		task_lock(p);
 		nsproxy = p->nsproxy;
 		if (!nsproxy || !nsproxy->cgroup_ns) {
@@ -488,3 +488,4 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 		css_put(css);
 	}
 }
+
