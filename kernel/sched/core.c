@@ -9322,7 +9322,7 @@ static unsigned long cgns_nr_running(struct cgroup_namespace *ns)
 	tg = css_tg(ns->root_cset->subsys[cpu_cgrp_id]);
 	for_each_possible_cpu(i) {
 #ifdef CONFIG_FAIR_GROUP_SCHED
-		nr_active += tg->cfs_rq[i]->h_nr_running;
+		nr_active += tg->cfs_rq[i]->h_nr_queued;
 #endif
 #ifdef CONFIG_RT_GROUP_SCHED
 		nr_active += tg->rt_rq[i]->rt_nr_running;
