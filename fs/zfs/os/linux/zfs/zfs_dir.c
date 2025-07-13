@@ -465,8 +465,11 @@ zfs_unlinked_add(znode_t *zp, dmu_tx_t *tx)
 	ASSERT(zp->z_unlinked);
 	ASSERT(ZTOI(zp)->i_nlink == 0);
 
-	VERIFY3U(0, ==,
-	    zap_add_int(zfsvfs->z_os, zfsvfs->z_unlinkedobj, zp->z_id, tx));
+	if (zap_add_int(zfsvfs->z_os, zfsvfs->z_unlinkedobj, zp->z_id, tx))
+		pr_err("zfs_unlinked_add: zap_add_int failed for "
+		    "z_unlinkedobj %llu, zp %llu\n",
+		    (u_longlong_t)zfsvfs->z_unlinkedobj,
+		    (u_longlong_t)zp->z_id);
 
 	dataset_kstats_update_nunlinks_kstat(&zfsvfs->z_kstat, 1);
 }
