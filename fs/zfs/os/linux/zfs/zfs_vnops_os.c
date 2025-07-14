@@ -3185,7 +3185,6 @@ top:
 			goto commit_unlink_td_szp;
 		}
 		VERIFY0(insert_inode_locked(ZTOI(wzp)));
-		mark_inode_dirty(ZTOI(wzp));
 		unlock_new_inode(ZTOI(wzp));
 		break;
 	}
