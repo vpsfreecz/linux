@@ -58,6 +58,9 @@ struct nf_conntrack_net {
 	unsigned int users_bridge;
 #ifdef CONFIG_SYSCTL
 	struct ctl_table_header	*sysctl_header;
+	unsigned int		sysctl_max;
+	unsigned int		sysctl_buckets;
+	unsigned int		sysctl_expect_max;
 #endif
 #ifdef CONFIG_NF_CONNTRACK_EVENTS
 	struct nf_conntrack_net_ecache ecache;
