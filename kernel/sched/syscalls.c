@@ -125,9 +125,22 @@ static bool is_nice_reduction(const struct task_struct *p, const int nice)
  * @p: task
  * @nice: nice value
  */
-int can_nice(const struct task_struct *p, const int nice)
+int can_nice(struct task_struct *p, const int nice)
 {
-	return is_nice_reduction(p, nice) || capable(CAP_SYS_NICE);
+	const struct cred *cred;
+	struct user_namespace *ns;
+	bool allowed;
+
+	if (is_nice_reduction(p, nice))
+		return true;
+
+	cred = get_task_cred(p);
+	ns = cred->user_ns;
+	allowed = ns_capable(ns, CAP_SYS_NICE) &&
+		  (ns == &init_user_ns || ns->parent == &init_user_ns);
+	put_cred(cred);
+
+	return allowed;
 }
 
 #ifdef __ARCH_WANT_SYS_NICE
