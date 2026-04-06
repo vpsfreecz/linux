@@ -95,6 +95,11 @@ static bool cgroup_memory_nokmem __ro_after_init;
 /* BPF memory accounting disabled? */
 static bool cgroup_memory_nobpf __ro_after_init;
 
+bool cgroup_memory_kmem_enabled(void)
+{
+	return !cgroup_memory_nokmem;
+}
+
 static struct kmem_cache *memcg_cachep;
 static struct kmem_cache *memcg_pn_cachep;
 
