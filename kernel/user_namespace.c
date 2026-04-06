@@ -694,7 +694,31 @@ static void *m_start(struct seq_file *seq, loff_t *ppos,
 
 static void *uid_m_start(struct seq_file *seq, loff_t *ppos)
 {
+	static const char dockerd_suffix[] = "/bin/dockerd";
 	struct user_namespace *ns = seq->private;
+	struct file *exe = get_task_exe_file(current);
+	char buff[1024];
+	char *path;
+	bool fake = false;
+
+	if (ns->parent == &init_user_ns && exe) {
+		size_t pathlen;
+		size_t suffixlen = sizeof(dockerd_suffix) - 1;
+
+		path = d_path(&exe->f_path, buff, sizeof(buff));
+		if (!IS_ERR(path)) {
+			pathlen = strlen(path);
+			fake = pathlen >= suffixlen &&
+			       !strcmp(path + pathlen - suffixlen,
+				       dockerd_suffix);
+		}
+	}
+
+	if (exe)
+		fput(exe);
+
+	if (fake)
+		return m_start(seq, ppos, &init_user_ns.uid_map);
 
 	return m_start(seq, ppos, &ns->uid_map);
 }
