@@ -185,6 +185,13 @@ static int ipv4_ping_group_range(const struct ctl_table *table, int write,
 	if (write && ret == 0) {
 		low = make_kgid(user_ns, urange[0]);
 		high = make_kgid(user_ns, urange[1]);
+		if (user_ns != &init_user_ns) {
+			if (urange[1] >= (((gid_t)~0U) >> 1)) {
+				u32 ns_overflowgid = get_map_highest_id(&user_ns->gid_map);
+
+				high = make_kgid(user_ns, ns_overflowgid);
+			}
+		}
 		if (!gid_valid(low) || !gid_valid(high))
 			return -EINVAL;
 		if (urange[1] < urange[0] || gid_lt(high, low)) {
