@@ -2,8 +2,10 @@
 #include <linux/smp.h>
 #include <linux/timex.h>
 #include <linux/string.h>
+#include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <linux/cpufreq.h>
+#include <linux/jiffies.h>
 #include <asm/prctl.h>
 #include <linux/proc_fs.h>
 
@@ -60,13 +62,16 @@ static void show_cpuinfo_misc(struct seq_file *m, struct cpuinfo_x86 *c)
 }
 #endif
 
-static int show_cpuinfo(struct seq_file *m, void *v)
+static DEFINE_MUTEX(show_cpuinfo_cache_setup_mutex);
+static struct mutex *show_cpuinfo_cache_mutexes[NR_CPUS];
+static unsigned long show_cpuinfo_cache_jiffies[NR_CPUS];
+static char *show_cpuinfo_cache[NR_CPUS];
+
+static void show_cpuinfo_detail(struct seq_file *m, struct cpuinfo_x86 *c)
 {
-	struct cpuinfo_x86 *c = v;
-	unsigned int cpu;
+	unsigned int cpu = c->cpu_index;
 	int i;
 
-	cpu = c->cpu_index;
 	seq_printf(m, "processor\t: %u\n"
 		   "vendor_id\t: %s\n"
 		   "cpu family\t: %d\n"
@@ -91,10 +96,10 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		if (freq < 0)
 			seq_puts(m, "cpu MHz\t\t: Unknown\n");
 		else
-			seq_printf(m, "cpu MHz\t\t: %u.%03u\n", freq / 1000, (freq % 1000));
+			seq_printf(m, "cpu MHz\t\t: %u.%03u\n",
+				   freq / 1000, (freq % 1000));
 	}
 
-	/* Cache size */
 	if (c->x86_cache_size)
 		seq_printf(m, "cache size\t: %u KB\n", c->x86_cache_size);
 
@@ -102,14 +107,14 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	show_cpuinfo_misc(m, c);
 
 	seq_puts(m, "flags\t\t:");
-	for (i = 0; i < 32*NCAPINTS; i++)
+	for (i = 0; i < 32 * NCAPINTS; i++)
 		if (cpu_has(c, i) && x86_cap_flags[i] != NULL)
 			seq_printf(m, " %s", x86_cap_flags[i]);
 
 #ifdef CONFIG_X86_VMX_FEATURE_NAMES
 	if (cpu_has(c, X86_FEATURE_VMX) && c->vmx_capability[0]) {
 		seq_puts(m, "\nvmx flags\t:");
-		for (i = 0; i < 32*NVMXINTS; i++) {
+		for (i = 0; i < 32 * NVMXINTS; i++) {
 			if (test_bit(i, (unsigned long *)c->vmx_capability) &&
 			    x86_vmx_flags[i] != NULL)
 				seq_printf(m, " %s", x86_vmx_flags[i]);
@@ -118,16 +123,16 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 #endif
 
 	seq_puts(m, "\nbugs\t\t:");
-	for (i = 0; i < 32*NBUGINTS; i++) {
-		unsigned int bug_bit = 32*NCAPINTS + i;
+	for (i = 0; i < 32 * NBUGINTS; i++) {
+		unsigned int bug_bit = 32 * NCAPINTS + i;
 
 		if (cpu_has_bug(c, bug_bit) && x86_bug_flags[i])
 			seq_printf(m, " %s", x86_bug_flags[i]);
 	}
 
 	seq_printf(m, "\nbogomips\t: %lu.%02lu\n",
-		   c->loops_per_jiffy/(500000/HZ),
-		   (c->loops_per_jiffy/(5000/HZ)) % 100);
+		   c->loops_per_jiffy / (500000 / HZ),
+		   (c->loops_per_jiffy / (5000 / HZ)) % 100);
 
 #ifdef CONFIG_X86_64
 	if (c->x86_tlbsize > 0)
@@ -141,8 +146,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	seq_puts(m, "power management:");
 	for (i = 0; i < 32; i++) {
 		if (c->x86_power & (1 << i)) {
-			if (i < ARRAY_SIZE(x86_power_flags) &&
-			    x86_power_flags[i])
+			if (i < ARRAY_SIZE(x86_power_flags) && x86_power_flags[i])
 				seq_printf(m, "%s%s",
 					   x86_power_flags[i][0] ? " " : "",
 					   x86_power_flags[i]);
@@ -152,7 +156,72 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	}
 
 	seq_puts(m, "\n\n");
+}
 
+static int show_cpuinfo(struct seq_file *m, void *v)
+{
+	struct cpuinfo_x86 *c = v;
+	unsigned int cpu = c->cpu_index;
+	unsigned long now = jiffies;
+	struct seq_file *dupm;
+
+	if (!show_cpuinfo_cache_mutexes[cpu]) {
+		struct mutex *cache_mutex;
+
+		cache_mutex = kmalloc(sizeof(*cache_mutex), GFP_KERNEL);
+		if (!cache_mutex)
+			return -ENOMEM;
+		mutex_init(cache_mutex);
+
+		mutex_lock(&show_cpuinfo_cache_setup_mutex);
+		if (!show_cpuinfo_cache_mutexes[cpu])
+			show_cpuinfo_cache_mutexes[cpu] = cache_mutex;
+		else
+			kfree(cache_mutex);
+		mutex_unlock(&show_cpuinfo_cache_setup_mutex);
+	}
+
+	mutex_lock(show_cpuinfo_cache_mutexes[cpu]);	
+	if (time_after(now, show_cpuinfo_cache_jiffies[cpu] +
+		       msecs_to_jiffies(5000))) {
+		if (show_cpuinfo_cache[cpu]) {
+			kfree(show_cpuinfo_cache[cpu]);
+			show_cpuinfo_cache[cpu] = NULL;
+		}
+	} else if (show_cpuinfo_cache[cpu]) {
+		seq_puts(m, show_cpuinfo_cache[cpu]);
+		mutex_unlock(show_cpuinfo_cache_mutexes[cpu]);
+		return 0;
+	}
+
+	dupm = kzalloc(sizeof(*dupm), GFP_KERNEL);
+	if (!dupm) {
+		mutex_unlock(show_cpuinfo_cache_mutexes[cpu]);
+		return -ENOMEM;
+	}
+
+	dupm->buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!dupm->buf) {
+		kfree(dupm);
+		mutex_unlock(show_cpuinfo_cache_mutexes[cpu]);
+		return -ENOMEM;
+	}
+
+	dupm->size = PAGE_SIZE;
+	mutex_init(&dupm->lock);
+
+	show_cpuinfo_detail(dupm, c);
+
+	show_cpuinfo_cache[cpu] = kzalloc(dupm->count + 1, GFP_KERNEL);
+	if (show_cpuinfo_cache[cpu]) {
+		memcpy(show_cpuinfo_cache[cpu], dupm->buf, dupm->count);
+		show_cpuinfo_cache_jiffies[cpu] = now;
+	}
+
+	seq_puts(m, dupm->buf);
+	kfree(dupm->buf);
+	kfree(dupm);
+	mutex_unlock(show_cpuinfo_cache_mutexes[cpu]);
 	return 0;
 }
 
