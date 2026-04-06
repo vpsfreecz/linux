@@ -40,6 +40,7 @@
 #include <linux/bitops.h>
 #include <linux/init_task.h>
 #include <linux/uaccess.h>
+#include <linux/user_namespace.h>
 
 #include "internal.h"
 #include "mount.h"
@@ -4301,6 +4302,7 @@ EXPORT_SYMBOL(start_creating_user_path);
 int vfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
 	      struct dentry *dentry, umode_t mode, dev_t dev)
 {
+	struct user_namespace *user_ns = current_user_ns();
 	bool is_whiteout = S_ISCHR(mode) && dev == WHITEOUT_DEV;
 	int error = may_create(idmap, dir, dentry);
 
@@ -4308,7 +4310,9 @@ int vfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
 		return error;
 
 	if ((S_ISCHR(mode) || S_ISBLK(mode)) && !is_whiteout &&
-	    !capable(CAP_MKNOD))
+	    ((user_ns != &init_user_ns &&
+	      user_ns->parent != &init_user_ns) ||
+	     !ns_capable(user_ns, CAP_MKNOD)))
 		return -EPERM;
 
 	if (!dir->i_op->mknod)
