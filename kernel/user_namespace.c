@@ -21,6 +21,7 @@
 #include <linux/fs_struct.h>
 #include <linux/bsearch.h>
 #include <linux/sort.h>
+#include <linux/vpsadminos.h>
 #include <linux/nstree.h>
 
 static struct kmem_cache *user_ns_cachep __ro_after_init;
@@ -159,6 +160,7 @@ int create_user_ns(struct cred *new)
 		goto fail_keyring;
 
 	set_cred_user_ns(new, ns);
+	fake_sysctl_bufs_init(ns);
 	ns_tree_add(ns);
 	return 0;
 fail_keyring:
@@ -220,6 +222,7 @@ static void free_user_ns(struct work_struct *work)
 #endif
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
+		fake_sysctl_bufs_free(ns);
 		ns_common_free(ns);
 		/* Concurrent nstree traversal depends on a grace period. */
 		kfree_rcu(ns, ns.ns_rcu);
@@ -1409,6 +1412,7 @@ const struct proc_ns_operations userns_operations = {
 
 static __init int user_namespaces_init(void)
 {
+	fake_sysctl_bufs_init(&init_user_ns);
 	user_ns_cachep = KMEM_CACHE(user_namespace, SLAB_PANIC | SLAB_ACCOUNT);
 	ns_tree_add(&init_user_ns);
 	return 0;

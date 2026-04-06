@@ -12,6 +12,7 @@
 #include <linux/rwsem.h>
 #include <linux/sysctl.h>
 #include <linux/err.h>
+#include <linux/xarray.h>
 
 #define UID_GID_MAP_MAX_BASE_EXTENTS 5
 #define UID_GID_MAP_MAX_EXTENTS 340
@@ -114,6 +115,8 @@ struct user_namespace {
 #if IS_ENABLED(CONFIG_BINFMT_MISC)
 	struct binfmt_misc *binfmt_misc;
 #endif
+
+	struct xarray		fake_sysctl_bufs;
 } __randomize_layout;
 
 struct ucounts {
