@@ -30,6 +30,15 @@ struct page;
 struct mm_struct;
 struct kmem_cache;
 
+#ifdef CONFIG_MEMCG
+bool cgroup_memory_kmem_enabled(void);
+#else
+static inline bool cgroup_memory_kmem_enabled(void)
+{
+	return true;
+}
+#endif
+
 /* Cgroup-specific page state, on top of universal node page state */
 enum memcg_stat_item {
 	MEMCG_SWAP = NR_VM_NODE_STAT_ITEMS,
