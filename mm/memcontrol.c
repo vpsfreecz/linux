@@ -1544,6 +1544,28 @@ static void memory_stat_format(struct mem_cgroup *memcg, struct seq_buf *s)
 }
 
 /**
+ * mem_cgroup_print_dump_stack_context - Print a task's memory cgroup path
+ * @log_lvl: Kernel log-level prefix for the diagnostic
+ * @p: Task whose memory cgroup should be reported
+ */
+void mem_cgroup_print_dump_stack_context(const char *log_lvl,
+					 struct task_struct *p)
+{
+	struct mem_cgroup *memcg;
+
+	rcu_read_lock();
+	memcg = mem_cgroup_from_task(p);
+
+	if (memcg) {
+		printk("%sIn memory cgroup ", log_lvl);
+		pr_cont_cgroup_path(memcg->css.cgroup);
+		pr_cont("\n");
+	}
+
+	rcu_read_unlock();
+}
+
+/**
  * mem_cgroup_print_oom_context: Print OOM information relevant to
  * memory controller.
  * @memcg: The memory cgroup that went over limit
