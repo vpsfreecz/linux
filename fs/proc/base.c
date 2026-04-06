@@ -1102,10 +1102,44 @@ static ssize_t oom_adj_read(struct file *file, char __user *buf, size_t count,
 	return simple_read_from_buffer(buf, count, ppos, buffer, len);
 }
 
+/*
+ * Process is privileged to change oom_score_adj_min, when:
+ *  - the caller is in init_user_ns and has CAP_SYS_RESOURCE
+ *  - the caller is in the userns of the manipulated process,
+ *    or the caller is in a parent userns of the manipulated
+ *    process; the caller's userns is a direct descendant of
+ *    init_user_ns; the caller has CAP_SYS_RESOURCE in its userns
+ */
+static int can_set_oom_adj_min(struct task_struct *task)
+{
+	const struct cred *task_cred;
+	struct user_namespace *caller_user_ns;
+	bool allowed;
+
+	if (capable(CAP_SYS_RESOURCE))
+		return 1;
+
+	caller_user_ns = current_user_ns();
+
+	if (caller_user_ns == &init_user_ns)
+		return 0;
+
+	if (caller_user_ns->parent != &init_user_ns)
+		return 0;
+
+	task_cred = get_task_cred(task);
+	allowed = in_userns(caller_user_ns, task_cred->user_ns) &&
+		  ns_capable(caller_user_ns, CAP_SYS_RESOURCE);
+	put_cred(task_cred);
+
+	return allowed;
+}
+
 static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 {
 	struct mm_struct *mm = NULL;
 	struct task_struct *task;
+	int privileged = 0;
 	int err = 0;
 
 	task = get_proc_task(file_inode(file));
@@ -1127,8 +1161,10 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 			  current->comm, task_pid_nr(current), task_pid_nr(task),
 			  task_pid_nr(task));
 	} else {
+		privileged = can_set_oom_adj_min(task);
+
 		if ((short)oom_adj < task->signal->oom_score_adj_min &&
-				!capable(CAP_SYS_RESOURCE)) {
+				!privileged) {
 			err = -EACCES;
 			goto err_unlock;
 		}
@@ -1152,7 +1188,7 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 	}
 
 	task->signal->oom_score_adj = oom_adj;
-	if (!legacy && has_capability_noaudit(current, CAP_SYS_RESOURCE))
+	if (!legacy && privileged)
 		task->signal->oom_score_adj_min = (short)oom_adj;
 	trace_oom_score_adj_update(task);
 
@@ -1171,7 +1207,7 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 			task_lock(p);
 			if (!p->vfork_done && process_shares_mm(p, mm)) {
 				p->signal->oom_score_adj = oom_adj;
-				if (!legacy && has_capability_noaudit(current, CAP_SYS_RESOURCE))
+				if (!legacy && privileged)
 					p->signal->oom_score_adj_min = (short)oom_adj;
 			}
 			task_unlock(p);
