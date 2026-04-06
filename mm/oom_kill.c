@@ -201,8 +201,12 @@ static bool should_dump_unreclaim_slab(void)
  */
 long oom_badness(struct task_struct *p, unsigned long totalpages)
 {
+	const struct cred *cred;
 	long points;
 	long adj;
+	struct pid_namespace *ns;
+	pid_t ns_pid;
+	bool protected;
 
 	if (oom_unkillable_task(p))
 		return LONG_MIN;
@@ -217,6 +221,22 @@ long oom_badness(struct task_struct *p, unsigned long totalpages)
 	 * the middle of vfork
 	 */
 	adj = (long)p->signal->oom_score_adj;
+
+	cred = get_task_cred(p);
+	ns = task_active_pid_ns(p);
+	ns_pid = task_pid_nr_ns(p, ns);
+
+	protected = (cred->user_ns == &init_user_ns &&
+		     uid_eq(cred->euid, GLOBAL_ROOT_UID) &&
+		     ns == &init_pid_ns &&
+		     strcmp(p->comm, "lxc-start") == 0) ||
+		    (cred->user_ns->parent == &init_user_ns &&
+		     ns != &init_pid_ns && ns_pid == 1);
+	put_cred(cred);
+
+	if (protected)
+		adj = (long)OOM_SCORE_ADJ_MIN;
+
 	if (adj == OOM_SCORE_ADJ_MIN ||
 			mm_flags_test(MMF_OOM_SKIP, p->mm) ||
 			in_vfork(p)) {
@@ -1170,6 +1190,19 @@ bool out_of_memory(struct oom_control *oc)
 	select_bad_process(oc);
 	/* Found nothing?!?! */
 	if (!oc->chosen) {
+		if (is_memcg_oom(oc)) {
+			/*
+			 * Tough luck, we are out of memory in this memcg
+			 * we can't tolerate this over prolonged periods, so
+			 * might as well go ahead and kill this process now.
+			 */
+			get_task_struct(current);
+			oc->chosen = current;
+			oom_kill_process(oc,
+					 "Memory cgroup out of memory: killing allocating task");
+			return true;
+		}
+
 		dump_header(oc);
 		pr_warn("Out of memory and no killable processes...\n");
 		/*
