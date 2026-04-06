@@ -1040,9 +1040,12 @@ static int nf_conntrack_standalone_init_sysctl(struct net *net)
 
 	/* Don't allow non-init_net ns to alter global sysctls */
 	if (!net_eq(&init_net, net)) {
-		table[NF_SYSCTL_CT_MAX].mode = 0444;
-		table[NF_SYSCTL_CT_EXPECT_MAX].mode = 0444;
-		table[NF_SYSCTL_CT_BUCKETS].mode = 0444;
+		cnet->sysctl_max = nf_conntrack_max;
+		cnet->sysctl_buckets = nf_conntrack_htable_size_user;
+		cnet->sysctl_expect_max = nf_ct_expect_max;
+		table[NF_SYSCTL_CT_MAX].data = &cnet->sysctl_max;
+		table[NF_SYSCTL_CT_BUCKETS].data = &cnet->sysctl_buckets;
+		table[NF_SYSCTL_CT_EXPECT_MAX].data = &cnet->sysctl_expect_max;
 	}
 
 	cnet->sysctl_header = register_net_sysctl_sz(net, "net/netfilter",
