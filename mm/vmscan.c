@@ -33,6 +33,7 @@
 #include <linux/topology.h>
 #include <linux/cpu.h>
 #include <linux/cpuset.h>
+#include <linux/cgroup_namespace.h>
 #include <linux/compaction.h>
 #include <linux/notifier.h>
 #include <linux/delay.h>
@@ -7539,13 +7540,85 @@ void __meminit kswapd_stop(int nid)
 	pgdat_kswapd_unlock(pgdat);
 }
 
+static int proc_dointvec_minmax_swappiness(const struct ctl_table *table,
+					   int write, void *buffer,
+					   size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table vtable = *table;
+	struct user_namespace *ns = current_user_ns();
+	struct cgroup_namespace *cgns = current->nsproxy->cgroup_ns;
+	bool admin = ns_capable(cgns->user_ns, CAP_SYS_ADMIN);
+	int swappiness;
+
+	if (write && !admin)
+		return -EPERM;
+
+	/*
+	 * Virtualize swappiness if we're not in init namespaces;
+	 * use the cgroup namespace's root memory cgroup
+	 * if admin in current cgroup namespace, or use current memory
+	 * cgroup swappiness for read only access.
+	 */
+	if (ns == &init_user_ns && cgns == &init_cgroup_ns)
+		return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+
+#ifdef CONFIG_MEMCG
+	if (!mem_cgroup_disabled()) {
+		struct mem_cgroup *memcg = NULL;
+		int ret;
+
+		if (admin) {
+			struct cgroup_subsys_state *css;
+
+			css = READ_ONCE(cgns->root_cset->subsys[memory_cgrp_id]);
+			if (css && css_tryget(css))
+				memcg = mem_cgroup_from_css(css);
+		} else {
+			memcg = get_mem_cgroup_from_mm(current->mm);
+		}
+
+		if (!memcg)
+			goto read_only_fallback;
+
+		vtable.data = &memcg->swappiness;
+		ret = proc_dointvec_minmax(&vtable, write, buffer, lenp, ppos);
+
+		/*
+		 * Propagate new value to all memcgs in this cgroup namespace.
+		 */
+		if (!ret && write) {
+			struct mem_cgroup *tmp;
+
+			for (tmp = mem_cgroup_iter(memcg, NULL, NULL);
+			     tmp;
+			     tmp = mem_cgroup_iter(memcg, tmp, NULL))
+				WRITE_ONCE(tmp->swappiness,
+					   READ_ONCE(memcg->swappiness));
+		}
+
+		mem_cgroup_put(memcg);
+		return ret;
+	}
+#endif
+
+#ifdef CONFIG_MEMCG
+read_only_fallback:
+#endif
+	if (write)
+		return -EPERM;
+
+	swappiness = READ_ONCE(vm_swappiness);
+	vtable.data = &swappiness;
+	return proc_dointvec_minmax(&vtable, false, buffer, lenp, ppos);
+}
+
 static const struct ctl_table vmscan_sysctl_table[] = {
 	{
 		.procname	= "swappiness",
 		.data		= &vm_swappiness,
 		.maxlen		= sizeof(vm_swappiness),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec_minmax,
+		.mode		= 0666,
+		.proc_handler	= proc_dointvec_minmax_swappiness,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO_HUNDRED,
 	},
