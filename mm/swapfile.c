@@ -50,6 +50,8 @@
 #include "internal.h"
 #include "swap.h"
 
+#include <linux/vpsadminos.h>
+
 static bool swap_count_continued(struct swap_info_struct *, pgoff_t,
 				 unsigned char);
 static void free_swap_count_continuations(struct swap_info_struct *);
@@ -3134,10 +3136,68 @@ static const struct seq_operations swaps_op = {
 	.show =		swap_show
 };
 
+#ifdef CONFIG_MEMCG
+static int fake_swap_show(struct seq_file *swap, void *v)
+{
+	struct vpsadminos_memcg_view *view = swap->private;
+	struct mem_cgroup *swap_memcg = view->swap;
+	unsigned long swapmax_pages, swapusage_pages;
+	unsigned long totalswap_kb, usedswap_kb;
+	struct sysinfo i;
+
+	si_swapinfo(&i);
+
+	seq_puts(swap, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+
+	swapmax_pages = vpsadminos_memcg_swap_limit(swap_memcg);
+	swapusage_pages = vpsadminos_memcg_swap_usage(swap_memcg);
+	if (!swapmax_pages)
+		return 0;
+
+	if (swapmax_pages == PAGE_COUNTER_MAX)
+		totalswap_kb = K(i.totalswap);
+	else
+		totalswap_kb = K(swapmax_pages);
+	usedswap_kb = K(swapusage_pages);
+	usedswap_kb = min(usedswap_kb, totalswap_kb);
+
+	seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+		   "virtual",
+		   "virtual\t",
+		   totalswap_kb, totalswap_kb < 10000000 ? "\t" : "",
+		   usedswap_kb, usedswap_kb < 10000000 ? "\t" : "",
+		   -1);
+	return 0;
+}
+#endif
+
 static int swaps_open(struct inode *inode, struct file *file)
 {
 	struct seq_file *seq;
+#ifdef CONFIG_MEMCG
+	struct vpsadminos_memcg_view *view;
+#endif
 	int ret;
+
+#ifdef CONFIG_MEMCG
+	view = kmalloc(sizeof(*view), GFP_KERNEL);
+	if (!view)
+		return -ENOMEM;
+
+	if (vpsadminos_get_current_memcg_view(view)) {
+		ret = single_open(file, fake_swap_show, view);
+		if (ret) {
+			vpsadminos_put_memcg_view(view);
+			kfree(view);
+			return ret;
+		}
+
+		seq = file->private_data;
+		seq->poll_event = atomic_read(&proc_poll_event);
+		return 0;
+	}
+	kfree(view);
+#endif
 
 	ret = seq_open(file, &swaps_op);
 	if (ret)
@@ -3148,12 +3208,34 @@ static int swaps_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int swaps_release(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq = file->private_data;
+#ifdef CONFIG_MEMCG
+	struct vpsadminos_memcg_view *view;
+#endif
+
+	if (seq && seq->op == &swaps_op)
+		return seq_release(inode, file);
+
+#ifdef CONFIG_MEMCG
+	if (seq && seq->private) {
+		view = seq->private;
+		vpsadminos_put_memcg_view(view);
+		kfree(view);
+		seq->private = NULL;
+	}
+#endif
+
+	return single_release(inode, file);
+}
+
 static const struct proc_ops swaps_proc_ops = {
 	.proc_flags	= PROC_ENTRY_PERMANENT,
 	.proc_open	= swaps_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= seq_release,
+	.proc_release	= swaps_release,
 	.proc_poll	= swaps_poll,
 };
 
