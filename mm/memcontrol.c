@@ -662,6 +662,22 @@ unsigned long memcg_page_state(struct mem_cgroup *memcg, int idx)
 	return x;
 }
 
+unsigned long memcg_page_state_nowarn(struct mem_cgroup *memcg, int idx)
+{
+	long x;
+	int i = memcg_stats_index(idx);
+
+	if (BAD_STAT_IDX(i))
+		return 0;
+
+	x = READ_ONCE(memcg->vmstats->state[i]);
+#ifdef CONFIG_SMP
+	if (x < 0)
+		x = 0;
+#endif
+	return x;
+}
+
 static int memcg_page_state_unit(int item);
 
 /*

@@ -8,6 +8,7 @@
 #include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/mm_inline.h>
+#include <linux/memcontrol.h>
 #include <linux/utsname.h>
 #include <linux/mman.h>
 #include <linux/reboot.h>
@@ -65,6 +66,7 @@
 #include <linux/rcupdate.h>
 #include <linux/uidgid.h>
 #include <linux/cred.h>
+#include <linux/vpsadminos.h>
 
 #include <linux/nospec.h>
 
@@ -2898,6 +2900,10 @@ static int do_sysinfo(struct sysinfo *info)
 	unsigned long mem_total, sav_total;
 	unsigned int mem_unit, bitcount;
 	struct timespec64 tp;
+#ifdef CONFIG_MEMCG
+	struct vpsadminos_memcg_view memcg_view;
+	struct mem_cgroup *memcg = NULL, *swap_memcg = NULL;
+#endif
 
 	memset(info, 0, sizeof(struct sysinfo));
 
@@ -2911,6 +2917,41 @@ static int do_sysinfo(struct sysinfo *info)
 
 	si_meminfo(info);
 	si_swapinfo(info);
+
+#ifdef CONFIG_MEMCG
+	if (vpsadminos_get_current_memcg_view(&memcg_view)) {
+		memcg = memcg_view.memory;
+		swap_memcg = memcg_view.swap;
+	}
+	if (memcg) {
+		unsigned long memusage = page_counter_read(&memcg->memory);
+		unsigned long totalram = READ_ONCE(memcg->memory.max);
+		unsigned long swapmax, swapusage;
+
+		info->totalram = totalram;
+		info->totalhigh = totalram;
+		info->freeram = vpsadminos_saturating_sub(totalram, memusage);
+		info->freehigh = info->freeram;
+		info->bufferram = 0;
+		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
+
+		swapmax = vpsadminos_memcg_swap_limit(swap_memcg);
+		swapusage = vpsadminos_memcg_swap_usage(swap_memcg);
+
+		if (!swapmax) {
+			info->totalswap = 0;
+			info->freeswap = 0;
+		} else {
+			if (swapmax != PAGE_COUNTER_MAX)
+				info->totalswap = swapmax;
+			info->freeswap =
+				vpsadminos_saturating_sub(info->totalswap,
+							  swapusage);
+		}
+
+		vpsadminos_put_memcg_view(&memcg_view);
+	}
+#endif
 
 	/*
 	 * If the sum of all the available memory (i.e. ram + swap)
