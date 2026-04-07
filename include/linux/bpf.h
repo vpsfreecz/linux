@@ -2607,7 +2607,8 @@ bool bpf_token_current_domain_matches_task(const struct task_struct *task);
 bool bpf_token_current_container_capable(int cap);
 bool bpf_token_current_container_member(void);
 struct bpf_token *bpf_token_get_current_container(void);
-bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id);
+bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
+				 enum bpf_func_id func_id);
 
 static inline bool bpf_allow_ptr_leaks(const struct bpf_token *token)
 {
@@ -3094,7 +3095,8 @@ static inline struct bpf_token *bpf_token_get_current_container(void)
 	return NULL;
 }
 
-static inline bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id)
+static inline bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
+					       enum bpf_func_id func_id)
 {
 	return true;
 }
