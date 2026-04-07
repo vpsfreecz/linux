@@ -763,6 +763,13 @@ const struct bpf_func_proto bpf_get_current_task_proto = {
 	.ret_type	= RET_INTEGER,
 };
 
+static const struct bpf_func_proto bpf_get_current_task_container_proto = {
+	.func		= bpf_get_current_task,
+	.gpl_only	= true,
+	.ret_type	= RET_PTR_TO_BTF_ID_TRUSTED,
+	.ret_btf_id	= &btf_tracing_ids[BTF_TRACING_TYPE_TASK],
+};
+
 BPF_CALL_0(bpf_get_current_task_btf)
 {
 	return (unsigned long) current;
@@ -1252,6 +1259,10 @@ bpf_tracing_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	switch (func_id) {
 	case BPF_FUNC_get_smp_processor_id:
 		return &bpf_get_smp_processor_id_proto;
+	case BPF_FUNC_get_current_task:
+		if (bpf_token_is_container(prog->aux->token))
+			return &bpf_get_current_task_container_proto;
+		break;
 #ifdef CONFIG_ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE
 	case BPF_FUNC_probe_read:
 		return security_locked_down(LOCKDOWN_BPF_READ_KERNEL) < 0 ?

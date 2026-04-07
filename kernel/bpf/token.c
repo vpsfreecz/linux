@@ -175,6 +175,10 @@ bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func
 	case BPF_FUNC_get_ns_current_pid_tgid:
 	case BPF_FUNC_get_current_uid_gid:
 	case BPF_FUNC_get_current_comm:
+	case BPF_FUNC_get_current_task:
+	case BPF_FUNC_get_current_task_btf:
+	case BPF_FUNC_probe_read:
+	case BPF_FUNC_probe_read_kernel:
 	case BPF_FUNC_probe_read_user:
 	case BPF_FUNC_probe_read_user_str:
 	case BPF_FUNC_copy_from_user:
