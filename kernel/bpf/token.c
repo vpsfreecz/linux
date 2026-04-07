@@ -77,7 +77,7 @@ bool bpf_token_task_match(const struct bpf_token *token,
 	return cgrp && cgroup_is_descendant(cgrp, token->cgrp);
 }
 
-bool bpf_token_current_container_capable(int cap)
+static bool bpf_token_current_container_active(void)
 {
 	struct nsproxy *nsproxy = current->nsproxy;
 
@@ -87,8 +87,119 @@ bool bpf_token_current_container_capable(int cap)
 		return false;
 	if (!nsproxy->cgroup_ns->root_cset->dfl_cgrp)
 		return false;
+	return true;
+}
+
+bool bpf_token_current_container_capable(int cap)
+{
+	if (!bpf_token_current_container_active())
+		return false;
 
 	return bpf_ns_capable(current_user_ns(), cap);
+}
+
+bool bpf_token_current_restrict_tracing_symbols(void)
+{
+	if (!sysctl_bpf_container_tracing_enabled)
+		return false;
+
+	return bpf_token_current_container_capable(CAP_BPF) ||
+	       bpf_token_current_container_capable(CAP_PERFMON) ||
+	       bpf_token_current_container_capable(CAP_SYS_ADMIN);
+}
+
+static bool bpf_token_allow_syscall_symbol(const char *name, const char *syscall)
+{
+	static const char * const prefixes[] = {
+		"__x64_sys_",
+		"__ia32_sys_",
+		"__arm64_sys_",
+		"__riscv_sys_",
+		"__s390x_sys_",
+		"__s390_sys_",
+		"__powerpc_sys_",
+		"__powerpc64_sys_",
+		"__sparc_sys_",
+		"__sparc64_sys_",
+		"__se_sys_",
+		"__do_sys_",
+		"sys_",
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(prefixes); i++) {
+		const char *prefix = prefixes[i];
+		size_t len = strlen(prefix);
+
+		if (!strncmp(name, prefix, len) && !strcmp(name + len, syscall))
+			return true;
+	}
+
+	return false;
+}
+
+static bool bpf_token_allow_container_symbol_name(const char *name)
+{
+	static const char * const exact_symbols[] = {
+		"sched_fork",
+		"wake_up_new_task",
+		"tcp_v4_connect",
+		"tcp_v6_connect",
+		"tcp_set_state",
+		"tcp_close",
+		"inet_csk_accept",
+		"udp_recvmsg",
+		"udpv6_queue_rcv_one_skb",
+	};
+	static const char * const syscall_names[] = {
+		"open",
+		"openat",
+		"openat2",
+		"kill",
+		"tkill",
+		"tgkill",
+		"fork",
+		"vfork",
+		"clone",
+		"clone3",
+		"execve",
+		"execveat",
+		"mount",
+		"umount2",
+		"fsopen",
+		"fsconfig",
+		"fsmount",
+		"move_mount",
+		"open_tree",
+		"mount_setattr",
+		"read",
+		"write",
+		"pread64",
+		"pwrite64",
+		"stat",
+		"lstat",
+		"newfstatat",
+		"statx",
+		"connect",
+		"accept",
+		"accept4",
+	};
+	int i;
+
+	if (!name || !*name)
+		return false;
+
+	for (i = 0; i < ARRAY_SIZE(exact_symbols); i++) {
+		if (!strcmp(name, exact_symbols[i]))
+			return true;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(syscall_names); i++) {
+		if (bpf_token_allow_syscall_symbol(name, syscall_names[i]))
+			return true;
+	}
+
+	return false;
 }
 
 static struct bpf_token *bpf_token_alloc_current_container(void)
@@ -131,6 +242,22 @@ static struct bpf_token *bpf_token_alloc_current_container(void)
 struct bpf_token *bpf_token_get_current_container(void)
 {
 	return bpf_token_alloc_current_container();
+}
+
+bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *name)
+{
+	if (!bpf_token_is_container(token))
+		return true;
+
+	return bpf_token_allow_container_symbol_name(name);
+}
+
+bool bpf_token_current_allow_tracing_symbol(const char *name)
+{
+	if (!bpf_token_current_restrict_tracing_symbols())
+		return true;
+
+	return bpf_token_allow_container_symbol_name(name);
 }
 
 bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id)
