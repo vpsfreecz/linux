@@ -271,6 +271,7 @@ struct btf {
 
 	/* split BTF support */
 	struct btf *base_btf;
+	struct bpf_token *token;
 	u32 start_id; /* first type ID in this BTF (0 for base BTF) */
 	u32 start_str_off; /* first string offset (0 for base BTF) */
 	char name[MODULE_NAME_LEN];
@@ -1761,6 +1762,7 @@ static void btf_free(struct btf *btf)
 	if (!btf_is_vmlinux(btf))
 		kvfree(btf->data);
 	kvfree(btf->base_id_map);
+	bpf_token_put(btf->token);
 	kfree(btf);
 }
 
@@ -1787,6 +1789,16 @@ void btf_put(struct btf *btf)
 		btf_free_id(btf);
 		call_rcu(&btf->rcu, btf_free_rcu);
 	}
+}
+
+bool btf_current_container_allowed(const struct btf *btf)
+{
+	if (!bpf_token_current_container_member())
+		return true;
+	if (!bpf_token_is_container(btf->token))
+		return false;
+
+	return bpf_token_task_match(btf->token, current);
 }
 
 struct btf *btf_base_btf(const struct btf *btf)
@@ -8003,6 +8015,9 @@ static void bpf_btf_show_fdinfo(struct seq_file *m, struct file *filp)
 {
 	const struct btf *btf = filp->private_data;
 
+	if (!btf_current_container_allowed(btf))
+		return;
+
 	seq_printf(m, "btf_id:\t%u\n", READ_ONCE(btf->id));
 }
 #endif
@@ -8025,7 +8040,8 @@ static int __btf_new_fd(struct btf *btf)
 	return anon_inode_getfd("btf", &btf_fops, btf, O_RDONLY | O_CLOEXEC);
 }
 
-int btf_new_fd(const union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
+int btf_new_fd(const union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size,
+	       struct bpf_token *token)
 {
 	struct btf *btf;
 	int ret;
@@ -8033,6 +8049,10 @@ int btf_new_fd(const union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	btf = btf_parse(attr, uattr, uattr_size);
 	if (IS_ERR(btf))
 		return PTR_ERR(btf);
+	if (bpf_token_is_container(token)) {
+		bpf_token_inc(token);
+		btf->token = token;
+	}
 
 	ret = btf_alloc_id(btf);
 	if (ret) {
@@ -8076,6 +8096,9 @@ int btf_get_info_by_fd(const struct btf *btf,
 	char __user *uname;
 	u32 uinfo_len, uname_len, name_len;
 	int ret = 0;
+
+	if (!btf_current_container_allowed(btf))
+		return -EACCES;
 
 	uinfo = u64_to_user_ptr(attr->info.info);
 	uinfo_len = attr->info.info_len;
