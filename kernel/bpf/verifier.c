@@ -298,6 +298,10 @@ struct bpf_call_arg_meta {
 	u32 subprogno;
 	struct btf_field *kptr_field;
 	s64 const_map_key;
+	bool container_spill_ptr;
+	struct btf *container_spill_btf;
+	u32 container_spill_btf_id;
+	enum bpf_type_flag container_spill_flag;
 };
 
 struct bpf_kfunc_call_arg_meta {
@@ -7216,6 +7220,107 @@ static bool type_is_trusted_or_null(struct bpf_verifier_env *env,
 					  "__safe_trusted_or_null");
 }
 
+static bool is_container_tracing_prog(const struct bpf_verifier_env *env)
+{
+	return bpf_token_is_container(env->prog->aux->token);
+}
+
+BTF_SET_START(container_tracing_scalar_types)
+BTF_ID(struct, task_struct)
+BTF_ID(struct, mm_struct)
+BTF_ID(struct, files_struct)
+BTF_ID(struct, fs_struct)
+BTF_ID(struct, signal_struct)
+BTF_ID(struct, cred)
+BTF_ID(struct, file)
+BTF_ID(struct, linux_binprm)
+BTF_SET_END(container_tracing_scalar_types)
+
+BTF_ID_LIST_SINGLE(container_task_struct_id, struct, task_struct)
+BTF_ID_LIST_SINGLE(container_mm_struct_id, struct, mm_struct)
+BTF_ID_LIST_SINGLE(container_files_struct_id, struct, files_struct)
+BTF_ID_LIST_SINGLE(container_fs_struct_id, struct, fs_struct)
+BTF_ID_LIST_SINGLE(container_signal_struct_id, struct, signal_struct)
+BTF_ID_LIST_SINGLE(container_cred_id, struct, cred)
+BTF_ID_LIST_SINGLE(container_file_id, struct, file)
+BTF_ID_LIST_SINGLE(container_linux_binprm_id, struct, linux_binprm)
+
+static bool container_btf_id_matches(const struct btf *btf, u32 btf_id, const u32 *expected_id)
+{
+	return btf_is_kernel(btf) && btf_id == *expected_id;
+}
+
+static bool container_btf_scalar_access_allowed(const struct bpf_reg_state *reg)
+{
+	return is_trusted_reg(reg) && btf_is_kernel(reg->btf) &&
+	       btf_id_set_contains(&container_tracing_scalar_types, reg->btf_id);
+}
+
+static bool container_btf_ptr_access_allowed(const struct bpf_reg_state *reg,
+					     const char *field_name, u32 btf_id,
+					     enum bpf_type_flag *flag)
+{
+	enum bpf_type_flag container_flag = *flag & PTR_MAYBE_NULL;
+
+	if (!field_name || !is_trusted_reg(reg) || !btf_is_kernel(reg->btf))
+		return false;
+
+	if (container_btf_id_matches(reg->btf, reg->btf_id, &container_task_struct_id[0])) {
+		if ((!strcmp(field_name, "mm") && btf_id == container_mm_struct_id[0]) ||
+		    (!strcmp(field_name, "files") && btf_id == container_files_struct_id[0]) ||
+		    (!strcmp(field_name, "fs") && btf_id == container_fs_struct_id[0]) ||
+		    (!strcmp(field_name, "signal") && btf_id == container_signal_struct_id[0]) ||
+		    (!strcmp(field_name, "group_leader") &&
+		     btf_id == container_task_struct_id[0]) ||
+		    (!strcmp(field_name, "cred") && btf_id == container_cred_id[0]) ||
+		    (!strcmp(field_name, "real_cred") && btf_id == container_cred_id[0])) {
+			*flag = container_flag | PTR_TRUSTED;
+			return true;
+		}
+	} else if (container_btf_id_matches(reg->btf, reg->btf_id, &container_mm_struct_id[0])) {
+		if (!strcmp(field_name, "exe_file") && btf_id == container_file_id[0]) {
+			*flag = container_flag | PTR_TRUSTED;
+			return true;
+		}
+	} else if (container_btf_id_matches(reg->btf, reg->btf_id, &container_linux_binprm_id[0])) {
+		if (!strcmp(field_name, "file") && btf_id == container_file_id[0]) {
+			*flag = container_flag | PTR_TRUSTED;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static int check_container_btf_access(struct bpf_verifier_env *env,
+				      struct bpf_reg_state *reg,
+				      const char *field_name, u32 btf_id,
+				      enum bpf_type_flag *flag, int ret)
+{
+	if (ret == PTR_TO_BTF_ID) {
+		if (container_btf_ptr_access_allowed(reg, field_name, btf_id, flag))
+			return ret;
+
+		verbose(env, "container tracing rejects pointer field access to %s.%s\n",
+			btf_type_name(reg->btf, reg->btf_id), field_name ?: "<anon>");
+		return -EACCES;
+	}
+
+	if (ret == PTR_TO_MEM) {
+		verbose(env, "container tracing rejects raw memory walk from %s.%s\n",
+			btf_type_name(reg->btf, reg->btf_id), field_name ?: "<anon>");
+		return -EACCES;
+	}
+
+	if (!container_btf_scalar_access_allowed(reg)) {
+		verbose(env, "container tracing rejects scalar access from %s\n",
+			btf_type_name(reg->btf, reg->btf_id));
+		return -EACCES;
+	}
+
+	return ret;
+}
+
 static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 				   struct bpf_reg_state *regs,
 				   int regno, int off, int size,
@@ -7229,12 +7334,19 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	enum bpf_type_flag flag = 0;
 	u32 btf_id = 0;
 	int ret;
+	bool container_prog = is_container_tracing_prog(env);
 
-	if (!env->allow_ptr_leaks) {
+	if (!container_prog && !env->allow_ptr_leaks) {
 		verbose(env,
 			"'struct %s' access is allowed only to CAP_PERFMON and CAP_SYS_ADMIN\n",
 			tname);
 		return -EPERM;
+	}
+
+	if (container_prog && atype != BPF_READ) {
+		verbose(env, "container tracing supports only read access to struct %s\n",
+			tname);
+		return -EACCES;
 	}
 	if (!env->prog->gpl_compatible && btf_is_kernel(reg->btf)) {
 		verbose(env,
@@ -7300,6 +7412,13 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 	if (ret < 0)
 		return ret;
 
+	if (container_prog) {
+		ret = check_container_btf_access(env, reg, field_name, btf_id, &flag, ret);
+		if (ret < 0)
+			return ret;
+		goto out_mark;
+	}
+
 	if (ret != PTR_TO_BTF_ID) {
 		/* just mark; */
 
@@ -7360,6 +7479,7 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		clear_trusted_flags(&flag);
 	}
 
+out_mark:
 	if (atype == BPF_READ && value_regno >= 0) {
 		ret = mark_btf_ld_reg(env, regs, value_regno, ret, reg->btf, btf_id, flag);
 		if (ret < 0)
@@ -8323,6 +8443,120 @@ static int check_mem_size_reg(struct bpf_verifier_env *env,
 	if (!err)
 		err = mark_chain_precision(env, regno);
 	return err;
+}
+
+static int apply_container_spill_ptr(struct bpf_verifier_env *env,
+				     struct bpf_call_arg_meta *meta)
+{
+	struct bpf_reg_state *dst_reg = &cur_regs(env)[BPF_REG_1];
+	struct bpf_func_state *state;
+	struct bpf_reg_state *tmp_reg;
+	int slot, spi, off;
+
+	if (!meta->container_spill_ptr)
+		return 0;
+
+	if (dst_reg->type != PTR_TO_STACK || !tnum_is_const(dst_reg->var_off)) {
+		verbose(env,
+			"container probe_read_kernel result needs a fixed stack slot\n");
+		return -EACCES;
+	}
+
+	off = dst_reg->off + dst_reg->var_off.value;
+	if (off >= 0 || off % BPF_REG_SIZE) {
+		verbose(env,
+			"container probe_read_kernel result needs an aligned stack slot\n");
+		return -EACCES;
+	}
+
+	state = func(env, dst_reg);
+	slot = -off - 1;
+	spi = slot / BPF_REG_SIZE;
+	tmp_reg = &env->fake_reg[0];
+
+	memset(tmp_reg, 0, sizeof(*tmp_reg));
+	mark_reg_known_zero(env, env->fake_reg, 0);
+	tmp_reg->type = PTR_TO_BTF_ID | meta->container_spill_flag;
+	tmp_reg->btf = meta->container_spill_btf;
+	tmp_reg->btf_id = meta->container_spill_btf_id;
+	if (type_may_be_null(tmp_reg->type))
+		tmp_reg->id = ++env->id_gen;
+
+	save_register_state(env, state, spi, tmp_reg, BPF_REG_SIZE);
+	return 0;
+}
+
+static int check_container_probe_read_kernel(struct bpf_verifier_env *env,
+					     struct bpf_call_arg_meta *meta)
+{
+	struct bpf_reg_state *regs = cur_regs(env);
+	struct bpf_reg_state *src_reg = &regs[BPF_REG_3];
+	struct bpf_reg_state *size_reg = &regs[BPF_REG_2];
+	enum bpf_type_flag flag = 0;
+	const char *field_name = NULL;
+	u32 btf_id = 0;
+	u32 access_size;
+	int ret;
+
+	if (!is_container_tracing_prog(env) ||
+	    (meta->func_id != BPF_FUNC_probe_read_kernel &&
+	     meta->func_id != BPF_FUNC_probe_read))
+		return 0;
+
+	if (base_type(src_reg->type) != PTR_TO_BTF_ID || type_may_be_null(src_reg->type)) {
+		verbose(env,
+			"container probe_read_kernel needs a non-NULL typed pointer in R3\n");
+		return -EACCES;
+	}
+
+	if (!tnum_is_const(src_reg->var_off) || src_reg->var_off.value) {
+		verbose(env, "container probe_read_kernel expects a fixed typed source in R3\n");
+		return -EACCES;
+	}
+
+	if (src_reg->off < 0) {
+		verbose(env,
+			"container probe_read_kernel rejects negative source offsets in R3\n");
+		return -EACCES;
+	}
+
+	if (src_reg->type & (MEM_USER | MEM_PERCPU)) {
+		verbose(env, "container probe_read_kernel expects kernel memory in R3\n");
+		return -EACCES;
+	}
+
+	if (!tnum_is_const(size_reg->var_off)) {
+		verbose(env, "container probe_read_kernel expects a constant size in R2\n");
+		return -EACCES;
+	}
+
+	access_size = size_reg->var_off.value;
+	if (!access_size)
+		return 0;
+
+	ret = btf_struct_access(&env->log, src_reg, src_reg->off, access_size, BPF_READ,
+				&btf_id, &flag, &field_name);
+	if (ret < 0)
+		return ret;
+
+	ret = check_container_btf_access(env, src_reg, field_name, btf_id, &flag, ret);
+	if (ret < 0)
+		return ret;
+
+	if (ret == PTR_TO_BTF_ID) {
+		if (access_size != BPF_REG_SIZE) {
+			verbose(env, "container probe_read_kernel pointer reads must be %d bytes\n",
+				BPF_REG_SIZE);
+			return -EACCES;
+		}
+
+		meta->container_spill_ptr = true;
+		meta->container_spill_btf = src_reg->btf;
+		meta->container_spill_btf_id = btf_id;
+		meta->container_spill_flag = flag;
+	}
+
+	return 0;
 }
 
 static int check_mem_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg,
@@ -9712,6 +9946,21 @@ static int get_constant_map_key(struct bpf_verifier_env *env,
 
 static bool can_elide_value_nullness(const struct bpf_map *map);
 
+static bool container_probe_read_anything_arg_ok(struct bpf_verifier_env *env,
+						 struct bpf_call_arg_meta *meta,
+						 u32 regno,
+						 const struct bpf_reg_state *reg)
+{
+	if (!is_container_tracing_prog(env) || regno != BPF_REG_3)
+		return false;
+
+	if (meta->func_id != BPF_FUNC_probe_read &&
+	    meta->func_id != BPF_FUNC_probe_read_kernel)
+		return false;
+
+	return base_type(reg->type) == PTR_TO_BTF_ID && !type_may_be_null(reg->type);
+}
+
 static int check_func_arg(struct bpf_verifier_env *env, u32 arg,
 			  struct bpf_call_arg_meta *meta,
 			  const struct bpf_func_proto *fn,
@@ -9733,6 +9982,9 @@ static int check_func_arg(struct bpf_verifier_env *env, u32 arg,
 		return err;
 
 	if (arg_type == ARG_ANYTHING) {
+		if (container_probe_read_anything_arg_ok(env, meta, regno, reg))
+			return 0;
+
 		if (is_pointer_value(env, regno)) {
 			verbose(env, "R%d leaks addr into helper function\n",
 				regno);
@@ -11572,6 +11824,10 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 			return err;
 	}
 
+	err = check_container_probe_read_kernel(env, &meta);
+	if (err)
+		return err;
+
 	err = record_func_map(env, &meta, func_id, insn_idx);
 	if (err)
 		return err;
@@ -11589,6 +11845,10 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		if (err)
 			return err;
 	}
+
+	err = apply_container_spill_ptr(env, &meta);
+	if (err)
+		return err;
 
 	regs = cur_regs(env);
 
