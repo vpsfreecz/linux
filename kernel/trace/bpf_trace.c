@@ -1353,6 +1353,13 @@ static bool kprobe_prog_is_valid_access(int off, int size, enum bpf_access_type 
 					const struct bpf_prog *prog,
 					struct bpf_insn_access_aux *info)
 {
+	if (bpf_token_is_container(prog->aux->token)) {
+		if (info && info->log)
+			bpf_log(info->log,
+				"container tracing rejects raw pt_regs access; use typed container-safe kprobe arguments\n");
+		return false;
+	}
+
 	if (off < 0 || off >= sizeof(struct pt_regs))
 		return false;
 	if (off % size != 0)
@@ -1859,6 +1866,17 @@ static bool pe_prog_is_valid_access(int off, int size, enum bpf_access_type type
 			return false;
 		if (off % size != 4)
 			return false;
+	}
+
+	if (bpf_token_is_container(prog->aux->token)) {
+		if (off == offsetof(struct bpf_perf_event_data, sample_period)) {
+			bpf_ctx_record_field_size(info, size_u64);
+			return bpf_ctx_narrow_access_ok(off, size, size_u64);
+		}
+		if (info && info->log)
+			bpf_log(info->log,
+				"container tracing rejects raw perf regs/addr context access; use container-safe perf provenance\n");
+		return false;
 	}
 
 	switch (off) {
