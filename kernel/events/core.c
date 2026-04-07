@@ -70,6 +70,119 @@ struct remote_function_call {
 	int			ret;
 };
 
+#ifdef CONFIG_BPF_SYSCALL
+static bool perf_event_token_is_container(const struct perf_event *event)
+{
+	return bpf_token_is_container(event->token);
+}
+
+static bool perf_event_container_current_ok(const struct perf_event *event)
+{
+	return !perf_event_token_is_container(event) ||
+	       bpf_token_task_match(event->token, current);
+}
+
+static bool perf_event_container_same_domain(const struct perf_event *event,
+					 const struct bpf_prog *prog)
+{
+	bool event_container = perf_event_token_is_container(event);
+	bool prog_container = bpf_token_is_container(prog->aux->token);
+
+	if (!event_container && !prog_container)
+		return true;
+	if (!event_container || !prog_container)
+		return false;
+
+	return bpf_token_same_container_domain(event->token, prog->aux->token);
+}
+
+static bool perf_event_container_mmappable(const struct perf_event *event)
+{
+	if (!perf_event_token_is_container(event))
+		return true;
+
+	return event->attr.type == PERF_TYPE_SOFTWARE &&
+	       event->attr.config == PERF_COUNT_SW_BPF_OUTPUT;
+}
+
+static bool perf_event_container_perfmon_capable(const struct perf_event *event)
+{
+	return perf_event_token_is_container(event) &&
+	       bpf_token_capable(event->token, CAP_PERFMON);
+}
+
+static bool perf_event_container_sysadmin_capable(const struct perf_event *event)
+{
+	return perf_event_token_is_container(event) &&
+	       bpf_token_capable(event->token, CAP_SYS_ADMIN);
+}
+
+static int perf_allow_kernel_container(void)
+{
+	int err = perf_allow_kernel();
+
+	if (!err)
+		return 0;
+	if (sysctl_bpf_container_tracing_enabled &&
+	    bpf_token_current_container_capable(CAP_PERFMON))
+		return 0;
+	return err;
+}
+
+static int perf_allow_cpu_container(void)
+{
+	int err = perf_allow_cpu();
+
+	if (!err)
+		return 0;
+	if (sysctl_bpf_container_tracing_enabled &&
+	    bpf_token_current_container_capable(CAP_PERFMON))
+		return 0;
+	return err;
+}
+#else
+static bool perf_event_token_is_container(const struct perf_event *event)
+{
+	return false;
+}
+
+static bool perf_event_container_current_ok(const struct perf_event *event)
+{
+	return true;
+}
+
+static bool perf_event_container_same_domain(const struct perf_event *event,
+					 const struct bpf_prog *prog)
+{
+	return true;
+}
+
+static bool perf_event_container_mmappable(const struct perf_event *event)
+{
+	return true;
+}
+
+static bool perf_event_container_perfmon_capable(const struct perf_event *event)
+{
+	return false;
+}
+
+static bool perf_event_container_sysadmin_capable(const struct perf_event *event)
+{
+	return false;
+}
+
+static int perf_allow_kernel_container(void)
+{
+	return perf_allow_kernel();
+}
+
+static int perf_allow_cpu_container(void)
+{
+	return perf_allow_cpu();
+}
+#endif
+
 static void remote_function(void *data)
 {
 	struct remote_function_call *tfc = data;
@@ -4962,7 +5075,7 @@ find_get_context(struct task_struct *task, struct perf_event *event)
 
 	if (!task) {
 		/* Must be root to operate on a CPU event: */
-		err = perf_allow_cpu();
+		err = perf_allow_cpu_container();
 		if (err)
 			return ERR_PTR(err);
 
@@ -5164,6 +5277,7 @@ static void free_event_rcu(struct rcu_head *head)
 
 	if (event->ns)
 		put_pid_ns(event->ns);
+	bpf_token_put(event->token);
 	perf_event_free_filter(event);
 	kmem_cache_free(perf_event_cache, event);
 }
@@ -6115,6 +6229,8 @@ perf_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	ret = security_perf_event_read(event);
 	if (ret)
 		return ret;
+	if (perf_event_token_is_container(event))
+		return -EACCES;
 
 	ctx = perf_event_ctx_lock(event);
 	ret = __perf_read(event, buf, count);
@@ -7142,6 +7258,9 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 	ret = security_perf_event_read(event);
 	if (ret)
 		return ret;
+	if (!perf_event_container_mmappable(event) ||
+	    (perf_event_token_is_container(event) && vma->vm_pgoff))
+		return -EACCES;
 
 	vma_size = vma->vm_end - vma->vm_start;
 	nr_pages = vma_size / PAGE_SIZE;
@@ -10224,6 +10343,9 @@ static int bpf_overflow_handler(struct perf_event *event,
 	struct bpf_prog *prog;
 	int ret = 0;
 
+	if (!perf_event_container_current_ok(event))
+		return 0;
+
 	ctx.regs = perf_arch_bpf_user_pt_regs(regs);
 	if (unlikely(__this_cpu_inc_return(bpf_prog_active) != 1))
 		goto out;
@@ -11096,7 +11218,7 @@ static int perf_kprobe_event_init(struct perf_event *event)
 	if (event->attr.type != perf_kprobe.type)
 		return -ENOENT;
 
-	if (!perfmon_capable())
+	if (!perfmon_capable() && !perf_event_container_perfmon_capable(event))
 		return -EACCES;
 
 	/*
@@ -11156,7 +11278,7 @@ static int perf_uprobe_event_init(struct perf_event *event)
 	if (event->attr.type != perf_uprobe.type)
 		return -ENOENT;
 
-	if (!capable(CAP_SYS_ADMIN))
+	if (!capable(CAP_SYS_ADMIN) && !perf_event_container_sysadmin_capable(event))
 		return -EACCES;
 
 	/*
@@ -11220,6 +11342,8 @@ static int __perf_event_set_bpf_prog(struct perf_event *event,
 
 	if (event->state <= PERF_EVENT_STATE_REVOKED)
 		return -ENODEV;
+	if (!perf_event_container_same_domain(event, prog))
+		return -EACCES;
 
 	if (!perf_event_is_tracing(event))
 		return perf_event_set_bpf_handler(event, prog, bpf_cookie);
@@ -12915,6 +13039,19 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 
 	event->parent		= parent_event;
 
+#ifdef CONFIG_BPF_SYSCALL
+	if (parent_event && parent_event->token) {
+		event->token = parent_event->token;
+		bpf_token_inc(event->token);
+	} else if (sysctl_bpf_container_tracing_enabled) {
+		struct bpf_token *token = bpf_token_get_current_container();
+
+		if (IS_ERR(token))
+			return ERR_PTR(PTR_ERR(token));
+		event->token = token;
+	}
+#endif
+
 	event->ns		= get_pid_ns(task_active_pid_ns(current));
 	event->id		= atomic64_inc_return(&perf_event_id);
 
@@ -13225,6 +13362,9 @@ perf_event_set_output(struct perf_event *event, struct perf_event *output_event)
 	struct perf_buffer *rb = NULL;
 	int ret = -EINVAL;
 
+	if (output_event && (perf_event_token_is_container(event) ||
+			     perf_event_token_is_container(output_event)))
+		return -EACCES;
 	if (!output_event) {
 		mutex_lock(&event->mmap_mutex);
 		goto set;
@@ -13416,7 +13556,7 @@ SYSCALL_DEFINE5(perf_event_open,
 		return err;
 
 	if (!attr.exclude_kernel) {
-		err = perf_allow_kernel();
+		err = perf_allow_kernel_container();
 		if (err)
 			return err;
 	}
@@ -13456,6 +13596,14 @@ SYSCALL_DEFINE5(perf_event_open,
 	 */
 	if ((flags & PERF_FLAG_PID_CGROUP) && (pid == -1 || cpu == -1))
 		return -EINVAL;
+	if ((flags & PERF_FLAG_PID_CGROUP) &&
+	    sysctl_bpf_container_tracing_enabled &&
+	    bpf_token_current_container_capable(CAP_PERFMON))
+		return -EACCES;
+	if (attr.sigtrap &&
+	    sysctl_bpf_container_tracing_enabled &&
+	    bpf_token_current_container_capable(CAP_PERFMON))
+		return -EACCES;
 
 	if (flags & PERF_FLAG_FD_CLOEXEC)
 		f_flags |= O_CLOEXEC;
