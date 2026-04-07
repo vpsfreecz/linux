@@ -23,6 +23,7 @@
 #include <linux/ctype.h>
 #include <linux/slab.h>
 #include <linux/filter.h>
+#include <linux/bpf.h>
 #include <linux/ftrace.h>
 #include <linux/kprobes.h>
 #include <linux/build_bug.h>
@@ -763,6 +764,17 @@ static int s_show(struct seq_file *m, void *p)
 	/* Some debugging symbols have no name.  Ignore them. */
 	if (!iter->name[0])
 		return 0;
+	if (bpf_token_current_restrict_tracing_symbols()) {
+		char full[KSYM_SYMBOL_LEN + MODULE_NAME_LEN + 2];
+
+		if (iter->module_name[0]) {
+			snprintf(full, sizeof(full), "%s:%s", iter->module_name, iter->name);
+			if (!bpf_token_current_allow_tracing_symbol_discovery(full))
+				return 0;
+		} else if (!bpf_token_current_allow_tracing_symbol_discovery(iter->name)) {
+			return 0;
+		}
+	}
 
 	value = iter->show_value ? (void *)iter->value : NULL;
 
@@ -842,7 +854,8 @@ static int bpf_iter_ksym_init(void *priv_data, struct bpf_iter_aux_info *aux)
 	/* cache here as in kallsyms_open() case; use current process
 	 * credentials to tell BPF iterators if values should be shown.
 	 */
-	iter->show_value = kallsyms_show_value(current_cred());
+	iter->show_value = kallsyms_show_value(current_cred()) &&
+			      !bpf_token_current_restrict_tracing_symbols();
 
 	return 0;
 }
@@ -896,7 +909,8 @@ static int kallsyms_open(struct inode *inode, struct file *file)
 	 * Instead of checking this on every s_show() call, cache
 	 * the result here at open time.
 	 */
-	iter->show_value = kallsyms_show_value(file->f_cred);
+	iter->show_value = kallsyms_show_value(file->f_cred) &&
+			      !bpf_token_current_restrict_tracing_symbols();
 	return 0;
 }
 

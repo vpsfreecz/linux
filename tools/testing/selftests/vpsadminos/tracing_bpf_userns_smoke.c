@@ -34,6 +34,7 @@ struct child_cfg {
 	int syncfd;
 	int pipe_readfd;
 	int sync_writefd;
+	const char *symbol;
 };
 
 static int do_syslog_action(int type, const char *buf, int len)
@@ -74,6 +75,31 @@ static int emit_ns_links(int fd, const char *prefix)
 			return -1;
 	}
 
+	return 0;
+}
+
+static int kallsyms_has_symbol(const char *symbol)
+{
+	FILE *fp;
+	char line[512];
+	char sym[256];
+	char type;
+	unsigned long long addr;
+
+	fp = fopen("/proc/kallsyms", "r");
+	if (!fp)
+		return -errno;
+
+	while (fgets(line, sizeof(line), fp)) {
+		if (sscanf(line, "%llx %c %255s", &addr, &type, sym) != 3)
+			continue;
+		if (!strcmp(sym, symbol)) {
+			fclose(fp);
+			return 1;
+		}
+	}
+
+	fclose(fp);
 	return 0;
 }
 
@@ -184,6 +210,9 @@ static int nested_userns_child(struct child_cfg *cfg, int readyfd, int gofd)
 		return 1;
 	}
 
+	err = kallsyms_has_symbol(cfg->symbol);
+	dprintf(cfg->pipefd, "nested_kallsyms_has_symbol=%d\n", err);
+
 	err = create_array_map_errno();
 	dprintf(cfg->pipefd, "nested_bpf_errno=%d\n", err);
 	return 0;
@@ -286,6 +315,9 @@ static int child_main(void *arg)
 		return 1;
 	}
 
+	err = kallsyms_has_symbol(cfg->symbol);
+	dprintf(cfg->pipefd, "child_kallsyms_has_symbol=%d\n", err);
+
 	err = create_array_map_errno();
 	dprintf(cfg->pipefd, "first_level_bpf_errno=%d\n", err);
 
@@ -302,6 +334,7 @@ int main(int argc, char **argv)
 {
 	struct child_cfg cfg = { .pipefd = -1 };
 	const char *syslog_name = "traceBpf";
+	const char *symbol = "copy_process";
 	char *stack;
 	int pipefd[2];
 	int syncfd[2];
@@ -318,11 +351,25 @@ int main(int argc, char **argv)
 				return 2;
 			}
 			syslog_name = argv[i];
+		} else if (!strcmp(argv[i], "--symbol")) {
+			if (++i >= argc) {
+				fprintf(stderr, "missing argument for --symbol\n");
+				return 2;
+			}
+			symbol = argv[i];
 		} else {
 			fprintf(stderr, "unknown argument: %s\n", argv[i]);
 			return 2;
 		}
 	}
+
+	cfg.symbol = symbol;
+	i = kallsyms_has_symbol(symbol);
+	if (i < 0) {
+		fprintf(stderr, "kallsyms probe failed: %d\n", -i);
+		return 1;
+	}
+	printf("parent_kallsyms_has_symbol=%d\n", i);
 
 	if (emit_ns_links(STDOUT_FILENO, "parent")) {
 		perror("emit parent ns links");

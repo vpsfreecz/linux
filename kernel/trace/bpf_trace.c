@@ -2784,6 +2784,8 @@ int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 
 	if (!is_kprobe_multi(prog))
 		return -EINVAL;
+	if (bpf_token_is_container(prog->aux->token))
+		return -EACCES;
 
 	/* kprobe_multi is not allowed to be sleepable. */
 	if (prog->sleepable)
@@ -3227,6 +3229,8 @@ int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 
 	if (!is_uprobe_multi(prog))
 		return -EINVAL;
+	if (bpf_token_is_container(prog->aux->token))
+		return -EACCES;
 
 	flags = attr->link_create.uprobe_multi.flags;
 	if (flags & ~BPF_F_UPROBE_MULTI_RETURN)
