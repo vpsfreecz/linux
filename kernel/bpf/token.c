@@ -7,10 +7,183 @@
 #include <linux/namei.h>
 #include <linux/user_namespace.h>
 #include <linux/security.h>
+#include <linux/cred.h>
+#include <linux/nsproxy.h>
+#include <linux/pid_namespace.h>
+#include <linux/mnt_namespace.h>
+#include <linux/cgroup.h>
+#include <linux/cgroup_namespace.h>
+#include <net/net_namespace.h>
 
 static bool bpf_ns_capable(struct user_namespace *ns, int cap)
 {
 	return ns_capable(ns, cap) || (cap != CAP_SYS_ADMIN && ns_capable(ns, CAP_SYS_ADMIN));
+}
+
+bool bpf_token_is_container(const struct bpf_token *token)
+{
+	return token && (token->flags & BPF_TOKEN_F_CONTAINER);
+}
+
+static bool bpf_token_is_internal(const struct bpf_token *token)
+{
+	return token && (token->flags & BPF_TOKEN_F_INTERNAL);
+}
+
+bool bpf_token_same_container_domain(const struct bpf_token *a,
+					 const struct bpf_token *b)
+{
+	if (!bpf_token_is_container(a) || !bpf_token_is_container(b))
+		return false;
+
+	return a->userns == b->userns &&
+	       a->pidns == b->pidns &&
+	       a->mntns == b->mntns &&
+	       a->netns == b->netns &&
+	       a->cgroupns == b->cgroupns &&
+	       a->cgrp == b->cgrp;
+}
+
+bool bpf_token_task_match(const struct bpf_token *token,
+			     const struct task_struct *task)
+{
+	struct nsproxy *nsproxy;
+	struct cgroup *cgrp;
+
+	if (!bpf_token_is_container(token))
+		return true;
+	if (!task)
+		return false;
+
+	rcu_read_lock();
+	nsproxy = task->nsproxy;
+	if (!nsproxy) {
+		rcu_read_unlock();
+		return false;
+	}
+
+	if (task_active_pid_ns((struct task_struct *)task) != token->pidns ||
+	    nsproxy->mnt_ns != token->mntns ||
+	    nsproxy->net_ns != token->netns ||
+	    nsproxy->cgroup_ns != token->cgroupns ||
+	    task_cred(task)->user_ns != token->userns) {
+		rcu_read_unlock();
+		return false;
+	}
+
+	cgrp = task_dfl_cgroup((struct task_struct *)task);
+	rcu_read_unlock();
+
+	return cgrp && cgroup_is_descendant(cgrp, token->cgrp);
+}
+
+bool bpf_token_current_container_capable(int cap)
+{
+	struct nsproxy *nsproxy = current->nsproxy;
+
+	if (current_user_ns() == &init_user_ns || !nsproxy || !nsproxy->cgroup_ns)
+		return false;
+	if (!nsproxy->mnt_ns || !nsproxy->net_ns || !nsproxy->cgroup_ns->root_cset)
+		return false;
+	if (!nsproxy->cgroup_ns->root_cset->dfl_cgrp)
+		return false;
+
+	return bpf_ns_capable(current_user_ns(), cap);
+}
+
+static struct bpf_token *bpf_token_alloc_current_container(void)
+{
+	struct nsproxy *nsproxy = current->nsproxy;
+	struct bpf_token *token;
+	struct cgroup *cgrp;
+
+	if (!bpf_token_current_container_capable(CAP_BPF) &&
+	    !bpf_token_current_container_capable(CAP_PERFMON) &&
+	    !bpf_token_current_container_capable(CAP_SYS_ADMIN) &&
+	    !bpf_token_current_container_capable(CAP_NET_ADMIN))
+		return NULL;
+	if (!nsproxy)
+		return NULL;
+
+	cgrp = nsproxy->cgroup_ns->root_cset->dfl_cgrp;
+	if (!cgrp)
+		return NULL;
+
+	token = kzalloc(sizeof(*token), GFP_KERNEL);
+	if (!token)
+		return ERR_PTR(-ENOMEM);
+
+	atomic64_set(&token->refcnt, 1);
+	token->flags = BPF_TOKEN_F_CONTAINER | BPF_TOKEN_F_INTERNAL;
+	token->userns = get_user_ns(current_user_ns());
+	token->pidns = get_pid_ns(task_active_pid_ns(current));
+	get_mnt_ns(nsproxy->mnt_ns);
+	token->mntns = nsproxy->mnt_ns;
+	token->netns = get_net(nsproxy->net_ns);
+	get_cgroup_ns(nsproxy->cgroup_ns);
+	token->cgroupns = nsproxy->cgroup_ns;
+	cgroup_get(cgrp);
+	token->cgrp = cgrp;
+
+	return token;
+}
+
+struct bpf_token *bpf_token_get_current_container(void)
+{
+	return bpf_token_alloc_current_container();
+}
+
+bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id)
+{
+	if (!bpf_token_is_container(token))
+		return true;
+
+	switch (func_id) {
+	case BPF_FUNC_map_lookup_elem:
+	case BPF_FUNC_map_update_elem:
+	case BPF_FUNC_map_delete_elem:
+	case BPF_FUNC_map_push_elem:
+	case BPF_FUNC_map_pop_elem:
+	case BPF_FUNC_map_peek_elem:
+	case BPF_FUNC_map_lookup_percpu_elem:
+	case BPF_FUNC_get_prandom_u32:
+	case BPF_FUNC_get_smp_processor_id:
+	case BPF_FUNC_get_numa_node_id:
+	case BPF_FUNC_tail_call:
+	case BPF_FUNC_ktime_get_ns:
+	case BPF_FUNC_ktime_get_boot_ns:
+	case BPF_FUNC_ktime_get_tai_ns:
+	case BPF_FUNC_jiffies64:
+	case BPF_FUNC_ringbuf_output:
+	case BPF_FUNC_ringbuf_reserve:
+	case BPF_FUNC_ringbuf_submit:
+	case BPF_FUNC_ringbuf_discard:
+	case BPF_FUNC_ringbuf_query:
+	case BPF_FUNC_ringbuf_reserve_dynptr:
+	case BPF_FUNC_ringbuf_submit_dynptr:
+	case BPF_FUNC_ringbuf_discard_dynptr:
+	case BPF_FUNC_dynptr_from_mem:
+	case BPF_FUNC_dynptr_read:
+	case BPF_FUNC_dynptr_write:
+	case BPF_FUNC_dynptr_data:
+	case BPF_FUNC_strncmp:
+	case BPF_FUNC_strtol:
+	case BPF_FUNC_strtoul:
+	case BPF_FUNC_snprintf:
+	case BPF_FUNC_loop:
+	case BPF_FUNC_get_current_pid_tgid:
+	case BPF_FUNC_get_ns_current_pid_tgid:
+	case BPF_FUNC_get_current_uid_gid:
+	case BPF_FUNC_get_current_comm:
+	case BPF_FUNC_probe_read_user:
+	case BPF_FUNC_probe_read_user_str:
+	case BPF_FUNC_copy_from_user:
+	case BPF_FUNC_perf_event_output:
+	case BPF_FUNC_get_attach_cookie:
+		return true;
+	default:
+		return false;
+	}
 }
 
 bool bpf_token_capable(const struct bpf_token *token, int cap)
@@ -21,7 +194,8 @@ bool bpf_token_capable(const struct bpf_token *token, int cap)
 	userns = token ? token->userns : &init_user_ns;
 	if (!bpf_ns_capable(userns, cap))
 		return false;
-	if (token && security_bpf_token_capable(token, cap) < 0)
+	if (token && !bpf_token_is_internal(token) &&
+	    security_bpf_token_capable(token, cap) < 0)
 		return false;
 	return true;
 }
@@ -33,8 +207,18 @@ void bpf_token_inc(struct bpf_token *token)
 
 static void bpf_token_free(struct bpf_token *token)
 {
-	security_bpf_token_free(token);
+	if (!bpf_token_is_internal(token))
+		security_bpf_token_free(token);
 	put_user_ns(token->userns);
+	put_pid_ns(token->pidns);
+	if (token->mntns)
+		put_mnt_ns(token->mntns);
+	if (token->netns)
+		put_net(token->netns);
+	if (token->cgroupns)
+		put_cgroup_ns(token->cgroupns);
+	if (token->cgrp)
+		cgroup_put(token->cgrp);
 	kfree(token);
 }
 

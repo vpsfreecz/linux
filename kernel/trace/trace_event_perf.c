@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/kprobes.h>
 #include <linux/security.h>
+#include <linux/bpf.h>
 #include "trace.h"
 #include "trace_probe.h"
 
@@ -23,6 +24,25 @@ typedef typeof(unsigned long [PERF_MAX_TRACE_SIZE / sizeof(unsigned long)])
 
 /* Count the events in use (per event id, not per instance) */
 static int	total_ref_count;
+
+#ifdef CONFIG_BPF_SYSCALL
+static int perf_allow_tracepoint_container(struct perf_event *p_event)
+{
+	int ret = perf_allow_tracepoint();
+
+	if (!ret)
+		return 0;
+	if (bpf_token_is_container(p_event->token) &&
+	    bpf_token_capable(p_event->token, CAP_PERFMON))
+		return 0;
+	return ret;
+}
+#else
+static int perf_allow_tracepoint_container(struct perf_event *p_event)
+{
+	return perf_allow_tracepoint();
+}
+#endif
 
 static int perf_trace_event_perm(struct trace_event_call *tp_event,
 				 struct perf_event *p_event)
@@ -49,7 +69,7 @@ static int perf_trace_event_perm(struct trace_event_call *tp_event,
 
 	/* The ftrace function trace is allowed only for root. */
 	if (ftrace_event_is_function(tp_event)) {
-		ret = perf_allow_tracepoint();
+		ret = perf_allow_tracepoint_container(p_event);
 		if (ret)
 			return ret;
 
@@ -86,7 +106,7 @@ static int perf_trace_event_perm(struct trace_event_call *tp_event,
 	 * ...otherwise raw tracepoint data can be a severe data leak,
 	 * only allow root to have these.
 	 */
-	ret = perf_allow_tracepoint();
+	ret = perf_allow_tracepoint_container(p_event);
 	if (ret)
 		return ret;
 
