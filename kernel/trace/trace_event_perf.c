@@ -271,29 +271,25 @@ static int perf_container_prepare_kprobe_target(struct perf_event *p_event,
 {
 	const struct btf_type *proto;
 	struct btf *btf;
-	s32 nr_args;
 
 	if (!bpf_token_is_container(p_event->token))
 		return 0;
 
-	if (!func || p_event->attr.probe_offset)
+	if (!func || p_event->attr.kprobe_addr || p_event->attr.probe_offset)
+		return -EACCES;
+	if (!bpf_token_allow_tracing_symbol(p_event->token, func))
 		return -EACCES;
 
 	proto = btf_find_func_proto(func, &btf);
 	if (!proto)
 		return -EACCES;
 
-	if (IS_ERR(btf_get_func_param(proto, &nr_args))) {
-		btf_put(btf);
-		return -EINVAL;
-	}
-
 	if (p_event->container_kprobe_btf)
 		btf_put(p_event->container_kprobe_btf);
 
 	p_event->container_kprobe_btf = btf;
 	p_event->container_kprobe_func_proto = proto;
-	p_event->container_kprobe_argc = nr_args;
+	p_event->container_kprobe_argc = btf_type_vlen(proto);
 	return 0;
 }
 #else
@@ -322,6 +318,18 @@ int perf_kprobe_init(struct perf_event *p_event, bool is_retprobe)
 		if (func[0] == '\0') {
 			kfree(func);
 			func = NULL;
+		}
+	}
+
+	if (bpf_token_is_container(p_event->token)) {
+		if (!func || p_event->attr.kprobe_addr || p_event->attr.probe_offset) {
+			ret = -EACCES;
+			goto out;
+		}
+
+		if (!bpf_token_allow_tracing_symbol(p_event->token, func)) {
+			ret = -EACCES;
+			goto out;
 		}
 	}
 
