@@ -12,6 +12,7 @@
 #include <linux/bpf.h>
 #include "trace.h"
 #include "trace_probe.h"
+#include "trace_btf.h"
 
 static char __percpu *perf_trace_buf[PERF_NR_CONTEXTS];
 
@@ -26,19 +27,29 @@ typedef typeof(unsigned long [PERF_MAX_TRACE_SIZE / sizeof(unsigned long)])
 static int	total_ref_count;
 
 #ifdef CONFIG_BPF_SYSCALL
-static int perf_allow_tracepoint_container(struct perf_event *p_event)
+static int perf_allow_tracepoint_container(struct trace_event_call *tp_event,
+					   struct perf_event *p_event)
 {
 	int ret = perf_allow_tracepoint();
 
 	if (!ret)
 		return 0;
-	if (bpf_token_is_container(p_event->token) &&
-	    bpf_token_capable(p_event->token, CAP_PERFMON))
+	if (!bpf_token_is_container(p_event->token) ||
+	    !bpf_token_capable(p_event->token, CAP_PERFMON))
+		return ret;
+
+	if (tp_event->flags & TRACE_EVENT_FL_UPROBE)
 		return 0;
+	if ((tp_event->flags & TRACE_EVENT_FL_KPROBE) &&
+	    p_event->container_kprobe_func_proto &&
+	    p_event->container_kprobe_access_safe)
+		return 0;
+
 	return ret;
 }
 #else
-static int perf_allow_tracepoint_container(struct perf_event *p_event)
+static int perf_allow_tracepoint_container(struct trace_event_call *tp_event,
+					   struct perf_event *p_event)
 {
 	return perf_allow_tracepoint();
 }
@@ -69,7 +80,7 @@ static int perf_trace_event_perm(struct trace_event_call *tp_event,
 
 	/* The ftrace function trace is allowed only for root. */
 	if (ftrace_event_is_function(tp_event)) {
-		ret = perf_allow_tracepoint_container(p_event);
+		ret = perf_allow_tracepoint_container(tp_event, p_event);
 		if (ret)
 			return ret;
 
@@ -106,7 +117,7 @@ static int perf_trace_event_perm(struct trace_event_call *tp_event,
 	 * ...otherwise raw tracepoint data can be a severe data leak,
 	 * only allow root to have these.
 	 */
-	ret = perf_allow_tracepoint_container(p_event);
+	ret = perf_allow_tracepoint_container(tp_event, p_event);
 	if (ret)
 		return ret;
 
@@ -263,6 +274,48 @@ void perf_trace_destroy(struct perf_event *p_event)
 	mutex_unlock(&event_mutex);
 }
 
+#if defined(CONFIG_BPF_SYSCALL) && defined(CONFIG_PROBE_EVENTS_BTF_ARGS)
+static int perf_container_prepare_kprobe_target(struct perf_event *p_event,
+						const char *func)
+{
+	const struct btf_type *proto;
+	struct btf *btf;
+
+	if (!bpf_token_is_container(p_event->token))
+		return 0;
+
+	if (!func || p_event->attr.kprobe_addr || p_event->attr.probe_offset)
+		return -EACCES;
+	if (!bpf_token_allow_tracing_symbol(p_event->token, func))
+		return -EACCES;
+
+	proto = btf_find_func_proto(func, &btf);
+	if (!proto)
+		return -EACCES;
+
+	if (p_event->container_kprobe_btf)
+		btf_put(p_event->container_kprobe_btf);
+
+	p_event->container_kprobe_btf = btf;
+	p_event->container_kprobe_func_proto = proto;
+	p_event->container_kprobe_access_safe =
+		bpf_token_allow_tracing_symbol_accesses(p_event->token, func);
+	return 0;
+}
+#elif defined(CONFIG_BPF_SYSCALL)
+static int perf_container_prepare_kprobe_target(struct perf_event *p_event,
+						const char *func)
+{
+	return bpf_token_is_container(p_event->token) ? -EACCES : 0;
+}
+#else
+static int perf_container_prepare_kprobe_target(struct perf_event *p_event,
+						const char *func)
+{
+	return 0;
+}
+#endif
+
 #ifdef CONFIG_KPROBE_EVENTS
 int perf_kprobe_init(struct perf_event *p_event, bool is_retprobe)
 {
@@ -284,11 +337,29 @@ int perf_kprobe_init(struct perf_event *p_event, bool is_retprobe)
 		}
 	}
 
+	if (bpf_token_is_container(p_event->token)) {
+		if (!func || p_event->attr.kprobe_addr || p_event->attr.probe_offset) {
+			ret = -EACCES;
+			goto out;
+		}
+
+		if (!bpf_token_allow_tracing_symbol(p_event->token, func)) {
+			ret = -EACCES;
+			goto out;
+		}
+	}
+
 	tp_event = create_local_trace_kprobe(
 		func, (void *)(unsigned long)(p_event->attr.kprobe_addr),
 		p_event->attr.probe_offset, is_retprobe);
 	if (IS_ERR(tp_event)) {
 		ret = PTR_ERR(tp_event);
+		goto out;
+	}
+
+	ret = perf_container_prepare_kprobe_target(p_event, func);
+	if (ret) {
+		destroy_local_trace_kprobe(tp_event);
 		goto out;
 	}
 

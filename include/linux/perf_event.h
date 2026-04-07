@@ -731,6 +731,8 @@ struct swevent_hlist {
 
 struct bpf_prog;
 struct bpf_token;
+struct btf;
+struct btf_type;
 struct perf_cgroup;
 struct perf_buffer;
 
@@ -906,6 +908,9 @@ struct perf_event {
 	struct bpf_token		*token;
 	struct bpf_prog			*prog;
 	u64				bpf_cookie;
+	struct btf			*container_kprobe_btf;
+	const struct btf_type		*container_kprobe_func_proto;
+	bool				container_kprobe_access_safe;
 
 #ifdef CONFIG_EVENT_TRACING
 	struct trace_event_call		*tp_event;

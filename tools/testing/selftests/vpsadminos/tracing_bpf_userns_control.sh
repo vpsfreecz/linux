@@ -62,10 +62,16 @@ if [ "$(cat /proc/sys/kernel/unprivileged_bpf_disabled)" = "0" ]; then
 	exit $ksft_skip
 fi
 
-out="$($helper --syslog-name "traceH$$")" || {
+symbol="copy_process"
+out="$($helper --syslog-name "traceH$$" --symbol "$symbol")" || {
 	echo "not ok: helper failed" >&2
 	exit 1
 }
+
+if [ "$(get_field "$out" parent_kallsyms_has_symbol)" != "1" ]; then
+	echo "skip: host kallsyms does not expose $symbol on this kernel" >&2
+	exit $ksft_skip
+fi
 
 check_ne first_level_user_boundary \
 	"$(get_field "$out" parent_user)" \
@@ -77,6 +83,8 @@ check_ne nested_user_boundary "$(get_field "$out" child_user)" "$(get_field "$ou
 check_eq nested_keeps_tracing \
 	"$(get_field "$out" child_tracing)" \
 	"$(get_field "$out" nested_tracing)"
+check_eq child_kallsyms_has_symbol 0 "$(get_field "$out" child_kallsyms_has_symbol)"
+check_eq nested_kallsyms_has_symbol 0 "$(get_field "$out" nested_kallsyms_has_symbol)"
 check_eq first_level_bpf_errno 0 "$(get_field "$out" first_level_bpf_errno)"
 check_eq nested_userns_errno 0 "$(get_field "$out" nested_userns_errno)"
 check_eq nested_bpf_errno 1 "$(get_field "$out" nested_bpf_errno)"
