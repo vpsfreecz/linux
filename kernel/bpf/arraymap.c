@@ -951,6 +951,20 @@ static long fd_array_map_delete_elem(struct bpf_map *map, void *key)
 	return __fd_array_map_delete_elem(map, key, true);
 }
 
+static bool bpf_map_token_same_container_domain(const struct bpf_map *map,
+						const struct bpf_token *token)
+{
+	bool map_container = bpf_token_is_container(map->token);
+	bool token_container = bpf_token_is_container(token);
+
+	if (!map_container && !token_container)
+		return true;
+	if (!map_container || !token_container)
+		return false;
+
+	return bpf_token_same_container_domain(map->token, token);
+}
+
 static void *prog_fd_array_get_ptr(struct bpf_map *map,
 				   struct file *map_file, int fd)
 {
@@ -964,6 +978,10 @@ static void *prog_fd_array_get_ptr(struct bpf_map *map,
 	    !bpf_prog_map_compatible(map, prog)) {
 		bpf_prog_put(prog);
 		return ERR_PTR(-EINVAL);
+	}
+	if (!bpf_map_token_same_container_domain(map, prog->aux->token)) {
+		bpf_prog_put(prog);
+		return ERR_PTR(-EACCES);
 	}
 
 	mutex_lock(&prog->aux->ext_mutex);
@@ -1268,6 +1286,16 @@ static void *perf_event_fd_array_get_ptr(struct bpf_map *map,
 
 	ee = ERR_PTR(-EOPNOTSUPP);
 	event = perf_file->private_data;
+	if (!bpf_map_token_same_container_domain(map, event->token)) {
+		ee = ERR_PTR(-EACCES);
+		goto err_out;
+	}
+	if (bpf_token_is_container(map->token) &&
+	    (event->attr.type != PERF_TYPE_SOFTWARE ||
+	     event->attr.config != PERF_COUNT_SW_BPF_OUTPUT)) {
+		ee = ERR_PTR(-EACCES);
+		goto err_out;
+	}
 	if (perf_event_read_local(event, &value, NULL, NULL) == -EOPNOTSUPP)
 		goto err_out;
 

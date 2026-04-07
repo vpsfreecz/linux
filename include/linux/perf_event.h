@@ -730,6 +730,7 @@ struct swevent_hlist {
 #define PERF_ATTACH_ITRACE		0x0200
 
 struct bpf_prog;
+struct bpf_token;
 struct perf_cgroup;
 struct perf_buffer;
 
@@ -902,6 +903,7 @@ struct perf_event {
 	u64				(*clock)(void);
 	perf_overflow_handler_t		overflow_handler;
 	void				*overflow_handler_context;
+	struct bpf_token		*token;
 	struct bpf_prog			*prog;
 	u64				bpf_cookie;
 
