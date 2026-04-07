@@ -9841,6 +9841,21 @@ static int get_constant_map_key(struct bpf_verifier_env *env,
 
 static bool can_elide_value_nullness(enum bpf_map_type type);
 
+static bool container_probe_read_anything_arg_ok(struct bpf_verifier_env *env,
+					  struct bpf_call_arg_meta *meta,
+					  u32 regno,
+					  const struct bpf_reg_state *reg)
+{
+	if (!is_container_tracing_prog(env) || regno != BPF_REG_3)
+		return false;
+
+	if (meta->func_id != BPF_FUNC_probe_read &&
+	    meta->func_id != BPF_FUNC_probe_read_kernel)
+		return false;
+
+	return base_type(reg->type) == PTR_TO_BTF_ID && !type_may_be_null(reg->type);
+}
+
 static int check_func_arg(struct bpf_verifier_env *env, u32 arg,
 			  struct bpf_call_arg_meta *meta,
 			  const struct bpf_func_proto *fn,
@@ -9862,6 +9877,9 @@ static int check_func_arg(struct bpf_verifier_env *env, u32 arg,
 		return err;
 
 	if (arg_type == ARG_ANYTHING) {
+		if (container_probe_read_anything_arg_ok(env, meta, regno, reg))
+			return 0;
+
 		if (is_pointer_value(env, regno)) {
 			verbose(env, "R%d leaks addr into helper function\n",
 				regno);
