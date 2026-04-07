@@ -5963,11 +5963,20 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 		if (attr->link_create.attach_type == BPF_PERF_EVENT)
 			ret = bpf_perf_link_attach(attr, prog);
 		else if (attr->link_create.attach_type == BPF_TRACE_KPROBE_MULTI ||
-			 attr->link_create.attach_type == BPF_TRACE_KPROBE_SESSION)
+			 attr->link_create.attach_type == BPF_TRACE_KPROBE_SESSION) {
+			if (bpf_token_is_container(prog->aux->token)) {
+				ret = -EACCES;
+				break;
+			}
 			ret = bpf_kprobe_multi_link_attach(attr, prog);
-		else if (attr->link_create.attach_type == BPF_TRACE_UPROBE_MULTI ||
-			 attr->link_create.attach_type == BPF_TRACE_UPROBE_SESSION)
+		} else if (attr->link_create.attach_type == BPF_TRACE_UPROBE_MULTI ||
+			   attr->link_create.attach_type == BPF_TRACE_UPROBE_SESSION) {
+			if (bpf_token_is_container(prog->aux->token)) {
+				ret = -EACCES;
+				break;
+			}
 			ret = bpf_uprobe_multi_link_attach(attr, prog);
+		}
 		break;
 	default:
 		ret = -EINVAL;

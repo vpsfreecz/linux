@@ -2606,9 +2606,15 @@ bool bpf_token_same_container_domain(const struct bpf_token *a,
 bool bpf_token_current_domain_matches_task(const struct task_struct *task);
 bool bpf_token_current_container_capable(int cap);
 bool bpf_token_current_container_member(void);
+bool bpf_token_current_restrict_tracing_symbols(void);
 struct bpf_token *bpf_token_get_current_container(void);
 bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
 				 enum bpf_func_id func_id);
+bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *name);
+bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
+					     const char *name);
+bool bpf_token_current_allow_tracing_symbol(const char *name);
+bool bpf_token_current_allow_tracing_symbol_discovery(const char *name);
 
 static inline bool bpf_allow_ptr_leaks(const struct bpf_token *token)
 {
@@ -3090,6 +3096,11 @@ static inline bool bpf_token_current_container_member(void)
 	return false;
 }
 
+static inline bool bpf_token_current_restrict_tracing_symbols(void)
+{
+	return false;
+}
+
 static inline struct bpf_token *bpf_token_get_current_container(void)
 {
 	return NULL;
@@ -3097,6 +3108,27 @@ static inline struct bpf_token *bpf_token_get_current_container(void)
 
 static inline bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
 					       enum bpf_func_id func_id)
+{
+	return true;
+}
+
+static inline bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *name)
+{
+	return true;
+}
+
+static inline bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
+							   const char *name)
+{
+	return true;
+}
+
+static inline bool bpf_token_current_allow_tracing_symbol(const char *name)
+{
+	return true;
+}
+
+static inline bool bpf_token_current_allow_tracing_symbol_discovery(const char *name)
 {
 	return true;
 }
