@@ -67,6 +67,8 @@ static DEFINE_SPINLOCK(link_idr_lock);
 int sysctl_unprivileged_bpf_disabled __read_mostly =
 	IS_BUILTIN(CONFIG_BPF_UNPRIV_DEFAULT_OFF) ? 2 : 0;
 
+int sysctl_bpf_container_tracing_enabled __read_mostly;
+
 static const struct bpf_map_ops * const bpf_map_types[] = {
 #define BPF_PROG_TYPE(_id, _name, prog_ctx_type, kern_ctx_type)
 #define BPF_MAP_TYPE(_id, _ops) \
@@ -908,6 +910,7 @@ static void bpf_map_free(struct bpf_map *map)
 	 * struct_meta info which will be freed with btf_put().
 	 */
 	btf_put(btf);
+	bpf_token_put(map->token);
 }
 
 /* called from workqueue */
@@ -1370,6 +1373,51 @@ static bool bpf_net_capable(void)
 	return capable(CAP_NET_ADMIN) || capable(CAP_SYS_ADMIN);
 }
 
+static bool bpf_token_is_internal_effective(const struct bpf_token *token)
+{
+	return bpf_token_is_container(token);
+}
+
+static struct bpf_token *bpf_get_effective_container_token(void)
+{
+	if (!sysctl_bpf_container_tracing_enabled)
+		return NULL;
+	return bpf_token_get_current_container();
+}
+
+static bool bpf_container_map_type_allowed(enum bpf_map_type map_type)
+{
+	switch (map_type) {
+	case BPF_MAP_TYPE_ARRAY:
+	case BPF_MAP_TYPE_PERCPU_ARRAY:
+	case BPF_MAP_TYPE_HASH:
+	case BPF_MAP_TYPE_PERCPU_HASH:
+	case BPF_MAP_TYPE_LRU_HASH:
+	case BPF_MAP_TYPE_LRU_PERCPU_HASH:
+	case BPF_MAP_TYPE_PROG_ARRAY:
+	case BPF_MAP_TYPE_PERF_EVENT_ARRAY:
+	case BPF_MAP_TYPE_RINGBUF:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
+					 enum bpf_attach_type attach_type)
+{
+	(void)attach_type;
+
+	switch (prog_type) {
+	case BPF_PROG_TYPE_KPROBE:
+	case BPF_PROG_TYPE_TRACEPOINT:
+	case BPF_PROG_TYPE_PERF_EVENT:
+		return true;
+	default:
+		return false;
+	}
+}
+
 #define BPF_MAP_CREATE_LAST_FIELD excl_prog_hash_size
 /* called via syscall */
 static int map_create(union bpf_attr *attr, bpfptr_t uattr)
@@ -1448,6 +1496,15 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 			bpf_token_put(token);
 			token = NULL;
 		}
+	} else {
+		token = bpf_get_effective_container_token();
+		if (IS_ERR(token))
+			return PTR_ERR(token);
+	}
+
+	if (bpf_token_is_container(token) && !bpf_container_map_type_allowed(attr->map_type)) {
+		err = -EPERM;
+		goto put_token;
 	}
 
 	err = -EPERM;
@@ -1516,6 +1573,11 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	}
 	map->ops = ops;
 	map->map_type = map_type;
+	map->token = NULL;
+	if (token) {
+		map->token = token;
+		bpf_token_inc(token);
+	}
 
 	err = bpf_obj_name_cpy(map->name, attr->map_name,
 			       sizeof(attr->map_name));
@@ -2896,6 +2958,17 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 			bpf_token_put(token);
 			token = NULL;
 		}
+	} else {
+		token = bpf_get_effective_container_token();
+		if (IS_ERR(token))
+			return PTR_ERR(token);
+	}
+
+	if (bpf_token_is_container(token) &&
+	    !bpf_container_prog_type_allowed(attr->prog_type,
+					 attr->expected_attach_type)) {
+		err = -EPERM;
+		goto put_token;
 	}
 
 	bpf_cap = bpf_token_capable(token, CAP_BPF);
@@ -3069,7 +3142,8 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if (err < 0)
 		goto free_prog;
 
-	err = security_bpf_prog_load(prog, attr, token, uattr.is_kernel);
+	err = security_bpf_prog_load(prog, attr, prog->aux->token,
+				      uattr.is_kernel);
 	if (err)
 		goto free_prog_sec;
 
@@ -6510,6 +6584,15 @@ static const struct ctl_table bpf_syscall_table[] = {
 		.data		= &bpf_stats_enabled_key.key,
 		.mode		= 0644,
 		.proc_handler	= bpf_stats_handler,
+	},
+	{
+		.procname	= "bpf_container_tracing_enabled",
+		.data		= &sysctl_bpf_container_tracing_enabled,
+		.maxlen		= sizeof(sysctl_bpf_container_tracing_enabled),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
 	},
 };
 
