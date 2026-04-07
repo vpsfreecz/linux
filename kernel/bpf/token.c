@@ -159,7 +159,8 @@ struct bpf_token *bpf_token_get_current_container(void)
 	return bpf_token_alloc_current_container();
 }
 
-bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id)
+static bool bpf_token_allow_helper(const struct bpf_token *token,
+				   enum bpf_func_id func_id)
 {
 	if (!bpf_token_is_container(token))
 		return true;
@@ -203,13 +204,46 @@ bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func
 	case BPF_FUNC_get_current_comm:
 	case BPF_FUNC_probe_read_user:
 	case BPF_FUNC_probe_read_user_str:
-	case BPF_FUNC_copy_from_user:
 	case BPF_FUNC_perf_event_output:
 	case BPF_FUNC_get_attach_cookie:
 		return true;
 	default:
 		return false;
 	}
+}
+
+static bool bpf_token_allow_tracing_prog_helper(const struct bpf_prog *prog,
+						enum bpf_func_id func_id)
+{
+	switch (prog->type) {
+	case BPF_PROG_TYPE_KPROBE:
+	case BPF_PROG_TYPE_TRACEPOINT:
+	case BPF_PROG_TYPE_PERF_EVENT:
+		break;
+	default:
+		return false;
+	}
+
+	switch (func_id) {
+	case BPF_FUNC_get_current_task:
+	case BPF_FUNC_get_current_task_btf:
+	case BPF_FUNC_probe_read:
+	case BPF_FUNC_probe_read_kernel:
+	case BPF_FUNC_copy_from_user:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
+				 enum bpf_func_id func_id)
+{
+	if (!bpf_token_is_container(prog->aux->token))
+		return true;
+
+	return bpf_token_allow_helper(prog->aux->token, func_id) ||
+	       bpf_token_allow_tracing_prog_helper(prog, func_id);
 }
 
 bool bpf_token_capable(const struct bpf_token *token, int cap)

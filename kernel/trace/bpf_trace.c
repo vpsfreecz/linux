@@ -763,6 +763,13 @@ const struct bpf_func_proto bpf_get_current_task_proto = {
 	.ret_type	= RET_INTEGER,
 };
 
+static const struct bpf_func_proto bpf_get_current_task_container_proto = {
+	.func		= bpf_get_current_task,
+	.gpl_only	= true,
+	.ret_type	= RET_PTR_TO_BTF_ID_TRUSTED,
+	.ret_btf_id	= &btf_tracing_ids[BTF_TRACING_TYPE_TASK],
+};
+
 BPF_CALL_0(bpf_get_current_task_btf)
 {
 	return (unsigned long) current;
@@ -1243,8 +1250,7 @@ static const struct bpf_func_proto bpf_get_func_arg_cnt_proto = {
 static const struct bpf_func_proto *
 bpf_tracing_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	const struct bpf_func_proto *func_proto;
@@ -1252,6 +1258,10 @@ bpf_tracing_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	switch (func_id) {
 	case BPF_FUNC_get_smp_processor_id:
 		return &bpf_get_smp_processor_id_proto;
+	case BPF_FUNC_get_current_task:
+		if (bpf_token_is_container(prog->aux->token))
+			return &bpf_get_current_task_container_proto;
+		break;
 #ifdef CONFIG_ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE
 	case BPF_FUNC_probe_read:
 		return security_locked_down(LOCKDOWN_BPF_READ_KERNEL) < 0 ?
@@ -1307,8 +1317,7 @@ static inline bool is_uprobe_session(const struct bpf_prog *prog)
 static const struct bpf_func_proto *
 kprobe_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
@@ -1438,8 +1447,7 @@ static const struct bpf_func_proto bpf_get_stack_proto_tp = {
 static const struct bpf_func_proto *
 tp_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
@@ -1546,8 +1554,7 @@ static const struct bpf_func_proto bpf_read_branch_records_proto = {
 static const struct bpf_func_proto *
 pe_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
@@ -1685,8 +1692,7 @@ static const struct bpf_func_proto bpf_get_stack_proto_raw_tp = {
 static const struct bpf_func_proto *
 raw_tp_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
