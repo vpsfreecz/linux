@@ -35,6 +35,7 @@
 #include <linux/hash.h>
 #include <linux/rcupdate.h>
 #include <linux/kprobes.h>
+#include <linux/bpf.h>
 #include <linux/tracing_namespace.h>
 
 #include <trace/events/sched.h>
@@ -3915,6 +3916,45 @@ ftrace_allocate_pages(unsigned long num_to_init, unsigned long *num_pages)
 
 #define FTRACE_BUFF_MAX (KSYM_SYMBOL_LEN+4) /* room for wildcards */
 
+#ifdef CONFIG_BPF_SYSCALL
+static bool ftrace_container_kprobe_filter_active(void)
+{
+	return bpf_token_current_restrict_tracing_symbols();
+}
+
+static bool ftrace_container_kprobe_allowed(unsigned long ip)
+{
+	unsigned long offset;
+	char str[KSYM_SYMBOL_LEN];
+	char *modname;
+	char full[KSYM_SYMBOL_LEN + MODULE_NAME_LEN + 2];
+
+	if (!kallsyms_lookup(ip, NULL, &offset, &modname, str))
+		return false;
+	if (offset > FTRACE_MCOUNT_MAX_OFFSET)
+		return false;
+
+	if (modname) {
+		snprintf(full, sizeof(full), "%s:%s", modname, str);
+		if (!bpf_token_current_allow_tracing_symbol_discovery(full))
+			return false;
+		return true;
+	}
+
+	return bpf_token_current_allow_tracing_symbol_discovery(str);
+}
+#else
+static bool ftrace_container_kprobe_filter_active(void)
+{
+	return false;
+}
+
+static bool ftrace_container_kprobe_allowed(unsigned long ip)
+{
+	return true;
+}
+#endif
+
 struct ftrace_iterator {
 	loff_t				pos;
 	loff_t				func_pos;
@@ -4164,7 +4204,10 @@ t_func_next(struct seq_file *m, loff_t *pos)
 		     !(rec->flags & FTRACE_FL_ENABLED)) ||
 
 		    ((iter->flags & FTRACE_ITER_TOUCHED) &&
-		     !(rec->flags & FTRACE_FL_TOUCHED))) {
+		     !(rec->flags & FTRACE_FL_TOUCHED)) ||
+
+		    ((iter->flags & FTRACE_ITER_CONTAINER) &&
+		     !ftrace_container_kprobe_allowed(rec->ip))) {
 
 			rec = NULL;
 			goto retry;
@@ -4452,6 +4495,18 @@ static int t_show(struct seq_file *m, void *v)
 	if (!rec)
 		return 0;
 
+	if (bpf_token_current_restrict_tracing_symbols()) {
+		unsigned long offset;
+		char str[KSYM_SYMBOL_LEN];
+		char *modname;
+		const char *ret;
+
+		ret = kallsyms_lookup(rec->ip, NULL, &offset, &modname, str);
+		if (!ret || offset > FTRACE_MCOUNT_MAX_OFFSET ||
+		    !bpf_token_current_allow_tracing_symbol_discovery(str))
+			return 0;
+	}
+
 	if (iter->flags & FTRACE_ITER_ADDRS)
 		seq_printf(m, "%lx ", rec->ip);
 
@@ -4538,6 +4593,8 @@ ftrace_avail_open(struct inode *inode, struct file *file)
 
 	iter->pg = ftrace_pages_start;
 	iter->ops = &global_ops;
+	if (ftrace_container_kprobe_filter_active())
+		iter->flags |= FTRACE_ITER_CONTAINER;
 
 	return 0;
 }
@@ -4604,6 +4661,9 @@ ftrace_avail_addrs_open(struct inode *inode, struct file *file)
 
 	if (unlikely(ftrace_disabled))
 		return -ENODEV;
+
+	if (ftrace_container_kprobe_filter_active())
+		return -EACCES;
 
 	iter = __seq_open_private(file, &show_ftrace_seq_ops, sizeof(*iter));
 	if (!iter)

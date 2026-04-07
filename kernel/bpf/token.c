@@ -123,6 +123,114 @@ bool bpf_token_current_container_capable(int cap)
 	return bpf_ns_capable(userns, cap);
 }
 
+/*
+ * Symbol discovery is a tracing-boundary property, not a capability-only one.
+ * Tasks inside the same tracing guest must not fall back to broader host-side
+ * discovery surfaces merely because they dropped tracing caps or entered a
+ * nested user namespace.
+ */
+bool bpf_token_current_restrict_tracing_symbols(void)
+{
+	if (!bpf_container_tracing_enabled())
+		return false;
+
+	return bpf_token_current_container_member();
+}
+
+static bool bpf_token_allow_syscall_symbol(const char *name, const char *syscall)
+{
+	static const char * const prefixes[] = {
+		"__x64_sys_",
+		"__ia32_sys_",
+		"__arm64_sys_",
+		"__riscv_sys_",
+		"__s390x_sys_",
+		"__s390_sys_",
+		"__powerpc_sys_",
+		"__powerpc64_sys_",
+		"__sparc_sys_",
+		"__sparc64_sys_",
+		"__se_sys_",
+		"__do_sys_",
+		"sys_",
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(prefixes); i++) {
+		const char *prefix = prefixes[i];
+		size_t len = strlen(prefix);
+
+		if (!strncmp(name, prefix, len) && !strcmp(name + len, syscall))
+			return true;
+	}
+
+	return false;
+}
+
+static bool bpf_token_allow_container_symbol_access_name(const char *name)
+{
+	static const char * const exact_symbols[] = {
+		"sched_fork",
+		"wake_up_new_task",
+		"tcp_v4_connect",
+		"tcp_v6_connect",
+		"tcp_set_state",
+		"tcp_close",
+		"inet_csk_accept",
+		"udp_recvmsg",
+		"udpv6_queue_rcv_one_skb",
+	};
+	static const char * const syscall_names[] = {
+		"open",
+		"openat",
+		"openat2",
+		"kill",
+		"tkill",
+		"tgkill",
+		"fork",
+		"vfork",
+		"clone",
+		"clone3",
+		"execve",
+		"execveat",
+		"mount",
+		"umount2",
+		"fsopen",
+		"fsconfig",
+		"fsmount",
+		"move_mount",
+		"open_tree",
+		"mount_setattr",
+		"read",
+		"write",
+		"pread64",
+		"pwrite64",
+		"stat",
+		"lstat",
+		"newfstatat",
+		"statx",
+		"connect",
+		"accept",
+		"accept4",
+	};
+	int i;
+
+	if (!name || !*name)
+		return false;
+
+	for (i = 0; i < ARRAY_SIZE(exact_symbols); i++) {
+		if (!strcmp(name, exact_symbols[i]))
+			return true;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(syscall_names); i++) {
+		if (bpf_token_allow_syscall_symbol(name, syscall_names[i]))
+			return true;
+	}
+
+	return false;
+}
+
 static struct bpf_token *bpf_token_alloc_current_container(void)
 {
 	struct bpf_token *token;
@@ -157,6 +265,45 @@ static struct bpf_token *bpf_token_alloc_current_container(void)
 struct bpf_token *bpf_token_get_current_container(void)
 {
 	return bpf_token_alloc_current_container();
+}
+
+bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *name)
+{
+	if (!bpf_token_is_container(token))
+		return true;
+
+	return bpf_token_allow_container_symbol_access_name(name);
+}
+
+bool bpf_token_current_allow_tracing_symbol(const char *name)
+{
+	if (!bpf_token_current_restrict_tracing_symbols())
+		return true;
+
+	return bpf_token_allow_container_symbol_access_name(name);
+}
+
+/*
+ * /proc/kallsyms and ftrace discovery walk broad host-global symbol spaces.
+ * Keep both discovery and explicit container tracing attachments on the same
+ * bounded allowlist so a manually typed BTF-shaped host symbol cannot bypass
+ * the discovery policy.
+ */
+bool bpf_token_current_allow_tracing_symbol_discovery(const char *name)
+{
+	if (!bpf_token_current_restrict_tracing_symbols())
+		return true;
+
+	return bpf_token_allow_container_symbol_access_name(name);
+}
+
+bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
+					     const char *name)
+{
+	if (!bpf_token_is_container(token))
+		return true;
+
+	return bpf_token_allow_container_symbol_access_name(name);
 }
 
 static bool bpf_token_allow_helper(const struct bpf_token *token,

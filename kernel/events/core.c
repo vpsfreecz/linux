@@ -31,6 +31,7 @@
 #include <linux/hugetlb.h>
 #include <linux/rculist.h>
 #include <linux/uaccess.h>
+#include <linux/btf.h>
 #include <linux/syscalls.h>
 #include <linux/anon_inodes.h>
 #include <linux/kernel_stat.h>
@@ -5303,6 +5304,10 @@ static void free_event_rcu(struct rcu_head *head)
 	if (event->ns)
 		put_pid_ns(event->ns);
 	bpf_token_put(event->token);
+#ifdef CONFIG_BPF_SYSCALL
+	if (event->container_kprobe_btf)
+		btf_put(event->container_kprobe_btf);
+#endif
 	perf_event_free_filter(event);
 	kmem_cache_free(perf_event_cache, event);
 }
@@ -11457,6 +11462,10 @@ static int __perf_event_set_bpf_prog(struct perf_event *event,
 	if (prog->aux->kprobe_write_ctx && !is_uprobe)
 		return -EINVAL;
 
+	if (is_kprobe && perf_event_token_is_container(event) &&
+	    !event->container_kprobe_func_proto)
+		return -EACCES;
+
 	if (is_tracepoint || is_syscall_tp) {
 		int off = trace_event_get_offsets(event->tp_event);
 
@@ -13138,7 +13147,14 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 	if (parent_event && parent_event->token) {
 		event->token = parent_event->token;
 		bpf_token_inc(event->token);
-	} else if (sysctl_bpf_container_tracing_enabled) {
+		event->container_kprobe_btf = parent_event->container_kprobe_btf;
+		event->container_kprobe_func_proto =
+			parent_event->container_kprobe_func_proto;
+		event->container_kprobe_access_safe =
+			parent_event->container_kprobe_access_safe;
+		if (event->container_kprobe_btf)
+			btf_get(event->container_kprobe_btf);
+	} else if (bpf_container_tracing_enabled()) {
 		struct bpf_token *token = bpf_token_get_current_container();
 
 		if (IS_ERR(token))

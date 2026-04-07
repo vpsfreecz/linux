@@ -1925,6 +1925,13 @@ create_local_trace_kprobe(char *func, void *addr, unsigned long offs,
 	int ret;
 	char *event;
 
+	if (bpf_token_current_restrict_tracing_symbols()) {
+		if (!func || addr || offs)
+			return ERR_PTR(-EACCES);
+		if (!bpf_token_current_allow_tracing_symbol(func))
+			return ERR_PTR(-EACCES);
+	}
+
 	if (func) {
 		ret = validate_probe_symbol(func);
 		if (ret)
