@@ -1941,8 +1941,7 @@ const struct bpf_func_proto bpf_get_branch_snapshot_proto __weak;
 const struct bpf_func_proto *
 bpf_base_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
