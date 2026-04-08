@@ -138,7 +138,7 @@ static bool bpf_token_allow_syscall_symbol(const char *name, const char *syscall
 	return false;
 }
 
-static bool bpf_token_allow_container_symbol_name(const char *name)
+static bool bpf_token_allow_container_symbol_access_name(const char *name)
 {
 	static const char * const exact_symbols[] = {
 		"sched_fork",
@@ -202,6 +202,26 @@ static bool bpf_token_allow_container_symbol_name(const char *name)
 	return false;
 }
 
+static bool bpf_token_allow_container_symbol_discovery_name(const char *name)
+{
+	const struct btf_type *proto;
+	struct btf *btf;
+	bool ok = false;
+
+	if (!name || !*name)
+		return false;
+
+	proto = btf_find_func_proto(name, &btf);
+	if (!proto)
+		return false;
+
+	if (btf_type_vlen(proto) <= MAX_BPF_FUNC_ARGS)
+		ok = true;
+
+	btf_put(btf);
+	return ok;
+}
+
 static struct bpf_token *bpf_token_alloc_current_container(void)
 {
 	struct nsproxy *nsproxy = current->nsproxy;
@@ -249,7 +269,7 @@ bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *n
 	if (!bpf_token_is_container(token))
 		return true;
 
-	return bpf_token_allow_container_symbol_name(name);
+	return bpf_token_allow_container_symbol_discovery_name(name);
 }
 
 bool bpf_token_current_allow_tracing_symbol(const char *name)
@@ -257,7 +277,16 @@ bool bpf_token_current_allow_tracing_symbol(const char *name)
 	if (!bpf_token_current_restrict_tracing_symbols())
 		return true;
 
-	return bpf_token_allow_container_symbol_name(name);
+	return bpf_token_allow_container_symbol_discovery_name(name);
+}
+
+bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
+				      const char *name)
+{
+	if (!bpf_token_is_container(token))
+		return true;
+
+	return bpf_token_allow_container_symbol_access_name(name);
 }
 
 bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id)
