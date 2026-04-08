@@ -290,6 +290,8 @@ static int perf_container_prepare_kprobe_target(struct perf_event *p_event,
 	p_event->container_kprobe_btf = btf;
 	p_event->container_kprobe_func_proto = proto;
 	p_event->container_kprobe_argc = btf_type_vlen(proto);
+	p_event->container_kprobe_access_safe =
+		bpf_token_allow_tracing_symbol_accesses(p_event->token, func);
 	return 0;
 }
 #else
