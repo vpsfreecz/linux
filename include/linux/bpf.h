@@ -2592,6 +2592,8 @@ bool bpf_token_current_restrict_tracing_symbols(void);
 struct bpf_token *bpf_token_get_current_container(void);
 bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id);
 bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *name);
+bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
+				      const char *name);
 bool bpf_token_current_allow_tracing_symbol(const char *name);
 
 static inline bool bpf_allow_ptr_leaks(const struct bpf_token *token)
@@ -3068,6 +3070,12 @@ static inline bool bpf_token_allow_helper(const struct bpf_token *token, enum bp
 }
 
 static inline bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *name)
+{
+	return true;
+}
+
+static inline bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
+				      const char *name)
 {
 	return true;
 }
