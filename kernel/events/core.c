@@ -13054,6 +13054,8 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 		event->container_kprobe_func_proto =
 			parent_event->container_kprobe_func_proto;
 		event->container_kprobe_argc = parent_event->container_kprobe_argc;
+		event->container_kprobe_access_safe =
+			parent_event->container_kprobe_access_safe;
 		if (event->container_kprobe_btf)
 			btf_get(event->container_kprobe_btf);
 	} else if (sysctl_bpf_container_tracing_enabled) {
