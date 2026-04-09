@@ -572,6 +572,12 @@ static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 #endif
 #ifdef CONFIG_TRACING_NS
 	case TRACING_NS_TYPE:
+		/*
+		 * ns_tree_lookup_rcu() acquired the namespace reference
+		 * directly, so pair it with the owner pin expected by
+		 * tracingns_put().
+		 */
+		get_user_ns(to_tracing_ns(ns)->user_ns);
 		if (current_tracing_ns() != to_tracing_ns(ns))
 			owning_ns = to_tracing_ns(ns)->user_ns;
 		break;

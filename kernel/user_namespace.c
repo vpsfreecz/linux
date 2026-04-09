@@ -24,6 +24,7 @@
 #include <linux/sort.h>
 #include <linux/vpsadminos.h>
 #include <linux/nstree.h>
+#include <linux/tracing_namespace.h>
 
 static struct kmem_cache *user_ns_cachep __ro_after_init;
 static DEFINE_MUTEX(userns_state_mutex);
@@ -148,6 +149,10 @@ int create_user_ns(struct cred *new)
 	ns->ucounts = ucounts;
 	ns->syslog_ns = get_syslog_ns(current->nsproxy->syslog_ns);
 	ns->syslog_ns_is_owner = false;
+#ifdef CONFIG_TRACING_NS
+	ns->tracing_ns = get_tracing_ns(current_tracing_ns());
+	ns->tracing_ns_is_owner = false;
+#endif
 
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
 	mutex_lock(&userns_state_mutex);
@@ -160,13 +165,16 @@ int create_user_ns(struct cred *new)
 #endif
 	ret = -ENOMEM;
 	if (!setup_userns_sysctls(ns))
-		goto fail_put_syslog;
+		goto fail_put_namespaces;
 
 	set_cred_user_ns(new, ns);
 	fake_sysctl_bufs_init(ns);
 	ns_tree_add(ns);
 	return 0;
-fail_put_syslog:
+fail_put_namespaces:
+#ifdef CONFIG_TRACING_NS
+	put_tracing_ns(ns->tracing_ns);
+#endif
 	put_syslog_ns(ns->syslog_ns);
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	key_put(ns->persistent_keyring_register);
@@ -228,6 +236,12 @@ static void free_user_ns(struct work_struct *work)
 			put_syslog_ns_structural(ns->syslog_ns);
 		else
 			put_syslog_ns(ns->syslog_ns);
+#ifdef CONFIG_TRACING_NS
+		if (ns->tracing_ns_is_owner)
+			put_tracing_ns_structural(ns->tracing_ns);
+		else
+			put_tracing_ns(ns->tracing_ns);
+#endif
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		fake_sysctl_bufs_free(ns);
@@ -1405,6 +1419,7 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 {
 	struct user_namespace *user_ns = to_user_ns(ns);
 	struct cred *cred;
+	int ret;
 
 	/* Don't allow gaining capabilities by reentering
 	 * the same user namespace.
@@ -1421,6 +1436,10 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
+
+	ret = tracing_ns_check_userns_setns(user_ns);
+	if (ret)
+		return ret;
 
 	cred = nsset_cred(nsset);
 	if (!cred)

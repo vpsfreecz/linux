@@ -11,6 +11,7 @@
 #include <linux/slab.h>
 #include <linux/syslog.h>
 #include <linux/syslog_namespace.h>
+#include <linux/tracing_namespace.h>
 #include <linux/user_namespace.h>
 
 extern struct ns_tree syslog_ns_tree;
@@ -378,6 +379,7 @@ static int syslogns_install(struct nsset *nsset, struct ns_common *new)
 {
 	struct nsproxy *nsproxy = nsset->nsproxy;
 	struct syslog_namespace *ns = to_syslog_ns(new);
+	int ret;
 
 	if (!nsproxy)
 		return -EINVAL;
@@ -388,6 +390,10 @@ static int syslogns_install(struct nsset *nsset, struct ns_common *new)
 
 	if (ns == nsproxy->syslog_ns)
 		return 0;
+
+	ret = tracing_ns_check_syslogns_setns(ns);
+	if (ret)
+		return ret;
 
 	put_syslog_ns(nsproxy->syslog_ns);
 	nsproxy->syslog_ns = get_syslog_ns(ns);
