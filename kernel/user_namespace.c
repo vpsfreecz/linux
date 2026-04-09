@@ -24,6 +24,7 @@
 #include <linux/sort.h>
 #include <linux/vpsadminos.h>
 #include <linux/nstree.h>
+#include <linux/tracing_namespace.h>
 
 static struct kmem_cache *user_ns_cachep __ro_after_init;
 static DEFINE_MUTEX(userns_state_mutex);
@@ -147,6 +148,9 @@ int create_user_ns(struct cred *new)
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_MEMLOCK, rlimit(RLIMIT_MEMLOCK));
 	ns->ucounts = ucounts;
 	ns->syslog_ns = get_syslog_ns(current->nsproxy->syslog_ns);
+#ifdef CONFIG_TRACING_NS
+	ns->tracing_ns = get_tracing_ns(current_tracing_ns());
+#endif
 
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
 	mutex_lock(&userns_state_mutex);
@@ -159,7 +163,11 @@ int create_user_ns(struct cred *new)
 #endif
 	ret = -ENOMEM;
 	if (!setup_userns_sysctls(ns))
+#ifdef CONFIG_TRACING_NS
+		goto fail_put_tracing;
+#else
 		goto fail_put_syslog;
+#endif
 
 	/*
 	 * When a new user namespace inherits a non-init syslog namespace from
@@ -179,6 +187,10 @@ int create_user_ns(struct cred *new)
 	fake_sysctl_bufs_init(ns);
 	ns_tree_add(ns);
 	return 0;
+#ifdef CONFIG_TRACING_NS
+fail_put_tracing:
+	put_tracing_ns(ns->tracing_ns);
+#endif
 fail_put_syslog:
 	put_syslog_ns(ns->syslog_ns);
 fail_keyring:
@@ -239,6 +251,9 @@ static void free_user_ns(struct work_struct *work)
 		kfree(ns->binfmt_misc);
 #endif
 		put_syslog_ns(ns->syslog_ns);
+#ifdef CONFIG_TRACING_NS
+		put_tracing_ns(ns->tracing_ns);
+#endif
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		fake_sysctl_bufs_free(ns);
@@ -1425,6 +1440,9 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 		return -EINVAL;
 
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (tracing_ns_check_userns_setns(user_ns))
 		return -EPERM;
 
 	cred = nsset_cred(nsset);
