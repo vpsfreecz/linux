@@ -7,13 +7,7 @@
 #include <linux/namei.h>
 #include <linux/user_namespace.h>
 #include <linux/security.h>
-#include <linux/cred.h>
-#include <linux/nsproxy.h>
-#include <linux/pid_namespace.h>
-#include <linux/mnt_namespace.h>
-#include <linux/cgroup.h>
-#include <linux/cgroup_namespace.h>
-#include <net/net_namespace.h>
+#include <linux/tracing_namespace.h>
 #include "../trace/trace_btf.h"
 
 static bool bpf_ns_capable(struct user_namespace *ns, int cap)
@@ -37,58 +31,32 @@ bool bpf_token_same_container_domain(const struct bpf_token *a,
 	if (!bpf_token_is_container(a) || !bpf_token_is_container(b))
 		return false;
 
-	return a->userns == b->userns &&
-	       a->pidns == b->pidns &&
-	       a->mntns == b->mntns &&
-	       a->netns == b->netns &&
-	       a->cgroupns == b->cgroupns &&
-	       a->cgrp == b->cgrp;
+	return a->tracing_ns && a->tracing_ns == b->tracing_ns;
 }
 
 bool bpf_token_task_match(const struct bpf_token *token,
 			     const struct task_struct *task)
 {
-	struct nsproxy *nsproxy;
-	struct cgroup *cgrp;
-
 	if (!bpf_token_is_container(token))
 		return true;
-	if (!task)
+	if (!task || !token->tracing_ns)
 		return false;
 
-	rcu_read_lock();
-	nsproxy = task->nsproxy;
-	if (!nsproxy) {
-		rcu_read_unlock();
-		return false;
-	}
-
-	if (task_active_pid_ns((struct task_struct *)task) != token->pidns ||
-	    nsproxy->mnt_ns != token->mntns ||
-	    nsproxy->net_ns != token->netns ||
-	    nsproxy->cgroup_ns != token->cgroupns ||
-	    task_cred(task)->user_ns != token->userns) {
-		rcu_read_unlock();
-		return false;
-	}
-
-	cgrp = task_dfl_cgroup((struct task_struct *)task);
-	rcu_read_unlock();
-
-	return cgrp && cgroup_is_descendant(cgrp, token->cgrp);
+	return tracing_ns_matches_task(token->tracing_ns, task);
 }
 
 static bool bpf_token_current_container_active(void)
 {
-	struct nsproxy *nsproxy = current->nsproxy;
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
 
-	if (current_user_ns() == &init_user_ns || !nsproxy || !nsproxy->cgroup_ns)
+	if (!tns || tns == &init_tracing_ns)
 		return false;
-	if (!nsproxy->mnt_ns || !nsproxy->net_ns || !nsproxy->cgroup_ns->root_cset)
-		return false;
-	if (!nsproxy->cgroup_ns->root_cset->dfl_cgrp)
-		return false;
-	return true;
+
+	return tracing_ns_matches_task(tns, current);
+#else
+	return false;
+#endif
 }
 
 bool bpf_token_current_container_capable(int cap)
@@ -225,20 +193,19 @@ static bool bpf_token_allow_container_symbol_discovery_name(const char *name)
 
 static struct bpf_token *bpf_token_alloc_current_container(void)
 {
-	struct nsproxy *nsproxy = current->nsproxy;
 	struct bpf_token *token;
-	struct cgroup *cgrp;
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
+#else
+	struct tracing_namespace *tns = NULL;
+#endif
 
 	if (!bpf_token_current_container_capable(CAP_BPF) &&
 	    !bpf_token_current_container_capable(CAP_PERFMON) &&
 	    !bpf_token_current_container_capable(CAP_SYS_ADMIN) &&
 	    !bpf_token_current_container_capable(CAP_NET_ADMIN))
 		return NULL;
-	if (!nsproxy)
-		return NULL;
-
-	cgrp = nsproxy->cgroup_ns->root_cset->dfl_cgrp;
-	if (!cgrp)
+	if (!tns)
 		return NULL;
 
 	token = kzalloc(sizeof(*token), GFP_KERNEL);
@@ -248,14 +215,7 @@ static struct bpf_token *bpf_token_alloc_current_container(void)
 	atomic64_set(&token->refcnt, 1);
 	token->flags = BPF_TOKEN_F_CONTAINER | BPF_TOKEN_F_INTERNAL;
 	token->userns = get_user_ns(current_user_ns());
-	token->pidns = get_pid_ns(task_active_pid_ns(current));
-	get_mnt_ns(nsproxy->mnt_ns);
-	token->mntns = nsproxy->mnt_ns;
-	token->netns = get_net(nsproxy->net_ns);
-	get_cgroup_ns(nsproxy->cgroup_ns);
-	token->cgroupns = nsproxy->cgroup_ns;
-	cgroup_get(cgrp);
-	token->cgrp = cgrp;
+	token->tracing_ns = get_tracing_ns(tns);
 
 	return token;
 }
@@ -371,15 +331,7 @@ static void bpf_token_free(struct bpf_token *token)
 	if (!bpf_token_is_internal(token))
 		security_bpf_token_free(token);
 	put_user_ns(token->userns);
-	put_pid_ns(token->pidns);
-	if (token->mntns)
-		put_mnt_ns(token->mntns);
-	if (token->netns)
-		put_net(token->netns);
-	if (token->cgroupns)
-		put_cgroup_ns(token->cgroupns);
-	if (token->cgrp)
-		cgroup_put(token->cgrp);
+	put_tracing_ns(token->tracing_ns);
 	kfree(token);
 }
 
