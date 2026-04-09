@@ -56,6 +56,7 @@ struct bpf_func_state;
 struct ftrace_ops;
 struct cgroup;
 struct bpf_token;
+struct tracing_namespace;
 struct user_namespace;
 struct pid_namespace;
 struct mnt_namespace;
@@ -1861,6 +1862,7 @@ struct bpf_token {
 	struct work_struct work;
 	atomic64_t refcnt;
 	struct user_namespace *userns;
+	struct tracing_namespace *tracing_ns;
 	struct pid_namespace *pidns;
 	struct mnt_namespace *mntns;
 	struct net *netns;

@@ -556,6 +556,12 @@ static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 			owning_ns = to_syslog_ns(ns)->user_ns;
 		break;
 #endif
+#ifdef CONFIG_TRACING_NS
+	case TRACING_NS_TYPE:
+		if (current_tracing_ns() != to_tracing_ns(ns))
+			owning_ns = to_tracing_ns(ns)->user_ns;
+		break;
+#endif
 	default:
 		return ERR_PTR(-EOPNOTSUPP);
 	}
