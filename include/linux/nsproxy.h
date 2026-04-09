@@ -42,9 +42,7 @@ struct nsproxy {
 	struct time_namespace *time_ns_for_children;
 	struct cgroup_namespace *cgroup_ns;
 	struct syslog_namespace *syslog_ns;
-#ifdef CONFIG_TRACING_NS
 	struct tracing_namespace *tracing_ns;
-#endif
 };
 extern struct nsproxy init_nsproxy;
 

@@ -17,6 +17,7 @@
 #include <linux/time_namespace.h>
 #include <linux/utsname.h>
 #include <linux/syslog_namespace.h>
+#include <linux/tracing_namespace.h>
 #include <linux/exportfs.h>
 #include <linux/nstree.h>
 #include <net/net_namespace.h>
