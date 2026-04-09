@@ -7,14 +7,7 @@
 #include <linux/namei.h>
 #include <linux/user_namespace.h>
 #include <linux/security.h>
-#include <linux/cred.h>
 #include <linux/tracing_namespace.h>
-#include <linux/nsproxy.h>
-#include <linux/pid_namespace.h>
-#include <linux/mnt_namespace.h>
-#include <linux/cgroup.h>
-#include <linux/cgroup_namespace.h>
-#include <net/net_namespace.h>
 
 static bool bpf_ns_capable(struct user_namespace *ns, int cap)
 {
@@ -338,15 +331,6 @@ static void bpf_token_free(struct bpf_token *token)
 		security_bpf_token_free(token);
 	put_user_ns(token->userns);
 	put_tracing_ns(token->tracing_ns);
-	put_pid_ns(token->pidns);
-	if (token->mntns)
-		put_mnt_ns(token->mntns);
-	if (token->netns)
-		put_net(token->netns);
-	if (token->cgroupns)
-		put_cgroup_ns(token->cgroupns);
-	if (token->cgrp)
-		cgroup_put(token->cgrp);
 	kfree(token);
 }
 

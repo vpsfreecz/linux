@@ -1863,11 +1863,6 @@ struct bpf_token {
 	atomic64_t refcnt;
 	struct user_namespace *userns;
 	struct tracing_namespace *tracing_ns;
-	struct pid_namespace *pidns;
-	struct mnt_namespace *mntns;
-	struct net *netns;
-	struct cgroup_namespace *cgroupns;
-	struct cgroup *cgrp;
 	u64 flags;
 	u64 allowed_cmds;
 	u64 allowed_maps;
