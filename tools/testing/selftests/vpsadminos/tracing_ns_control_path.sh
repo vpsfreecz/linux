@@ -1,0 +1,74 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+
+ksft_skip=4
+ret=0
+helper="$(dirname "$0")/tracing_ns_smoke"
+
+get_field()
+{
+	printf '%s\n' "$1" | awk -F= -v key="$2" '$1 == key { print $2; exit }'
+}
+
+require_root_and_feature()
+{
+	if [ "$(id -u)" -ne 0 ]; then
+		echo "skip: must run as root" >&2
+		exit $ksft_skip
+	fi
+
+	if [ ! -e /proc/self/ns/tracing ]; then
+		echo "skip: tracing namespace support not present" >&2
+		exit $ksft_skip
+	fi
+}
+
+check_ne()
+{
+	label="$1"
+	a="$2"
+	b="$3"
+	if [ "$a" = "$b" ]; then
+		echo "not ok: $label unexpectedly equal: $a" >&2
+		ret=1
+	fi
+}
+
+check_eq()
+{
+	label="$1"
+	a="$2"
+	b="$3"
+	if [ "$a" != "$b" ]; then
+		echo "not ok: $label differ: $a vs $b" >&2
+		ret=1
+	fi
+}
+
+require_root_and_feature
+
+out="$($helper --syslog-name traceA --tracing --nested-attempt)" || {
+	echo "not ok: helper failed in tracing+syslog case" >&2
+	exit 1
+}
+
+check_ne tracing_boundary "$(get_field "$out" parent_tracing)" "$(get_field "$out" child_tracing)"
+check_ne syslog_boundary "$(get_field "$out" parent_syslog)" "$(get_field "$out" child_syslog)"
+check_ne user_boundary "$(get_field "$out" parent_user)" "$(get_field "$out" child_user)"
+check_ne pid_boundary "$(get_field "$out" parent_pid)" "$(get_field "$out" child_pid)"
+check_eq nested_request_errno 1 "$(get_field "$out" child_nested_tracing_errno)"
+
+out="$($helper --syslog-name traceB)" || {
+	echo "not ok: helper failed in syslog-only case" >&2
+	exit 1
+}
+check_eq tracing_unchanged_without_request "$(get_field "$out" parent_tracing)" "$(get_field "$out" child_tracing)"
+check_ne syslog_changes_without_tracing_request "$(get_field "$out" parent_syslog)" "$(get_field "$out" child_syslog)"
+
+out="$($helper --tracing)" || {
+	echo "not ok: helper failed in tracing-only case" >&2
+	exit 1
+}
+check_eq tracing_only_clone_errno 22 "$(get_field "$out" clone_errno)"
+
+exit $ret
