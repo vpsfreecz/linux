@@ -140,6 +140,27 @@ void free_tracing_ns(struct tracing_namespace *ns)
 }
 EXPORT_SYMBOL_GPL(free_tracing_ns);
 
+int tracing_ns_check_userns_setns(const struct user_namespace *user_ns)
+{
+	struct tracing_namespace *target_ns, *current_ns;
+
+	if (!user_ns)
+		return -EINVAL;
+
+	current_ns = current_tracing_ns();
+	target_ns = user_ns->tracing_ns ? user_ns->tracing_ns : &init_tracing_ns;
+
+	if (target_ns == current_ns)
+		return 0;
+
+	pr_notice("tracing_ns: reject userns setns current=%u target_user=%u target_tracing=%u\n",
+		  current_ns ? current_ns->ns.inum : 0,
+		  user_ns->ns.inum,
+		  target_ns->ns.inum);
+	return -EPERM;
+}
+EXPORT_SYMBOL_GPL(tracing_ns_check_userns_setns);
+
 static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns,
 					  struct pid_namespace *pid_ns,
 					  struct syslog_namespace *syslog_ns,
@@ -160,6 +181,18 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 	ns->pid_ns = get_pid_ns(pid_ns);
 	ns->syslog_ns = get_syslog_ns(syslog_ns);
 	ns->parent = get_tracing_ns(old_ns);
+
+	/*
+	 * A freshly created child user namespace inherits its parent's effective
+	 * tracing namespace in create_user_ns(). When the same clone/unshare also
+	 * creates a child tracing namespace, retarget the new userns default here
+	 * so future userns descendants and setns checks resolve to the child
+	 * tracing boundary rather than the inherited init one.
+	 */
+	if (user_ns != current_user_ns() && user_ns->tracing_ns == old_ns) {
+		put_tracing_ns(user_ns->tracing_ns);
+		user_ns->tracing_ns = get_tracing_ns(ns);
+	}
 
 	__ns_tree_add(&ns->ns, &tracing_ns_tree);
 
