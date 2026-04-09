@@ -25,6 +25,8 @@
 
 struct child_cfg {
 	int pipefd;
+	int readyfd;
+	int releasefd;
 	bool nested_attempt;
 	bool setns_parent_tracing;
 	const char *nested_syslog_name;
@@ -64,6 +66,74 @@ static int emit_ns_links(int fd, const char *prefix)
 	}
 
 	return 0;
+}
+
+static void maybe_hold_for_parent_probe(struct child_cfg *cfg)
+{
+	char byte;
+
+	if (cfg->readyfd < 0 || cfg->releasefd < 0)
+		return;
+
+	if (write(cfg->readyfd, "R", 1) < 0)
+		;
+	close(cfg->readyfd);
+
+	while (read(cfg->releasefd, &byte, 1) < 0 && errno == EINTR)
+		;
+	close(cfg->releasefd);
+}
+
+static int probe_userns_setns_errno(pid_t pid)
+{
+	int pipefd[2];
+	pid_t probe;
+	int status;
+	int err = 0;
+	char path[PATH_MAX];
+
+	if (pipe(pipefd) < 0)
+		return errno;
+
+	probe = fork();
+	if (probe < 0) {
+		err = errno;
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return err;
+	}
+
+	if (probe == 0) {
+		int fd, ret, setns_errno = 0;
+
+		close(pipefd[0]);
+		snprintf(path, sizeof(path), "/proc/%d/ns/user", pid);
+		fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0) {
+			setns_errno = errno;
+		} else {
+			ret = setns(fd, CLONE_NEWUSER);
+			setns_errno = ret < 0 ? errno : 0;
+			close(fd);
+		}
+		if (write(pipefd[1], &setns_errno, sizeof(setns_errno)) != sizeof(setns_errno))
+			;
+		close(pipefd[1]);
+		_exit(0);
+	}
+
+	close(pipefd[1]);
+	if (read(pipefd[0], &err, sizeof(err)) != sizeof(err))
+		err = EIO;
+	close(pipefd[0]);
+
+	if (waitpid(probe, &status, 0) < 0)
+		return errno;
+
+	if (!WIFEXITED(status))
+		return ECHILD;
+
+	return err;
 }
 
 static int nested_child_main(void *arg)
@@ -163,6 +233,8 @@ static int child_main(void *arg)
 		}
 	}
 
+	maybe_hold_for_parent_probe(cfg);
+
 	if (maybe_run_nested_syslog_child(cfg)) {
 		close(cfg->pipefd);
 		return 1;
@@ -178,10 +250,13 @@ int main(int argc, char **argv)
 	bool arm_tracing = false;
 	bool nested_attempt = false;
 	bool setns_parent_tracing = false;
+	bool parent_setns_child_user = false;
 	const char *syslog_name = NULL;
 	const char *nested_syslog_name = NULL;
 	char *stack;
 	int pipefd[2];
+	int ready_pipe[2] = { -1, -1 };
+	int release_pipe[2] = { -1, -1 };
 	struct child_cfg cfg;
 	pid_t pid;
 	int status;
@@ -203,6 +278,8 @@ int main(int argc, char **argv)
 			nested_attempt = true;
 		} else if (!strcmp(argv[i], "--setns-parent-tracing")) {
 			setns_parent_tracing = true;
+		} else if (!strcmp(argv[i], "--parent-setns-child-user")) {
+			parent_setns_child_user = true;
 		} else if (!strcmp(argv[i], "--nested-syslog-name")) {
 			if (i + 1 >= argc) {
 				fprintf(stderr, "missing argument for --nested-syslog-name\n");
@@ -240,13 +317,28 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	if (parent_setns_child_user) {
+		if (pipe(ready_pipe) < 0 || pipe(release_pipe) < 0) {
+			perror("pipe");
+			return 1;
+		}
+	}
+
 	stack = malloc(STACK_SIZE);
 	if (!stack) {
 		perror("malloc");
+		if (parent_setns_child_user) {
+			close(ready_pipe[0]);
+			close(ready_pipe[1]);
+			close(release_pipe[0]);
+			close(release_pipe[1]);
+		}
 		return 1;
 	}
 
 	cfg.pipefd = pipefd[1];
+	cfg.readyfd = parent_setns_child_user ? ready_pipe[1] : -1;
+	cfg.releasefd = parent_setns_child_user ? release_pipe[0] : -1;
 	cfg.nested_attempt = nested_attempt;
 	cfg.setns_parent_tracing = setns_parent_tracing;
 	cfg.nested_syslog_name = nested_syslog_name;
@@ -257,11 +349,40 @@ int main(int argc, char **argv)
 		dprintf(STDOUT_FILENO, "clone_errno=%d\n", errno);
 		close(pipefd[0]);
 		close(pipefd[1]);
+		if (parent_setns_child_user) {
+			close(ready_pipe[0]);
+			close(ready_pipe[1]);
+			close(release_pipe[0]);
+			close(release_pipe[1]);
+		}
 		free(stack);
 		return 0;
 	}
 
 	close(pipefd[1]);
+	if (parent_setns_child_user) {
+		char ready;
+		int setns_errno;
+
+		close(ready_pipe[1]);
+		close(release_pipe[0]);
+		if (read(ready_pipe[0], &ready, 1) != 1) {
+			perror("read");
+			close(ready_pipe[0]);
+			close(release_pipe[1]);
+			free(stack);
+			return 1;
+		}
+		close(ready_pipe[0]);
+
+		setns_errno = probe_userns_setns_errno(pid);
+		dprintf(STDOUT_FILENO, "parent_setns_child_user_errno=%d\n", setns_errno);
+
+		if (write(release_pipe[1], "R", 1) < 0)
+			perror("write");
+		close(release_pipe[1]);
+	}
+
 	while ((nr = read(pipefd[0], buf, sizeof(buf))) > 0) {
 		if (write(STDOUT_FILENO, buf, nr) != nr) {
 			perror("write");

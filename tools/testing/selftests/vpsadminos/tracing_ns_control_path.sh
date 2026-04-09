@@ -82,4 +82,10 @@ check_ne nested_syslog_pid_boundary "$(get_field "$out" child_pid)" "$(get_field
 check_ne nested_syslog_boundary "$(get_field "$out" child_syslog)" "$(get_field "$out" grandchild_syslog)"
 check_eq nested_syslog_keeps_tracing "$(get_field "$out" child_tracing)" "$(get_field "$out" grandchild_tracing)"
 
+out="$($helper --syslog-name traceD --tracing --parent-setns-child-user)" || {
+	echo "not ok: helper failed in parent-userns-setns case" >&2
+	exit 1
+}
+check_eq parent_setns_child_user_errno 1 "$(get_field "$out" parent_setns_child_user_errno)"
+
 exit $ret
