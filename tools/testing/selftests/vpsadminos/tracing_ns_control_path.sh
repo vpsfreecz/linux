@@ -47,7 +47,8 @@ check_eq()
 
 require_root_and_feature
 
-out="$($helper --syslog-name traceA --tracing --nested-attempt)" || {
+out="$($helper --syslog-name traceA --tracing --nested-attempt \
+	--setns-parent-tracing)" || {
 	echo "not ok: helper failed in tracing+syslog case" >&2
 	exit 1
 }
@@ -57,6 +58,7 @@ check_ne syslog_boundary "$(get_field "$out" parent_syslog)" "$(get_field "$out"
 check_ne user_boundary "$(get_field "$out" parent_user)" "$(get_field "$out" child_user)"
 check_ne pid_boundary "$(get_field "$out" parent_pid)" "$(get_field "$out" child_pid)"
 check_eq nested_request_errno 1 "$(get_field "$out" child_nested_tracing_errno)"
+check_eq setns_parent_tracing_errno 1 "$(get_field "$out" child_setns_parent_tracing_errno)"
 
 out="$($helper --syslog-name traceB)" || {
 	echo "not ok: helper failed in syslog-only case" >&2
@@ -70,5 +72,14 @@ out="$($helper --tracing)" || {
 	exit 1
 }
 check_eq tracing_only_clone_errno 22 "$(get_field "$out" clone_errno)"
+
+out="$($helper --syslog-name traceC --tracing --nested-syslog-name traceC.child)" || {
+	echo "not ok: helper failed in nested-syslog case" >&2
+	exit 1
+}
+check_ne nested_syslog_user_boundary "$(get_field "$out" child_user)" "$(get_field "$out" grandchild_user)"
+check_ne nested_syslog_pid_boundary "$(get_field "$out" child_pid)" "$(get_field "$out" grandchild_pid)"
+check_ne nested_syslog_boundary "$(get_field "$out" child_syslog)" "$(get_field "$out" grandchild_syslog)"
+check_eq nested_syslog_keeps_tracing "$(get_field "$out" child_tracing)" "$(get_field "$out" grandchild_tracing)"
 
 exit $ret
