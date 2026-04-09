@@ -880,6 +880,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	err = arch_dup_task_struct(tsk, orig);
 	tsk->syslog_ns_for_child = false;
 	tsk->syslog_ns_for_child_name = NULL;
+	tsk->tracing_ns_for_child = false;
 	if (err)
 		goto free_tsk;
 

@@ -1616,6 +1616,7 @@ struct task_struct {
 
 	bool				syslog_ns_for_child;
 	char				*syslog_ns_for_child_name;
+	bool				tracing_ns_for_child;
 
 #ifdef CONFIG_KSTACK_ERASE
 	unsigned long			lowest_stack;
