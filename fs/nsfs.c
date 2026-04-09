@@ -17,6 +17,7 @@
 #include <linux/time_namespace.h>
 #include <linux/utsname.h>
 #include <linux/syslog_namespace.h>
+#include <linux/tracing_namespace.h>
 #include <linux/exportfs.h>
 #include <linux/nstree.h>
 #include <net/net_namespace.h>
@@ -567,6 +568,12 @@ static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 	case SYSLOG_ACTION_NEW_NS:
 		if (current_syslog_ns() != to_syslog_ns(ns))
 			owning_ns = to_syslog_ns(ns)->user_ns;
+		break;
+#endif
+#ifdef CONFIG_TRACING_NS
+	case TRACING_NS_TYPE:
+		if (current_tracing_ns() != to_tracing_ns(ns))
+			owning_ns = to_tracing_ns(ns)->user_ns;
 		break;
 #endif
 	default:

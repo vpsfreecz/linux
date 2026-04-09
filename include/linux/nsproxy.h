@@ -12,6 +12,7 @@ struct ipc_namespace;
 struct pid_namespace;
 struct cgroup_namespace;
 struct syslog_namespace;
+struct tracing_namespace;
 struct fs_struct;
 
 /*
@@ -41,6 +42,7 @@ struct nsproxy {
 	struct time_namespace *time_ns_for_children;
 	struct cgroup_namespace *cgroup_ns;
 	struct syslog_namespace *syslog_ns;
+	struct tracing_namespace *tracing_ns;
 };
 extern struct nsproxy init_nsproxy;
 

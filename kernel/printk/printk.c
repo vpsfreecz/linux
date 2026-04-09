@@ -40,6 +40,7 @@
 #include <linux/ratelimit.h>
 #include <linux/kmsg_dump.h>
 #include <linux/syslog.h>
+#include <linux/tracing_namespace.h>
 #include <linux/cpu.h>
 #include <linux/rculist.h>
 #include <linux/poll.h>
@@ -610,7 +611,8 @@ static int check_syslog_permissions(int type, int source,
 	    type == SYSLOG_ACTION_CONSOLE_LEVEL)
 		ns = &init_syslog_ns;
 
-	if (type == SYSLOG_ACTION_NEW_NS &&
+	if ((type == SYSLOG_ACTION_NEW_NS ||
+	     type == SYSLOG_ACTION_NEW_TRACING_NS) &&
 	    current_user_ns() == &init_user_ns)
 		return 0;
 
@@ -1938,6 +1940,22 @@ int do_syslog(int type, char __user *buf, int len, int source,
 			 current->syslog_ns_for_child_name);
 		break;
 	}
+#else
+		error = -EINVAL;
+		break;
+#endif
+
+	case SYSLOG_ACTION_NEW_TRACING_NS:
+#ifdef CONFIG_TRACING_NS
+		if (current_tracing_ns() != &init_tracing_ns) {
+			error = -EPERM;
+			break;
+		}
+
+		current->tracing_ns_for_child = true;
+		error = 0;
+		pr_debug("tracing_ns: new tracing ns will be created on next clone/unshare\n");
+		break;
 #else
 		error = -EINVAL;
 		break;

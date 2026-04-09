@@ -1420,7 +1420,19 @@ config SYSLOG_NS
 	  setns()-style namespace operations. This makes it possible to isolate
 	  dmesg-style consumers between containers and the host.
 
+config TRACING_NS
+	bool "Tracing namespace"
+	depends on USER_NS && PID_NS && SYSLOG_NS
+	default n
+	help
+	  Create a dedicated tracing namespace boundary for transparent
+	  container tracing. A child tracing namespace is created only for
+	  a first-level container boundary and is bound to that child
+	  user, pid, and syslog namespace tuple. Nested tracing namespaces
+	  are not created; descendants keep the same tracing boundary.
+
 endif # NAMESPACES
+
 
 config CHECKPOINT_RESTORE
 	bool "Checkpoint/restore support"

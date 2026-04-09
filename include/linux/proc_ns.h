@@ -35,6 +35,7 @@ extern const struct proc_ns_operations cgroupns_operations;
 extern const struct proc_ns_operations timens_operations;
 extern const struct proc_ns_operations timens_for_children_operations;
 extern const struct proc_ns_operations syslogns_operations;
+extern const struct proc_ns_operations tracingns_operations;
 
 /*
  * We always define these enumerators
@@ -49,6 +50,7 @@ enum {
 	PROC_NET_INIT_INO	= NET_NS_INIT_INO,
 	PROC_MNT_INIT_INO	= MNT_NS_INIT_INO,
 	PROC_SYSLOG_INIT_INO	= 0xEFFFFFF6U,
+	PROC_TRACING_INIT_INO	= TRACING_NS_INIT_INO,
 };
 
 #ifdef CONFIG_PROC_FS

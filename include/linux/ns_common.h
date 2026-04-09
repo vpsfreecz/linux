@@ -14,6 +14,7 @@ struct mnt_namespace;
 struct net;
 struct pid_namespace;
 struct syslog_namespace;
+struct tracing_namespace;
 struct time_namespace;
 struct user_namespace;
 struct uts_namespace;
@@ -23,6 +24,7 @@ extern struct ipc_namespace init_ipc_ns;
 extern struct mnt_namespace init_mnt_ns;
 extern struct net init_net;
 extern struct pid_namespace init_pid_ns;
+extern struct tracing_namespace init_tracing_ns;
 extern struct time_namespace init_time_ns;
 extern struct user_namespace init_user_ns;
 extern struct uts_namespace init_uts_ns;
@@ -31,6 +33,7 @@ extern const struct proc_ns_operations netns_operations;
 extern const struct proc_ns_operations utsns_operations;
 extern const struct proc_ns_operations ipcns_operations;
 extern const struct proc_ns_operations pidns_operations;
+extern const struct proc_ns_operations tracingns_operations;
 extern const struct proc_ns_operations pidns_for_children_operations;
 extern const struct proc_ns_operations userns_operations;
 extern const struct proc_ns_operations mntns_operations;
@@ -71,6 +74,8 @@ void __ns_common_free(struct ns_common *ns);
 		const struct pid_namespace *:    &(__ns)->ns, \
 		struct syslog_namespace * :      &(__ns)->ns, \
 		const struct syslog_namespace * : &(__ns)->ns, \
+		struct tracing_namespace * :      &(__ns)->ns, \
+		const struct tracing_namespace * : &(__ns)->ns, \
 		struct time_namespace *:         &(__ns)->ns, \
 		const struct time_namespace *:   &(__ns)->ns, \
 		struct user_namespace *:         &(__ns)->ns, \

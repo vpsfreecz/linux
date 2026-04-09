@@ -36,6 +36,8 @@ struct syslog_namespace;
 #define SYSLOG_ACTION_SIZE_BUFFER   10
 /* Create a new syslog namespace for the current process */
 #define SYSLOG_ACTION_NEW_NS        11
+/* Create a new tracing namespace for the next child boundary */
+#define SYSLOG_ACTION_NEW_TRACING_NS 12
 
 #define SYSLOG_FROM_READER	     0
 #define SYSLOG_FROM_PROC	     1
