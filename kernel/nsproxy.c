@@ -22,6 +22,7 @@
 #include <linux/fs_struct.h>
 #include <linux/proc_fs.h>
 #include <linux/syslog_namespace.h>
+#include <linux/tracing_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/file.h>
 #include <linux/syscalls.h>
@@ -49,6 +50,9 @@ struct nsproxy init_nsproxy = {
 	.time_ns_for_children	= &init_time_ns,
 #endif
 	.syslog_ns		= &init_syslog_ns,
+#ifdef CONFIG_TRACING_NS
+	.tracing_ns		= &init_tracing_ns,
+#endif
 };
 
 static inline struct nsproxy *create_nsproxy(void)
@@ -146,8 +150,22 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		kfree(syslog_req_task->syslog_ns_for_child_name);
 		syslog_req_task->syslog_ns_for_child_name = NULL;
 	}
+#ifdef CONFIG_TRACING_NS
+	new_nsp->tracing_ns = copy_tracing_ns(new_syslog_ns, user_ns,
+				      new_nsp->pid_ns_for_children,
+				      new_nsp->syslog_ns,
+				      tsk->nsproxy->tracing_ns);
+	if (IS_ERR(new_nsp->tracing_ns)) {
+		err = PTR_ERR(new_nsp->tracing_ns);
+		goto out_tracing;
+	}
+#endif
 	return new_nsp;
 
+#ifdef CONFIG_TRACING_NS
+out_tracing:
+	put_syslog_ns(new_nsp->syslog_ns);
+#endif
 out_syslog:
 	put_time_ns(new_nsp->time_ns);
 	if (new_nsp->time_ns_for_children)
@@ -223,6 +241,9 @@ void free_nsproxy(struct nsproxy *ns)
 	put_time_ns(ns->time_ns);
 	put_time_ns(ns->time_ns_for_children);
 	put_syslog_ns(ns->syslog_ns);
+#ifdef CONFIG_TRACING_NS
+	put_tracing_ns(ns->tracing_ns);
+#endif
 	put_cgroup_ns(ns->cgroup_ns);
 	put_net(ns->net_ns);
 	kmem_cache_free(nsproxy_cachep, ns);
