@@ -33,6 +33,12 @@ check_ne()
 	label="$1"
 	a="$2"
 	b="$3"
+	if [ -z "$a" ] || [ -z "$b" ]; then
+		clone_errno="$(get_field "$out" clone_errno)"
+		echo "not ok: $label missing helper field; clone_errno=${clone_errno:-none}" >&2
+		ret=1
+		return
+	fi
 	if [ "$a" = "$b" ]; then
 		echo "not ok: $label unexpectedly equal: $a" >&2
 		ret=1
@@ -44,6 +50,12 @@ check_eq()
 	label="$1"
 	a="$2"
 	b="$3"
+	if [ -z "$a" ] || [ -z "$b" ]; then
+		clone_errno="$(get_field "$out" clone_errno)"
+		echo "not ok: $label missing helper field; clone_errno=${clone_errno:-none}" >&2
+		ret=1
+		return
+	fi
 	if [ "$a" != "$b" ]; then
 		echo "not ok: $label differ: $a vs $b" >&2
 		ret=1
@@ -55,6 +67,13 @@ check_one_of()
 	label="$1"
 	actual="$2"
 	shift 2
+
+	if [ -z "$actual" ]; then
+		clone_errno="$(get_field "$out" clone_errno)"
+		echo "not ok: $label missing helper field; clone_errno=${clone_errno:-none}" >&2
+		ret=1
+		return
+	fi
 
 	for expected in "$@"; do
 		if [ "$actual" = "$expected" ]; then
@@ -129,5 +148,26 @@ check_ne retry_preserves_syslog_request \
 check_ne retry_preserves_tracing_request \
 	"$(get_field "$out" parent_tracing)" \
 	"$(get_field "$out" child_tracing)"
+
+out="$($helper --syslog-name "$(ns_name d)" --tracing \
+	--parent-setns-child-user)" || {
+	echo "not ok: helper failed in parent-userns-setns case" >&2
+	exit 1
+}
+check_eq parent_setns_child_user_errno 1 "$(get_field "$out" parent_setns_child_user_errno)"
+
+out="$($helper --syslog-name "$(ns_name e)" --tracing \
+	--parent-setns-child-pid)" || {
+	echo "not ok: helper failed in parent-pidns-setns case" >&2
+	exit 1
+}
+check_eq parent_setns_child_pid_errno 1 "$(get_field "$out" parent_setns_child_pid_errno)"
+
+out="$($helper --syslog-name "$(ns_name f)" --tracing \
+	--parent-setns-child-syslog)" || {
+	echo "not ok: helper failed in parent-syslogns-setns case" >&2
+	exit 1
+}
+check_eq parent_setns_child_syslog_errno 1 "$(get_field "$out" parent_setns_child_syslog_errno)"
 
 exit $ret
