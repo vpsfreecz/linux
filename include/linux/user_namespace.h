@@ -42,6 +42,7 @@ struct uid_gid_map { /* 64 bytes -- 1 cache line */
 
 struct ucounts;
 struct syslog_namespace;
+struct tracing_namespace;
 
 enum ucount_type {
 	UCOUNT_USER_NAMESPACES,
@@ -103,6 +104,10 @@ struct user_namespace {
 
 	struct syslog_namespace *syslog_ns;
 	bool			syslog_ns_is_owner;
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace	*tracing_ns;
+	bool			tracing_ns_is_owner;
+#endif
 	/* Register of per-UID persistent keyrings for this namespace */
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	struct key		*persistent_keyring_register;

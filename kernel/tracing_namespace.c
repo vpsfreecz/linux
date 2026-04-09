@@ -17,8 +17,8 @@ extern struct ns_tree tracing_ns_tree;
 
 struct tracing_namespace init_tracing_ns = {
 	.user_ns = &init_user_ns,
-	.pid_ns = &init_pid_ns,
-	.syslog_ns = &init_syslog_ns,
+	.pid_ns_id = 0,
+	.syslog_ns_id = 0,
 	.parent = NULL,
 	.ns = {
 		.ns_type = TRACING_NS_TYPE,
@@ -33,7 +33,7 @@ static bool tracing_ns_pid_contains(const struct tracing_namespace *ns,
 				    const struct pid_namespace *pid_ns)
 {
 	while (pid_ns) {
-		if (pid_ns == ns->pid_ns)
+		if (pid_ns->ns.ns_id == ns->pid_ns_id)
 			return true;
 		pid_ns = pid_ns->parent;
 	}
@@ -92,7 +92,7 @@ static bool tracing_ns_syslog_contains(const struct tracing_namespace *ns,
 				       const struct syslog_namespace *syslog_ns)
 {
 	while (syslog_ns) {
-		if (syslog_ns == ns->syslog_ns)
+		if (syslog_ns->ns.ns_id == ns->syslog_ns_id)
 			return true;
 		syslog_ns = syslog_ns->parent;
 	}
@@ -111,10 +111,13 @@ static bool tracing_ns_can_bind_child(const struct tracing_namespace *old_ns,
 	if (user_ns == &init_user_ns || user_ns->parent != &init_user_ns)
 		return false;
 
-	if (pid_ns == old_ns->pid_ns || pid_ns->parent != old_ns->pid_ns)
+	if (pid_ns->ns.ns_id == old_ns->pid_ns_id || !pid_ns->parent ||
+	    pid_ns->parent->ns.ns_id != old_ns->pid_ns_id)
 		return false;
 
-	if (syslog_ns == old_ns->syslog_ns || syslog_ns->parent != old_ns->syslog_ns)
+	if (syslog_ns->ns.ns_id == old_ns->syslog_ns_id ||
+	    !syslog_ns->parent ||
+	    syslog_ns->parent->ns.ns_id != old_ns->syslog_ns_id)
 		return false;
 
 	return true;
@@ -183,20 +186,82 @@ void free_tracing_ns(struct tracing_namespace *ns)
 	if (ns_tree_active(ns))
 		ns_tree_remove(ns);
 
-	pr_notice("tracing_ns: destroy ns=%u user=%u pid=%u syslog=%u\n",
+	pr_notice("tracing_ns: destroy ns=%u user=%u pid=%llu syslog=%llu\n",
 		  ns->ns.inum,
 		  ns->user_ns ? ns->user_ns->ns.inum : 0,
-		  ns->pid_ns ? ns->pid_ns->ns.inum : 0,
-		  ns->syslog_ns ? ns->syslog_ns->ns.inum : 0);
+		  ns->pid_ns_id,
+		  ns->syslog_ns_id);
 
-	put_tracing_ns(ns->parent);
-	put_pid_ns(ns->pid_ns);
-	put_syslog_ns(ns->syslog_ns);
-	put_user_ns(ns->user_ns);
+	put_tracing_ns_structural(ns->parent);
 	ns_common_free(ns);
 	call_rcu(&ns->ns.ns_rcu, delayed_free_tracing_ns);
 }
 EXPORT_SYMBOL_GPL(free_tracing_ns);
+
+int tracing_ns_check_userns_setns(const struct user_namespace *user_ns)
+{
+	struct tracing_namespace *target_ns, *current_ns;
+
+	if (!user_ns)
+		return -EINVAL;
+
+	current_ns = current_tracing_ns();
+	target_ns = user_ns->tracing_ns ? user_ns->tracing_ns : &init_tracing_ns;
+
+	if (target_ns == current_ns)
+		return 0;
+
+	pr_notice("tracing_ns: reject userns setns current=%u target_user=%u target_tracing=%u\n",
+		  current_ns ? current_ns->ns.inum : 0,
+		  user_ns->ns.inum,
+		  target_ns->ns.inum);
+	return -EPERM;
+}
+EXPORT_SYMBOL_GPL(tracing_ns_check_userns_setns);
+
+int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns)
+{
+	struct tracing_namespace *target_ns, *current_ns;
+
+	if (!pid_ns)
+		return -EINVAL;
+
+	current_ns = current_tracing_ns();
+	target_ns = (pid_ns->user_ns && pid_ns->user_ns->tracing_ns) ?
+		pid_ns->user_ns->tracing_ns : &init_tracing_ns;
+
+	if (target_ns == current_ns)
+		return 0;
+
+	pr_notice("tracing_ns: reject pidns setns current=%u target_pid=%u target_tracing=%u\n",
+		  current_ns ? current_ns->ns.inum : 0,
+		  pid_ns->ns.inum,
+		  target_ns->ns.inum);
+	return -EPERM;
+}
+EXPORT_SYMBOL_GPL(tracing_ns_check_pidns_setns);
+
+int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns)
+{
+	struct tracing_namespace *target_ns, *current_ns;
+
+	if (!syslog_ns)
+		return -EINVAL;
+
+	current_ns = current_tracing_ns();
+	target_ns = (syslog_ns->user_ns && syslog_ns->user_ns->tracing_ns) ?
+		syslog_ns->user_ns->tracing_ns : &init_tracing_ns;
+
+	if (target_ns == current_ns)
+		return 0;
+
+	pr_notice("tracing_ns: reject syslogns setns current=%u target_syslog=%u target_tracing=%u\n",
+		  current_ns ? current_ns->ns.inum : 0,
+		  syslog_ns->ns.inum,
+		  target_ns->ns.inum);
+	return -EPERM;
+}
+EXPORT_SYMBOL_GPL(tracing_ns_check_syslogns_setns);
 
 static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns,
 						  struct pid_namespace *pid_ns,
@@ -215,21 +280,42 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 		goto fail_free;
 
 	ns->user_ns = get_user_ns(user_ns);
-	ns->pid_ns = get_pid_ns(pid_ns);
-	ns->syslog_ns = get_syslog_ns(syslog_ns);
-	ns->parent = get_tracing_ns(old_ns);
+	ns->pid_ns_id = pid_ns->ns.ns_id;
+	ns->syslog_ns_id = syslog_ns->ns.ns_id;
+	ns->parent = get_tracing_ns_structural(old_ns);
+
+	/*
+	 * A freshly created child user namespace inherits its parent's effective
+	 * tracing namespace in create_user_ns(). When the same clone/unshare also
+	 * creates a child tracing namespace, retarget the new userns default here
+	 * so future userns descendants and setns checks resolve to the child
+	 * tracing boundary rather than the inherited init one.
+	 */
+	if (user_ns != current_user_ns() && user_ns->tracing_ns == old_ns) {
+		if (WARN_ON_ONCE(user_ns->tracing_ns_is_owner)) {
+			err = -EINVAL;
+			goto fail_refs;
+		}
+		put_tracing_ns(user_ns->tracing_ns);
+		user_ns->tracing_ns = get_tracing_ns_structural(ns);
+		user_ns->tracing_ns_is_owner = true;
+	}
 
 	__ns_tree_add(&ns->ns, &tracing_ns_tree);
 
-	pr_notice("tracing_ns: create ns=%u parent=%u user=%u pid=%u syslog=%u\n",
+	pr_notice("tracing_ns: create ns=%u parent=%u user=%u pid=%llu syslog=%llu\n",
 		  ns->ns.inum,
 		  old_ns ? old_ns->ns.inum : 0,
 		  user_ns->ns.inum,
-		  pid_ns->ns.inum,
-		  syslog_ns->ns.inum);
+		  ns->pid_ns_id,
+		  ns->syslog_ns_id);
 
 	return ns;
 
+fail_refs:
+	put_tracing_ns_structural(ns->parent);
+	put_user_ns(ns->user_ns);
+	ns_common_free(ns);
 fail_free:
 	kfree(ns);
 	return ERR_PTR(err);
@@ -328,8 +414,15 @@ EXPORT_SYMBOL_GPL(tracingns_operations);
 
 int setup_tracing_namespace(struct tracing_namespace *ns)
 {
-	if (ns == &init_tracing_ns)
+	if (ns == &init_tracing_ns) {
+		if (WARN_ON_ONCE(!init_pid_ns.ns.ns_id ||
+				 !init_syslog_ns.ns.ns_id))
+			return -EINVAL;
+
+		ns->pid_ns_id = init_pid_ns.ns.ns_id;
+		ns->syslog_ns_id = init_syslog_ns.ns.ns_id;
 		__ns_tree_add(&ns->ns, &tracing_ns_tree);
+	}
 
 	return 0;
 }
@@ -339,4 +432,4 @@ static int __init tracing_namespaces_init(void)
 {
 	return setup_tracing_namespace(&init_tracing_ns);
 }
-subsys_initcall(tracing_namespaces_init);
+late_initcall(tracing_namespaces_init);
