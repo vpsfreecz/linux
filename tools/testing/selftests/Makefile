@@ -322,3 +322,5 @@ clean:
 	done;
 
 .PHONY: all run_tests hotplug run_hotplug clean_hotplug run_pstore_crash install clean gen_tar
+
+TARGETS += vpsadminos
