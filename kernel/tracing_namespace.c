@@ -53,6 +53,18 @@ static bool tracing_ns_user_contains(const struct tracing_namespace *ns,
 	return false;
 }
 
+static bool tracing_ns_syslog_contains(const struct tracing_namespace *ns,
+				       const struct syslog_namespace *syslog_ns)
+{
+	while (syslog_ns) {
+		if (syslog_ns == ns->syslog_ns)
+			return true;
+		syslog_ns = syslog_ns->parent;
+	}
+
+	return false;
+}
+
 static bool tracing_ns_can_bind_child(const struct tracing_namespace *old_ns,
 			      const struct user_namespace *user_ns,
 			      const struct pid_namespace *pid_ns,
@@ -87,7 +99,7 @@ bool tracing_ns_matches_task(const struct tracing_namespace *ns,
 	nsproxy = task->nsproxy;
 	cred = __task_cred(task);
 	if (nsproxy && cred && nsproxy->tracing_ns == ns &&
-	    nsproxy->syslog_ns == ns->syslog_ns)
+	    tracing_ns_syslog_contains(ns, nsproxy->syslog_ns))
 		match = tracing_ns_pid_contains(ns,
 				task_active_pid_ns((struct task_struct *)task)) &&
 			tracing_ns_user_contains(ns, cred->user_ns);
