@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/err.h>
+#include <linux/cred.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/nstree.h>
@@ -40,10 +41,43 @@ static bool tracing_ns_pid_contains(const struct tracing_namespace *ns,
 	return false;
 }
 
+static bool tracing_ns_user_contains(const struct tracing_namespace *ns,
+				     const struct user_namespace *user_ns)
+{
+	while (user_ns) {
+		if (user_ns == ns->user_ns)
+			return true;
+		user_ns = user_ns->parent;
+	}
+
+	return false;
+}
+
+static bool tracing_ns_can_bind_child(const struct tracing_namespace *old_ns,
+			      const struct user_namespace *user_ns,
+			      const struct pid_namespace *pid_ns,
+			      const struct syslog_namespace *syslog_ns)
+{
+	if (!user_ns || !pid_ns || !syslog_ns)
+		return false;
+
+	if (user_ns == &init_user_ns || user_ns->parent != &init_user_ns)
+		return false;
+
+	if (pid_ns == old_ns->pid_ns || pid_ns->parent != old_ns->pid_ns)
+		return false;
+
+	if (syslog_ns == old_ns->syslog_ns || syslog_ns->parent != old_ns->syslog_ns)
+		return false;
+
+	return true;
+}
+
 bool tracing_ns_matches_task(const struct tracing_namespace *ns,
 			    const struct task_struct *task)
 {
 	struct nsproxy *nsproxy;
+	const struct cred *cred;
 	bool match = false;
 
 	if (!ns || !task)
@@ -51,9 +85,12 @@ bool tracing_ns_matches_task(const struct tracing_namespace *ns,
 
 	rcu_read_lock();
 	nsproxy = task->nsproxy;
-	if (nsproxy && nsproxy->tracing_ns == ns)
+	cred = __task_cred(task);
+	if (nsproxy && cred && nsproxy->tracing_ns == ns &&
+	    nsproxy->syslog_ns == ns->syslog_ns)
 		match = tracing_ns_pid_contains(ns,
-				task_active_pid_ns((struct task_struct *)task));
+				task_active_pid_ns((struct task_struct *)task)) &&
+			tracing_ns_user_contains(ns, cred->user_ns);
 	rcu_read_unlock();
 
 	return match;
@@ -149,11 +186,11 @@ struct tracing_namespace *copy_tracing_ns(bool new_child,
 		return get_tracing_ns(old_ns);
 	}
 
-	if (user_ns == &init_user_ns || user_ns->parent != &init_user_ns)
+	if (!tracing_ns_can_bind_child(old_ns, user_ns, pid_ns, syslog_ns)) {
+		pr_notice("tracing_ns: skipped child bind on incomplete boundary user=%u pid=%u syslog=%u old=%u\n",
+		  user_ns->ns.inum, pid_ns->ns.inum, syslog_ns->ns.inum, old_ns->ns.inum);
 		return get_tracing_ns(old_ns);
-
-	if (syslog_ns == old_ns->syslog_ns)
-		return get_tracing_ns(old_ns);
+	}
 
 	return clone_tracing_ns(user_ns, pid_ns, syslog_ns, old_ns);
 }
