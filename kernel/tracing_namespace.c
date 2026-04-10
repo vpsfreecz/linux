@@ -209,6 +209,30 @@ int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns)
 }
 EXPORT_SYMBOL_GPL(tracing_ns_check_pidns_setns);
 
+int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns)
+{
+	struct tracing_namespace *target_ns, *current_ns;
+
+	if (!syslog_ns)
+		return -EINVAL;
+
+	current_ns = current_tracing_ns();
+	target_ns = (syslog_ns->user_ns && syslog_ns->user_ns->tracing_ns) ?
+		syslog_ns->user_ns->tracing_ns : &init_tracing_ns;
+
+	if (target_ns == current_ns)
+		return 0;
+
+	pr_notice("tracing_ns: reject syslogns setns current=%u target_syslog=%u target_tracing=%u\n",
+		  current_ns ? current_ns->ns.inum : 0,
+		  syslog_ns->ns.inum,
+		  target_ns->ns.inum);
+	tracing_ns_audit("reject_syslogns_setns", target_ns, current_ns,
+			 syslog_ns->user_ns, NULL, syslog_ns, -EPERM);
+	return -EPERM;
+}
+EXPORT_SYMBOL_GPL(tracing_ns_check_syslogns_setns);
+
 static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns,
 					  struct pid_namespace *pid_ns,
 					  struct syslog_namespace *syslog_ns,
