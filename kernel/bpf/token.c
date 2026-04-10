@@ -44,6 +44,20 @@ bool bpf_token_task_match(const struct bpf_token *token,
 	return tracing_ns_matches_task(token->tracing_ns, task);
 }
 
+static bool bpf_token_current_container_member(void)
+{
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
+
+	if (!tns || tns == &init_tracing_ns)
+		return false;
+
+	return tracing_ns_matches_task(tns, current);
+#else
+	return false;
+#endif
+}
+
 /*
  * Container tracing authority is anchored to the user namespace that owns the
  * tracing boundary. A nested user namespace inside the same tracing guest must
@@ -55,9 +69,7 @@ static struct user_namespace *bpf_token_current_container_userns(void)
 #ifdef CONFIG_TRACING_NS
 	struct tracing_namespace *tns = current_tracing_ns();
 
-	if (!tns || tns == &init_tracing_ns)
-		return NULL;
-	if (!tracing_ns_matches_task(tns, current))
+	if (!bpf_token_current_container_member())
 		return NULL;
 
 	return tns->user_ns;
@@ -77,14 +89,18 @@ bool bpf_token_current_container_capable(int cap)
 	return bpf_ns_capable(userns, cap);
 }
 
+/*
+ * Symbol discovery is a tracing-boundary property, not a capability-only one.
+ * Tasks inside the same tracing guest must not fall back to broader host-side
+ * discovery surfaces merely because they dropped tracing caps or entered a
+ * nested user namespace.
+ */
 bool bpf_token_current_restrict_tracing_symbols(void)
 {
 	if (!sysctl_bpf_container_tracing_enabled)
 		return false;
 
-	return bpf_token_current_container_capable(CAP_BPF) ||
-	       bpf_token_current_container_capable(CAP_PERFMON) ||
-	       bpf_token_current_container_capable(CAP_SYS_ADMIN);
+	return bpf_token_current_container_member();
 }
 
 static bool bpf_token_allow_syscall_symbol(const char *name, const char *syscall)
