@@ -24,6 +24,7 @@
 #include <linux/sched/signal.h>
 #include <linux/idr.h>
 #include <linux/nstree.h>
+#include <linux/tracing_namespace.h>
 #include <uapi/linux/wait.h>
 #include "pid_sysctl.h"
 
@@ -403,6 +404,7 @@ static int pidns_install(struct nsset *nsset, struct ns_common *ns)
 	struct nsproxy *nsproxy = nsset->nsproxy;
 	struct pid_namespace *active = task_active_pid_ns(current);
 	struct pid_namespace *new = to_pid_ns(ns);
+	int ret;
 
 	if (!ns_capable(new->user_ns, CAP_SYS_ADMIN) ||
 	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
@@ -418,6 +420,10 @@ static int pidns_install(struct nsset *nsset, struct ns_common *ns)
 	 */
 	if (!pidns_is_ancestor(new, active))
 		return -EINVAL;
+
+	ret = tracing_ns_check_pidns_setns(new);
+	if (ret)
+		return ret;
 
 	put_pid_ns(nsproxy->pid_ns_for_children);
 	nsproxy->pid_ns_for_children = get_pid_ns(new);
