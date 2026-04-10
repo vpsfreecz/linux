@@ -19,6 +19,8 @@ struct tracing_namespace {
 	struct user_namespace		*user_ns;
 	u64				 pid_ns_id;
 	u64				 syslog_ns_id;
+	u32				 pid_ns_inum;
+	u32				 syslog_ns_inum;
 	struct ns_common		 ns;
 	struct tracing_namespace	*parent;
 };

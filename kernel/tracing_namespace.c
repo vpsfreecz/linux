@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/err.h>
+#include <linux/audit.h>
 #include <linux/cred.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -19,6 +20,8 @@ struct tracing_namespace init_tracing_ns = {
 	.user_ns = &init_user_ns,
 	.pid_ns_id = 0,
 	.syslog_ns_id = 0,
+	.pid_ns_inum = PID_NS_INIT_INO,
+	.syslog_ns_inum = PROC_SYSLOG_INIT_INO,
 	.parent = NULL,
 	.ns = {
 		.ns_type = TRACING_NS_TYPE,
@@ -28,6 +31,26 @@ struct tracing_namespace init_tracing_ns = {
 	},
 };
 EXPORT_SYMBOL_GPL(init_tracing_ns);
+
+static void tracing_ns_audit(const char *op,
+			     const struct tracing_namespace *ns,
+			     const struct tracing_namespace *parent,
+			     const struct user_namespace *user_ns,
+			     u32 pid_ns_inum, u32 syslog_ns_inum,
+			     int res)
+{
+	struct audit_buffer *ab;
+
+	ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_KERNEL);
+	audit_log_format(ab,
+			 "op=tracing_ns_%s tracing_ns=%u parent=%u user_ns=%u",
+			 op, ns ? ns->ns.inum : 0,
+			 parent ? parent->ns.inum : 0,
+			 user_ns ? user_ns->ns.inum : 0);
+	audit_log_format(ab, " pid_ns=%u syslog_ns=%u res=%d",
+			 pid_ns_inum, syslog_ns_inum, res);
+	audit_log_end(ab);
+}
 
 static bool tracing_ns_pid_contains(const struct tracing_namespace *ns,
 				    const struct pid_namespace *pid_ns)
@@ -186,11 +209,13 @@ void free_tracing_ns(struct tracing_namespace *ns)
 	if (ns_tree_active(ns))
 		ns_tree_remove(ns);
 
-	pr_notice("tracing_ns: destroy ns=%u user=%u pid=%llu syslog=%llu\n",
+	pr_notice("tracing_ns: destroy ns=%u user=%u pid=%u syslog=%u\n",
 		  ns->ns.inum,
 		  ns->user_ns ? ns->user_ns->ns.inum : 0,
-		  ns->pid_ns_id,
-		  ns->syslog_ns_id);
+		  ns->pid_ns_inum,
+		  ns->syslog_ns_inum);
+	tracing_ns_audit("destroy", ns, ns->parent, ns->user_ns,
+			 ns->pid_ns_inum, ns->syslog_ns_inum, 1);
 
 	put_tracing_ns_structural(ns->parent);
 	ns_common_free(ns);
@@ -215,6 +240,8 @@ int tracing_ns_check_userns_setns(const struct user_namespace *user_ns)
 		  current_ns ? current_ns->ns.inum : 0,
 		  user_ns->ns.inum,
 		  target_ns->ns.inum);
+	tracing_ns_audit("reject_userns_setns", target_ns, current_ns, user_ns,
+			 0, 0, -EPERM);
 	return -EPERM;
 }
 EXPORT_SYMBOL_GPL(tracing_ns_check_userns_setns);
@@ -237,6 +264,8 @@ int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns)
 		  current_ns ? current_ns->ns.inum : 0,
 		  pid_ns->ns.inum,
 		  target_ns->ns.inum);
+	tracing_ns_audit("reject_pidns_setns", target_ns, current_ns,
+			 pid_ns->user_ns, pid_ns->ns.inum, 0, -EPERM);
 	return -EPERM;
 }
 EXPORT_SYMBOL_GPL(tracing_ns_check_pidns_setns);
@@ -259,6 +288,8 @@ int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns)
 		  current_ns ? current_ns->ns.inum : 0,
 		  syslog_ns->ns.inum,
 		  target_ns->ns.inum);
+	tracing_ns_audit("reject_syslogns_setns", target_ns, current_ns,
+			 syslog_ns->user_ns, 0, syslog_ns->ns.inum, -EPERM);
 	return -EPERM;
 }
 EXPORT_SYMBOL_GPL(tracing_ns_check_syslogns_setns);
@@ -282,6 +313,8 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 	ns->user_ns = get_user_ns(user_ns);
 	ns->pid_ns_id = pid_ns->ns.ns_id;
 	ns->syslog_ns_id = syslog_ns->ns.ns_id;
+	ns->pid_ns_inum = pid_ns->ns.inum;
+	ns->syslog_ns_inum = syslog_ns->ns.inum;
 	ns->parent = get_tracing_ns_structural(old_ns);
 
 	/*
@@ -309,6 +342,8 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 		  user_ns->ns.inum,
 		  ns->pid_ns_id,
 		  ns->syslog_ns_id);
+	tracing_ns_audit("create", ns, old_ns, user_ns, pid_ns->ns.inum,
+			 syslog_ns->ns.inum, 1);
 
 	return ns;
 
@@ -340,6 +375,9 @@ struct tracing_namespace *copy_tracing_ns(bool new_child,
 		pr_notice("tracing_ns: reject nested create request ns=%u user=%u pid=%u syslog=%u\n",
 			  old_ns->ns.inum, user_ns->ns.inum,
 			  pid_ns->ns.inum, syslog_ns->ns.inum);
+		tracing_ns_audit("reject_nested_create", old_ns, old_ns->parent,
+				 user_ns, pid_ns->ns.inum,
+				 syslog_ns->ns.inum, -EPERM);
 		return ERR_PTR(-EPERM);
 	}
 
@@ -347,6 +385,9 @@ struct tracing_namespace *copy_tracing_ns(bool new_child,
 		pr_notice("tracing_ns: reject create on incomplete boundary user=%u pid=%u syslog=%u old=%u\n",
 			  user_ns->ns.inum, pid_ns->ns.inum,
 			  syslog_ns->ns.inum, old_ns->ns.inum);
+		tracing_ns_audit("reject_incomplete_create", old_ns, old_ns->parent,
+				 user_ns, pid_ns->ns.inum,
+				 syslog_ns->ns.inum, -EINVAL);
 		return ERR_PTR(-EINVAL);
 	}
 
@@ -384,6 +425,12 @@ static int tracingns_install(struct nsset *nsset, struct ns_common *new)
 	if (nsproxy->tracing_ns == ns)
 		return 0;
 
+	pr_notice("tracing_ns: reject direct setns current=%u target=%u\n",
+		  nsproxy->tracing_ns ? nsproxy->tracing_ns->ns.inum : 0,
+		  ns->ns.inum);
+	tracing_ns_audit("reject_direct_setns", ns, nsproxy->tracing_ns,
+			 ns->user_ns, ns->pid_ns_inum, ns->syslog_ns_inum,
+			 -EPERM);
 	return -EPERM;
 }
 
