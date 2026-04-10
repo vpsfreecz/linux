@@ -45,7 +45,7 @@ bool bpf_token_task_match(const struct bpf_token *token,
 	return tracing_ns_matches_task(token->tracing_ns, task);
 }
 
-static bool bpf_token_current_container_active(void)
+static bool bpf_token_current_container_member(void)
 {
 #ifdef CONFIG_TRACING_NS
 	struct tracing_namespace *tns = current_tracing_ns();
@@ -59,22 +59,49 @@ static bool bpf_token_current_container_active(void)
 #endif
 }
 
-bool bpf_token_current_container_capable(int cap)
+/*
+ * Container tracing authority is anchored to the user namespace that owns the
+ * tracing boundary. A nested user namespace inside the same tracing guest must
+ * not regain tracing privileges solely by becoming capable in that nested
+ * namespace.
+ */
+static struct user_namespace *bpf_token_current_container_userns(void)
 {
-	if (!bpf_token_current_container_active())
-		return false;
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
 
-	return bpf_ns_capable(current_user_ns(), cap);
+	if (!bpf_token_current_container_member())
+		return NULL;
+
+	return tns->user_ns;
+#else
+	return NULL;
+#endif
 }
 
+bool bpf_token_current_container_capable(int cap)
+{
+	struct user_namespace *userns;
+
+	userns = bpf_token_current_container_userns();
+	if (!userns)
+		return false;
+
+	return bpf_ns_capable(userns, cap);
+}
+
+/*
+ * Symbol discovery is a tracing-boundary property, not a capability-only one.
+ * Tasks inside the same tracing guest must not fall back to broader host-side
+ * discovery surfaces merely because they dropped tracing caps or entered a
+ * nested user namespace.
+ */
 bool bpf_token_current_restrict_tracing_symbols(void)
 {
 	if (!sysctl_bpf_container_tracing_enabled)
 		return false;
 
-	return bpf_token_current_container_capable(CAP_BPF) ||
-	       bpf_token_current_container_capable(CAP_PERFMON) ||
-	       bpf_token_current_container_capable(CAP_SYS_ADMIN);
+	return bpf_token_current_container_member();
 }
 
 static bool bpf_token_allow_syscall_symbol(const char *name, const char *syscall)
@@ -194,6 +221,7 @@ static bool bpf_token_allow_container_symbol_discovery_name(const char *name)
 static struct bpf_token *bpf_token_alloc_current_container(void)
 {
 	struct bpf_token *token;
+	struct user_namespace *userns;
 #ifdef CONFIG_TRACING_NS
 	struct tracing_namespace *tns = current_tracing_ns();
 #else
@@ -205,7 +233,8 @@ static struct bpf_token *bpf_token_alloc_current_container(void)
 	    !bpf_token_current_container_capable(CAP_SYS_ADMIN) &&
 	    !bpf_token_current_container_capable(CAP_NET_ADMIN))
 		return NULL;
-	if (!tns)
+	userns = bpf_token_current_container_userns();
+	if (!tns || !userns)
 		return NULL;
 
 	token = kzalloc(sizeof(*token), GFP_KERNEL);
@@ -214,7 +243,7 @@ static struct bpf_token *bpf_token_alloc_current_container(void)
 
 	atomic64_set(&token->refcnt, 1);
 	token->flags = BPF_TOKEN_F_CONTAINER | BPF_TOKEN_F_INTERNAL;
-	token->userns = get_user_ns(current_user_ns());
+	token->userns = get_user_ns(userns);
 	token->tracing_ns = get_tracing_ns(tns);
 
 	return token;
