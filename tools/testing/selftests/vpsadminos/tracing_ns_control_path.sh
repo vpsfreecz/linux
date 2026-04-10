@@ -94,4 +94,10 @@ out="$($helper --syslog-name traceE --tracing --parent-setns-child-pid)" || {
 }
 check_eq parent_setns_child_pid_errno 1 "$(get_field "$out" parent_setns_child_pid_errno)"
 
+out="$($helper --syslog-name traceF --tracing --parent-setns-child-syslog)" || {
+	echo "not ok: helper failed in parent-syslogns-setns case" >&2
+	exit 1
+}
+check_eq parent_setns_child_syslog_errno 1 "$(get_field "$out" parent_setns_child_syslog_errno)"
+
 exit $ret
