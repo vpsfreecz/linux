@@ -151,6 +151,11 @@ static int probe_syslogns_setns_errno(pid_t pid)
 	return probe_ns_setns_errno(pid, "syslog", 0);
 }
 
+static int noop_child_main(void *arg)
+{
+	return 0;
+}
+
 static int nested_child_main(void *arg)
 {
 	struct child_cfg *cfg = arg;
@@ -268,6 +273,7 @@ int main(int argc, char **argv)
 	bool parent_setns_child_user = false;
 	bool parent_setns_child_pid = false;
 	bool parent_setns_child_syslog = false;
+	bool retry_after_failed_first_clone = false;
 	const char *syslog_name = NULL;
 	const char *nested_syslog_name = NULL;
 	char *stack;
@@ -302,6 +308,8 @@ int main(int argc, char **argv)
 			parent_setns_child_pid = true;
 		} else if (!strcmp(argv[i], "--parent-setns-child-syslog")) {
 			parent_setns_child_syslog = true;
+		} else if (!strcmp(argv[i], "--retry-after-failed-first-clone")) {
+			retry_after_failed_first_clone = true;
 		} else if (!strcmp(argv[i], "--nested-syslog-name")) {
 			if (i + 1 >= argc) {
 				fprintf(stderr, "missing argument for --nested-syslog-name\n");
@@ -332,6 +340,28 @@ int main(int argc, char **argv)
 			perror("SYSLOG_ACTION_NEW_TRACING_NS");
 			return 1;
 		}
+	}
+
+	if (retry_after_failed_first_clone) {
+		stack = malloc(STACK_SIZE);
+		if (!stack) {
+			perror("malloc");
+			return 1;
+		}
+
+		pid = clone(noop_child_main, stack + STACK_SIZE,
+			    SIGCHLD | CLONE_NEWUSER, NULL);
+		if (pid < 0) {
+			dprintf(STDOUT_FILENO, "first_clone_errno=%d\n", errno);
+		} else {
+			dprintf(STDOUT_FILENO, "first_clone_errno=0\n");
+			if (waitpid(pid, &status, 0) < 0) {
+				perror("waitpid");
+				free(stack);
+				return 1;
+			}
+		}
+		free(stack);
 	}
 
 	need_parent_probe = parent_setns_child_user || parent_setns_child_pid ||
