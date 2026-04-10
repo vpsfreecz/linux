@@ -100,4 +100,16 @@ out="$($helper --syslog-name traceF --tracing --parent-setns-child-syslog)" || {
 }
 check_eq parent_setns_child_syslog_errno 1 "$(get_field "$out" parent_setns_child_syslog_errno)"
 
+out="$($helper --syslog-name traceG --tracing --retry-after-failed-first-clone)" || {
+	echo "not ok: helper failed in pending-request-retry case" >&2
+	exit 1
+}
+check_eq first_clone_errno 22 "$(get_field "$out" first_clone_errno)"
+check_ne retry_preserves_syslog_request \
+	"$(get_field "$out" parent_syslog)" \
+	"$(get_field "$out" child_syslog)"
+check_ne retry_preserves_tracing_request \
+	"$(get_field "$out" parent_tracing)" \
+	"$(get_field "$out" child_tracing)"
+
 exit $ret
