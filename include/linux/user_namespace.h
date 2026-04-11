@@ -41,6 +41,7 @@ struct uid_gid_map { /* 64 bytes -- 1 cache line */
 #define USERNS_INIT_FLAGS USERNS_SETGROUPS_ALLOWED
 
 struct ucounts;
+struct syslog_namespace;
 
 enum ucount_type {
 	UCOUNT_USER_NAMESPACES,
@@ -51,6 +52,7 @@ enum ucount_type {
 	UCOUNT_MNT_NAMESPACES,
 	UCOUNT_CGROUP_NAMESPACES,
 	UCOUNT_TIME_NAMESPACES,
+	UCOUNT_SYSLOG_NAMESPACES,
 #ifdef CONFIG_INOTIFY_USER
 	UCOUNT_INOTIFY_INSTANCES,
 	UCOUNT_INOTIFY_WATCHES,
@@ -99,6 +101,8 @@ struct user_namespace {
 	struct rw_semaphore	keyring_sem;
 #endif
 
+	struct syslog_namespace *syslog_ns;
+	bool			syslog_ns_is_owner;
 	/* Register of per-UID persistent keyrings for this namespace */
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	struct key		*persistent_keyring_register;
