@@ -7132,6 +7132,13 @@ void *krealloc_node_align_noprof(const void *p, size_t new_size, unsigned long a
 }
 EXPORT_SYMBOL(krealloc_node_align_noprof);
 
+enum {
+	KVMALLOC_NORECLAIM = 1,
+	KVMALLOC_NORECLAIM_ALWAYS_WAKE_KSWAPD = 2,
+};
+
+int kvmalloc_noreclaim __read_mostly;
+
 static gfp_t kmalloc_gfp_adjust(gfp_t flags, size_t size)
 {
 	/*
@@ -7146,8 +7153,19 @@ static gfp_t kmalloc_gfp_adjust(gfp_t flags, size_t size)
 	if (size > PAGE_SIZE) {
 		flags |= __GFP_NOWARN;
 
-		if (!(flags & __GFP_RETRY_MAYFAIL))
+		switch (READ_ONCE(kvmalloc_noreclaim)) {
+		case KVMALLOC_NORECLAIM_ALWAYS_WAKE_KSWAPD:
+			if (flags & __GFP_DIRECT_RECLAIM)
+				flags |= __GFP_KSWAPD_RECLAIM;
+			fallthrough;
+		case KVMALLOC_NORECLAIM:
 			flags &= ~__GFP_DIRECT_RECLAIM;
+			break;
+		default:
+			if (!(flags & __GFP_RETRY_MAYFAIL))
+				flags &= ~__GFP_DIRECT_RECLAIM;
+			break;
+		}
 
 		/* nofail semantic is implemented by the vmalloc fallback */
 		flags &= ~__GFP_NOFAIL;

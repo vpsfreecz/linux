@@ -17,6 +17,7 @@
 #include <linux/limits.h>
 #include <linux/syscalls.h>
 #include <linux/capability.h>
+#include <linux/slab.h>
 
 #include "../lib/kstrtox.h"
 
@@ -1466,6 +1467,15 @@ static const struct ctl_table sysctl_subsys_table[] = {
 		.extra2		= SYSCTL_ONE,
 	},
 #endif
+	{
+		.procname	= "kvmalloc_noreclaim",
+		.data		= &kvmalloc_noreclaim,
+		.maxlen		= sizeof(kvmalloc_noreclaim),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO,
+	},
 	{
 		.procname	= "ngroups_max",
 		.data		= (void *)&ngroups_max,
