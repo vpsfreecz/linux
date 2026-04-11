@@ -6,6 +6,8 @@
 #include <linux/kernel.h>
 #include <linux/kernfs.h>
 #include <linux/memcontrol.h>
+#include <linux/proc_fs.h>
+#include <linux/sysfs.h>
 #include <linux/module.h>
 #include <linux/kobject.h>
 #include <linux/mutex.h>
@@ -17,6 +19,28 @@
 #include <linux/vmstat.h>
 
 #include <asm/page.h>
+
+struct proc_dir_entry *proc_vpsadminos;
+
+static int __init vpsadminos_init(void)
+{
+	struct proc_dir_entry *proc_root;
+	int ret;
+
+	ret = sysfs_create_mount_point(fs_kobj, "vpsadminos");
+	if (ret)
+		return ret;
+
+	proc_root = proc_mkdir("vpsadminos", NULL);
+	if (!proc_root) {
+		sysfs_remove_mount_point(fs_kobj, "vpsadminos");
+		return -ENOMEM;
+	}
+
+	proc_vpsadminos = proc_root;
+	return 0;
+}
+fs_initcall(vpsadminos_init);
 
 #ifdef CONFIG_MEMCG
 unsigned long vpsadminos_memcg_swap_limit(struct mem_cgroup *memcg)
