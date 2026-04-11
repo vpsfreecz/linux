@@ -8,6 +8,7 @@
 #include <linux/jiffies.h>
 #include <asm/prctl.h>
 #include <linux/proc_fs.h>
+#include <linux/vpsadminos.h>
 
 #include "cpu.h"
 
@@ -231,6 +232,15 @@ direct:
 
 static void *c_start(struct seq_file *m, loff_t *pos)
 {
+	struct cpumask fake_mask;
+
+	if (fake_online_cpumask(current, &fake_mask)) {
+		*pos = cpumask_next(*pos - 1, &fake_mask);
+		if (*pos < nr_cpu_ids)
+			return &cpu_data(*pos);
+		return NULL;
+	}
+
 	*pos = cpumask_next(*pos - 1, cpu_online_mask);
 	if ((*pos) < nr_cpu_ids)
 		return &cpu_data(*pos);
