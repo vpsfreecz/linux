@@ -15,6 +15,7 @@
 #include <linux/syscalls.h>
 #include <linux/types.h>
 #include <linux/lsm_hooks.h>
+#include <linux/lsm_namespace.h>
 #include <uapi/linux/lsm.h>
 
 /**
@@ -96,8 +97,9 @@ SYSCALL_DEFINE4(lsm_get_self_attr, unsigned int, attr, struct lsm_ctx __user *,
 SYSCALL_DEFINE3(lsm_list_modules, u64 __user *, ids, u32 __user *, size,
 		u32, flags)
 {
-	u32 total_size = lsm_active_cnt * sizeof(*ids);
+	u32 total_size = 0;
 	u32 usize;
+	int count = 0;
 	int i;
 
 	if (flags)
@@ -106,15 +108,23 @@ SYSCALL_DEFINE3(lsm_list_modules, u64 __user *, ids, u32 __user *, size,
 	if (get_user(usize, size))
 		return -EFAULT;
 
+	for (i = 0; i < lsm_active_cnt; i++)
+		if (lsm_ns_visible_lsmid(lsm_idlist[i]->id))
+			total_size += sizeof(*ids);
+
 	if (put_user(total_size, size) != 0)
 		return -EFAULT;
 
 	if (usize < total_size)
 		return -E2BIG;
 
-	for (i = 0; i < lsm_active_cnt; i++)
+	for (i = 0; i < lsm_active_cnt; i++) {
+		if (!lsm_ns_visible_lsmid(lsm_idlist[i]->id))
+			continue;
 		if (put_user(lsm_idlist[i]->id, ids++))
 			return -EFAULT;
+		count++;
+	}
 
-	return lsm_active_cnt;
+	return count;
 }
