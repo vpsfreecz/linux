@@ -930,6 +930,8 @@ struct task_struct {
 	bool				set_fake_cpu_mask;
 	cpumask_t			fake_cpu_mask;
 
+	struct cgroup_namespace *sched_contributed_to_load;
+
 #ifdef CONFIG_PREEMPT_RCU
 	int				rcu_read_lock_nesting;
 	union rcu_special		rcu_read_unlock_special;
@@ -2305,6 +2307,17 @@ static inline int sched_core_idle_cpu(int cpu) { return idle_cpu(cpu); }
 #endif
 
 extern void sched_set_stop_task(int cpu, struct task_struct *stop);
+extern void cgns_calc_avenrun(void);
+
+struct cgroup_namespace;
+int get_avenrun_fake(struct task_struct *p, unsigned long *loads,
+		     unsigned long offset, int shift);
+unsigned long cgroup_ns_nr_running(struct task_struct *p);
+void cgroup_ns_track_loadavg(struct cgroup_namespace *ns);
+void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns);
+void inc_cgns_nr_threads(struct task_struct *p);
+void dec_cgns_nr_threads(struct task_struct *p);
+unsigned long cgroup_ns_nr_threads(struct task_struct *p);
 
 #ifdef CONFIG_MEM_ALLOC_PROFILING
 static __always_inline struct alloc_tag *alloc_tag_save(struct alloc_tag *tag)
