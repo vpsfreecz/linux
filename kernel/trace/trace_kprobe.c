@@ -11,6 +11,7 @@
 #include <linux/cleanup.h>
 #include <linux/error-injection.h>
 #include <linux/module.h>
+#include <linux/tracing_namespace.h>
 #include <linux/rculist.h>
 #include <linux/security.h>
 #include <linux/uaccess.h>
@@ -1337,6 +1338,8 @@ static int probes_open(struct inode *inode, struct file *file)
 	ret = security_locked_down(LOCKDOWN_TRACEFS);
 	if (ret)
 		return ret;
+	if (tracing_ns_current_is_guest())
+		return -EACCES;
 
 	if ((file->f_mode & FMODE_WRITE) && (file->f_flags & O_TRUNC)) {
 		ret = dyn_events_release_all(&trace_kprobe_ops);
@@ -1350,8 +1353,11 @@ static int probes_open(struct inode *inode, struct file *file)
 static ssize_t probes_write(struct file *file, const char __user *buffer,
 			    size_t count, loff_t *ppos)
 {
+	if (tracing_ns_current_is_guest())
+		return -EACCES;
+
 	return trace_parse_run_command(file, buffer, count, ppos,
-				       create_or_delete_trace_kprobe);
+			       create_or_delete_trace_kprobe);
 }
 
 static const struct file_operations kprobe_events_ops = {

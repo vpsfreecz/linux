@@ -11,6 +11,7 @@
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/tracefs.h>
+#include <linux/tracing_namespace.h>
 
 #include "trace.h"
 #include "trace_output.h"	/* for trace_event_sem */
@@ -233,6 +234,8 @@ static int dyn_event_open(struct inode *inode, struct file *file)
 	ret = security_locked_down(LOCKDOWN_TRACEFS);
 	if (ret)
 		return ret;
+	if ((file->f_mode & FMODE_WRITE) && tracing_ns_current_is_guest())
+		return -EACCES;
 
 	ret = tracing_check_open_get_tr(NULL);
 	if (ret)
@@ -250,6 +253,9 @@ static int dyn_event_open(struct inode *inode, struct file *file)
 static ssize_t dyn_event_write(struct file *file, const char __user *buffer,
 				size_t count, loff_t *ppos)
 {
+	if (tracing_ns_current_is_guest())
+		return -EACCES;
+
 	return trace_parse_run_command(file, buffer, count, ppos,
 				       create_dyn_event);
 }
