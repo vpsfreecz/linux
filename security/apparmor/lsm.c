@@ -2255,7 +2255,7 @@ static bool aa_lsmns_valid_name(const char *name)
 }
 
 static int aa_lsmns_name(const struct lsm_namespace *ns,
-			 struct lsm_ctx *ctx,
+			 const struct lsm_ctx *ctx,
 			 char *name, size_t size)
 {
 	const char *ctx_name = (const char *)ctx->ctx;
@@ -2291,7 +2291,43 @@ static void aa_lsmns_drop_child(struct aa_ns *child)
 	aa_put_ns(child);
 }
 
-static int aa_lsmns_backend_create(struct lsm_namespace *ns, struct lsm_ctx *ctx)
+static int aa_lsmns_install_task_label(struct task_struct *task,
+				       struct aa_ns *child)
+{
+	struct aa_label *label;
+	struct aa_task_ctx *ctx;
+	struct cred *cred, *real_cred;
+
+	if (!task || !child)
+		return -EINVAL;
+
+	label = ns_unconfined(child);
+	if (task == current)
+		return aa_replace_current_label(label);
+
+	ctx = task_ctx(task);
+	cred = (struct cred *)(task->cred);
+	real_cred = (struct cred *)(task->real_cred);
+
+	if (unconfined(label) || labels_ns(cred_label(cred)) != labels_ns(label))
+		aa_clear_task_ctx_trans(ctx);
+
+	aa_get_label(label);
+	aa_put_label(cred_label(cred));
+	set_cred_label(cred, label);
+
+	if (real_cred != cred) {
+		aa_get_label(label);
+		aa_put_label(cred_label(real_cred));
+		set_cred_label(real_cred, label);
+	}
+
+	return 0;
+}
+
+static int aa_lsmns_backend_create(struct lsm_namespace *ns,
+				   struct task_struct *task,
+				   const struct lsm_ctx *ctx)
 {
 	struct aa_lsmns_backend_data *backend;
 	struct aa_ns *child;
@@ -2323,7 +2359,7 @@ static int aa_lsmns_backend_create(struct lsm_namespace *ns, struct lsm_ctx *ctx
 		goto fail_backend;
 	}
 
-	error = aa_replace_current_label(ns_unconfined(child));
+	error = aa_lsmns_install_task_label(task, child);
 	if (error)
 		goto fail_child;
 

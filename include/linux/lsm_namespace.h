@@ -8,8 +8,16 @@
 #include <uapi/linux/lsm.h>
 
 struct proc_ns_operations;
+struct lsm_ctx;
 struct task_struct;
 struct user_namespace;
+
+struct lsm_namespace_backend {
+	u64 lsmid;
+	int (*create)(struct lsm_namespace *ns, struct task_struct *task,
+		      const struct lsm_ctx *ctx);
+	void (*destroy)(struct lsm_namespace *ns);
+};
 
 #define LSM_NS_TYPE LSM_NS_INIT_INO
 
@@ -27,12 +35,15 @@ extern const struct proc_ns_operations lsmns_operations;
 
 struct lsm_namespace *current_lsm_ns(void);
 struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns,
-				  u64 lsmid,
+				  struct task_struct *task,
+				  const struct lsm_ctx *ctx,
 				  struct lsm_namespace *old_ns);
-int setup_lsm_namespace(struct lsm_namespace *ns);
+int setup_lsm_namespace(struct lsm_namespace *ns, struct task_struct *task,
+			const struct lsm_ctx *ctx);
 void free_lsm_ns(struct lsm_namespace *ns);
 int lsm_ns_check_userns_setns(const struct user_namespace *user_ns);
-int lsm_ns_prepare_unshare(u64 lsmid);
+int register_lsm_namespace_backend(const struct lsm_namespace_backend *backend);
+int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx);
 bool lsm_ns_visible_lsmid(u64 lsmid);
 
 static inline struct lsm_namespace *to_lsm_ns(struct ns_common *ns)
@@ -60,13 +71,16 @@ static inline struct lsm_namespace *current_lsm_ns(void)
 
 static inline struct lsm_namespace *copy_lsm_ns(bool new_child,
 						struct user_namespace *user_ns,
-						u64 lsmid,
+						struct task_struct *task,
+						const struct lsm_ctx *ctx,
 						struct lsm_namespace *old_ns)
 {
 	return NULL;
 }
 
-static inline int setup_lsm_namespace(struct lsm_namespace *ns)
+static inline int setup_lsm_namespace(struct lsm_namespace *ns,
+				      struct task_struct *task,
+				      const struct lsm_ctx *ctx)
 {
 	return 0;
 }
@@ -80,7 +94,12 @@ static inline int lsm_ns_check_userns_setns(const struct user_namespace *user_ns
 	return 0;
 }
 
-static inline int lsm_ns_prepare_unshare(u64 lsmid)
+static inline int register_lsm_namespace_backend(const struct lsm_namespace_backend *backend)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 {
 	return -EOPNOTSUPP;
 }

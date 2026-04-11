@@ -56,6 +56,8 @@ static void consume_pending_child_ns_request(struct task_struct *task)
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	task->lsm_ns_for_child = false;
 	task->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
+	kfree(task->lsm_ns_for_child_ctx);
+	task->lsm_ns_for_child_ctx = NULL;
 #endif
 	kfree(task->syslog_ns_for_child_name);
 	task->syslog_ns_for_child_name = NULL;
@@ -112,7 +114,7 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 	bool new_tracing_ns = false;
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	bool new_lsm_ns = false;
-	u64 new_lsmid = LSM_ID_UNDEF;
+	struct lsm_ctx *new_lsm_ctx = NULL;
 	struct lsm_namespace *created_lsm_ns;
 #endif
 	char *syslog_name = NULL;
@@ -174,7 +176,7 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		new_tracing_ns = syslog_req_task->tracing_ns_for_child;
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 		new_lsm_ns = syslog_req_task->lsm_ns_for_child;
-		new_lsmid = syslog_req_task->lsm_ns_for_child_lsmid;
+		new_lsm_ctx = syslog_req_task->lsm_ns_for_child_ctx;
 #endif
 		syslog_name = syslog_req_task->syslog_ns_for_child_name;
 	}
@@ -198,7 +200,7 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 #endif
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	if (new_lsm_ns) {
-		created_lsm_ns = copy_lsm_ns(true, user_ns, new_lsmid,
+		created_lsm_ns = copy_lsm_ns(true, user_ns, tsk, new_lsm_ctx,
 					     current_lsm_ns());
 		if (IS_ERR(created_lsm_ns)) {
 			err = PTR_ERR(created_lsm_ns);
