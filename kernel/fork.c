@@ -188,6 +188,9 @@ static inline struct task_struct *alloc_task_struct_node(int node)
 static inline void free_task_struct(struct task_struct *tsk)
 {
 	kfree(tsk->syslog_ns_for_child_name);
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	kfree(tsk->lsm_ns_for_child_ctx);
+#endif
 	kmem_cache_free(task_struct_cachep, tsk);
 }
 
@@ -2030,6 +2033,7 @@ __latent_entropy struct task_struct *copy_process(
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	p->lsm_ns_for_child = false;
 	p->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
+	p->lsm_ns_for_child_ctx = NULL;
 #endif
 	p->flags &= ~PF_KTHREAD;
 	if (args->kthread)

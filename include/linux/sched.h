@@ -67,6 +67,7 @@ struct fs_struct;
 struct futex_pi_state;
 struct io_context;
 struct io_uring_task;
+struct lsm_ctx;
 struct mempolicy;
 struct nameidata;
 struct nsproxy;
@@ -1618,6 +1619,7 @@ struct task_struct {
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	bool				lsm_ns_for_child;
 	u64				lsm_ns_for_child_lsmid;
+	struct lsm_ctx			*lsm_ns_for_child_ctx;
 #endif
 
 #ifdef CONFIG_KSTACK_ERASE
