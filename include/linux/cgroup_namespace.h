@@ -2,13 +2,32 @@
 #ifndef _LINUX_CGROUP_NAMESPACE_H
 #define _LINUX_CGROUP_NAMESPACE_H
 
+#ifdef CONFIG_CGROUP_SCHED
+#include <linux/atomic.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
+#endif
 #include <linux/ns_common.h>
 
 struct cgroup_namespace {
 	struct ns_common	ns;
+#ifdef CONFIG_CGROUP_SCHED
+	struct cgroup_namespace	*parent;
+#endif
 	struct user_namespace	*user_ns;
 	struct ucounts		*ucounts;
 	struct css_set          *root_cset;
+
+#ifdef CONFIG_CGROUP_SCHED
+	bool			loadavg_virt_enabled;
+	struct list_head	cgns_avenrun_list;
+	atomic_long_t		nr_threads;
+	/* Runnable demand across all scheduler classes. */
+	atomic_long_t		nr_running;
+	struct mutex		cgns_avenrun_lock; /* protects avenrun */
+	atomic_t		nr_uninterruptible;
+	unsigned long		avenrun[3];
+#endif
 };
 
 extern struct cgroup_namespace init_cgroup_ns;
