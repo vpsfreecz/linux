@@ -81,6 +81,7 @@
 #include <linux/fs_struct.h>
 #include <linux/magic.h>
 #include <linux/perf_event.h>
+#include <uapi/linux/lsm.h>
 #include <linux/posix-timers.h>
 #include <linux/user-return-notifier.h>
 #include <linux/oom.h>
@@ -2026,6 +2027,10 @@ __latent_entropy struct task_struct *copy_process(
 	p->syslog_ns_for_child = false;
 	p->syslog_ns_for_child_name = NULL;
 	p->tracing_ns_for_child = false;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	p->lsm_ns_for_child = false;
+	p->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
+#endif
 	p->flags &= ~PF_KTHREAD;
 	if (args->kthread)
 		p->flags |= PF_KTHREAD;
