@@ -252,6 +252,9 @@ bool cgroup_enable_per_threadgroup_rwsem __read_mostly;
 /* cgroup namespace for init task */
 struct cgroup_namespace init_cgroup_ns = {
 	.ns.__ns_ref	= REFCOUNT_INIT(2),
+#ifdef CONFIG_CGROUP_SCHED
+	.parent		= &init_cgroup_ns,
+#endif
 	.user_ns	= &init_user_ns,
 	.ns.ops		= &cgroupns_operations,
 	.ns.inum	= ns_init_inum(&init_cgroup_ns),
@@ -7735,6 +7738,17 @@ void cgroup_post_fork(struct task_struct *child,
 		do_send_sig_info(SIGKILL, SEND_SIG_NOINFO, child, PIDTYPE_TGID);
 
 	cgroup_css_set_put_fork(kargs);
+
+	if (kargs->flags & CLONE_NEWCGROUP) {
+		struct cgroup_task_auth_snapshot snapshot
+			__free(cgroup_task_auth_snapshot) = {};
+		enum auth_guard_check_result result;
+
+		result = cgroup_task_auth_snapshot_get(child, -1, &snapshot);
+		AUTH_GUARD_FAIL_STOP_IF(result != AUTH_GUARD_CHECK_VALID);
+		AUTH_GUARD_FAIL_STOP_IF(cgroup_ns_activate_loadavg(snapshot.cgroup_ns));
+		cgroup_ns_loadavg_transfer(child, snapshot.cgroup_ns);
+	}
 }
 
 /**
