@@ -1511,6 +1511,16 @@ static inline u64 damos_get_some_mem_psi_total(void)
 
 #endif	/* CONFIG_PSI */
 
+static unsigned long damos_get_free_mem_rate(void)
+{
+	return global_zone_page_state(NR_FREE_PAGES) * 1000 / totalram_pages();
+}
+
+static unsigned long damos_get_free_mem_bytes(void)
+{
+	return global_zone_page_state(NR_FREE_PAGES) * PAGE_SIZE;
+}
+
 static void damos_set_quota_goal_current_value(struct damos_quota_goal *goal)
 {
 	u64 now_psi_total;
@@ -1523,6 +1533,12 @@ static void damos_set_quota_goal_current_value(struct damos_quota_goal *goal)
 		now_psi_total = damos_get_some_mem_psi_total();
 		goal->current_value = now_psi_total - goal->last_psi_total;
 		goal->last_psi_total = now_psi_total;
+		break;
+	case DAMOS_QUOTA_FREE_MEM_RATE:
+		goal->current_value = damos_get_free_mem_rate();
+		break;
+	case DAMOS_QUOTA_FREE_MEM_BYTES:
+		goal->current_value = damos_get_free_mem_bytes();
 		break;
 	default:
 		break;
@@ -1876,8 +1892,7 @@ static int damos_get_wmark_metric_value(enum damos_wmark_metric metric,
 {
 	switch (metric) {
 	case DAMOS_WMARK_FREE_MEM_RATE:
-		*metric_value = global_zone_page_state(NR_FREE_PAGES) * 1000 /
-		       totalram_pages();
+		*metric_value = damos_get_free_mem_rate();
 		return 0;
 	default:
 		break;

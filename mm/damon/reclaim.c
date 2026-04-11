@@ -78,6 +78,32 @@ static unsigned long quota_mem_pressure_us __read_mostly;
 module_param(quota_mem_pressure_us, ulong, 0600);
 
 /*
+ * Desired system free memory rate in [0, 1000].
+ *
+ * While keeping the caps that set by other quotas, DAMON_RECLAIM automatically
+ * increases and decreases the effective level of the quota aiming this free
+ * memory rate.  Higher values make DAMON_RECLAIM more aggressive under lower
+ * free-memory conditions.  Value zero means disabling this auto-tuning feature.
+ *
+ * Disabled by default.
+ */
+static unsigned long quota_free_mem_rate __read_mostly;
+module_param(quota_free_mem_rate, ulong, 0600);
+
+/*
+ * Desired system free memory in bytes.
+ *
+ * While keeping the caps that set by other quotas, DAMON_RECLAIM automatically
+ * increases and decreases the effective level of the quota aiming this free
+ * memory amount.  Higher values make DAMON_RECLAIM try to maintain a larger
+ * free-memory tail.  Value zero means disabling this auto-tuning feature.
+ *
+ * Disabled by default.
+ */
+static unsigned long quota_free_mem_bytes __read_mostly;
+module_param(quota_free_mem_bytes, ulong, 0600);
+
+/*
  * User-specifiable feedback for auto-tuning of the effective quota.
  *
  * While keeping the caps that set by other quotas, DAMON_RECLAIM automatically
@@ -198,6 +224,10 @@ static int damon_reclaim_apply_parameters(void)
 		err = -EINVAL;
 		goto out;
 	}
+	if (quota_free_mem_rate > 1000) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	err = damon_set_attrs(ctx, &damon_reclaim_mon_attrs);
 	if (err)
@@ -212,6 +242,22 @@ static int damon_reclaim_apply_parameters(void)
 	if (quota_mem_pressure_us) {
 		goal = damos_new_quota_goal(DAMOS_QUOTA_SOME_MEM_PSI_US,
 				quota_mem_pressure_us);
+		if (!goal)
+			goto out;
+		damos_add_quota_goal(&scheme->quota, goal);
+	}
+
+	if (quota_free_mem_rate) {
+		goal = damos_new_quota_goal(DAMOS_QUOTA_FREE_MEM_RATE,
+				quota_free_mem_rate);
+		if (!goal)
+			goto out;
+		damos_add_quota_goal(&scheme->quota, goal);
+	}
+
+	if (quota_free_mem_bytes) {
+		goal = damos_new_quota_goal(DAMOS_QUOTA_FREE_MEM_BYTES,
+				quota_free_mem_bytes);
 		if (!goal)
 			goto out;
 		damos_add_quota_goal(&scheme->quota, goal);
