@@ -136,14 +136,15 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 
 	new_nsp->syslog_ns = copy_syslog_ns(new_syslog_ns, syslog_name,
 					    user_ns, tsk->nsproxy->syslog_ns);
+	if (IS_ERR(new_nsp->syslog_ns)) {
+		err = PTR_ERR(new_nsp->syslog_ns);
+		goto out_syslog;
+	}
+
 	if (syslog_req_task) {
 		syslog_req_task->syslog_ns_for_child = false;
 		kfree(syslog_req_task->syslog_ns_for_child_name);
 		syslog_req_task->syslog_ns_for_child_name = NULL;
-	}
-	if (IS_ERR(new_nsp->syslog_ns)) {
-		err = PTR_ERR(new_nsp->syslog_ns);
-		goto out_syslog;
 	}
 	return new_nsp;
 
