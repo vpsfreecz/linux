@@ -229,6 +229,18 @@ static void __init append_ordered_lsm(struct lsm_info *lsm, const char *from)
 		   is_enabled(lsm) ? "enabled" : "disabled");
 }
 
+#ifdef CONFIG_SECURITY_VPSADMIN_STACK_SELINUX_APPARMOR
+static bool __init vpsadmin_selinux_apparmor_pair(const struct lsm_info *a,
+				      const struct lsm_info *b)
+{
+	if (!a || !b)
+		return false;
+
+	return (!strcmp(a->name, "selinux") && !strcmp(b->name, "apparmor")) ||
+	       (!strcmp(a->name, "apparmor") && !strcmp(b->name, "selinux"));
+}
+#endif
+
 /* Is an LSM allowed to be initialized? */
 static bool __init lsm_allowed(struct lsm_info *lsm)
 {
@@ -238,6 +250,13 @@ static bool __init lsm_allowed(struct lsm_info *lsm)
 
 	/* Not allowed if another exclusive LSM already initialized. */
 	if ((lsm->flags & LSM_FLAG_EXCLUSIVE) && exclusive) {
+#ifdef CONFIG_SECURITY_VPSADMIN_STACK_SELINUX_APPARMOR
+		if (vpsadmin_selinux_apparmor_pair(lsm, exclusive)) {
+			init_debug("exclusive coexistence allowed: %s with %s\n",
+				   lsm->name, exclusive->name);
+			return true;
+		}
+#endif
 		init_debug("exclusive disabled: %s\n", lsm->name);
 		return false;
 	}
