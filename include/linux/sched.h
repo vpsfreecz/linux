@@ -1615,6 +1615,10 @@ struct task_struct {
 	bool				syslog_ns_for_child;
 	char				*syslog_ns_for_child_name;
 	bool				tracing_ns_for_child;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	bool				lsm_ns_for_child;
+	u64				lsm_ns_for_child_lsmid;
+#endif
 
 #ifdef CONFIG_KSTACK_ERASE
 	unsigned long			lowest_stack;
