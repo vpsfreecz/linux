@@ -48,6 +48,13 @@ static inline struct tracing_namespace *current_tracing_ns(void)
 	return &init_tracing_ns;
 }
 
+static inline bool tracing_ns_current_is_guest(void)
+{
+	struct tracing_namespace *ns = current_tracing_ns();
+
+	return ns && ns != &init_tracing_ns;
+}
+
 static inline struct tracing_namespace *to_tracing_ns(struct ns_common *ns)
 {
 	return container_of(ns, struct tracing_namespace, ns);
@@ -69,6 +76,11 @@ static inline void put_tracing_ns(struct tracing_namespace *ns)
 static inline struct tracing_namespace *current_tracing_ns(void)
 {
 	return NULL;
+}
+
+static inline bool tracing_ns_current_is_guest(void)
+{
+	return false;
 }
 
 static inline struct tracing_namespace *to_tracing_ns(struct ns_common *ns)
