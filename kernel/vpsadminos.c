@@ -2,6 +2,8 @@
 #include <linux/atomic.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/sysfs.h>
 #include <linux/memcontrol.h>
 #include <linux/module.h>
 #include <linux/kobject.h>
@@ -12,6 +14,13 @@
 #include <linux/vmstat.h>
 
 #include <asm/page.h>
+
+
+static int __init vpsadminos_init(void)
+{
+	return sysfs_create_mount_point(fs_kobj, "vpsadminos");
+}
+fs_initcall(vpsadminos_init);
 
 struct mem_cgroup *get_current_most_limited_memcg(void)
 {
