@@ -68,6 +68,8 @@
 #include <linux/vtime.h>
 #include <linux/wait_api.h>
 #include <linux/workqueue_api.h>
+#include <linux/user_namespace.h>
+#include <linux/vpsadminos.h>
 #include <linux/livepatch_sched.h>
 
 #ifdef CONFIG_PREEMPT_DYNAMIC
@@ -9639,6 +9641,18 @@ static u64 tg_get_cfs_quota(struct task_group *tg)
 	do_div(quota_us, NSEC_PER_USEC);
 
 	return quota_us;
+}
+
+s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css, struct cftype *cft)
+{
+	(void)cft;
+	return tg_get_cfs_quota(css_tg(css));
+}
+
+u64 cpu_cfs_period_read_u64(struct cgroup_subsys_state *css, struct cftype *cft)
+{
+	(void)cft;
+	return tg_get_cfs_period(css_tg(css));
 }
 
 static u64 tg_get_cfs_burst(struct task_group *tg)
