@@ -10,6 +10,7 @@
 #include <linux/sched.h>
 #include <linux/cpuset.h>
 #include <linux/sched/debug.h>
+#include <linux/vpsadminos.h>
 
 #include <uapi/linux/sched/types.h>
 
@@ -1242,6 +1243,32 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	if (p->flags & PF_NO_SETAFFINITY)
 		return -EINVAL;
 
+	if (current->nsproxy && current->nsproxy->cgroup_ns != &init_cgroup_ns) {
+		struct cpumask fake_mask, new_mask;
+
+		if (!fake_online_cpumask(p, &fake_mask))
+			goto orig;
+		cpumask_and(&fake_mask, &fake_mask, cpu_active_mask);
+		if (!check_same_owner(p)) {
+			rcu_read_lock();
+			if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE)) {
+				rcu_read_unlock();
+				return -EPERM;
+			}
+			rcu_read_unlock();
+		}
+		retval = security_task_setscheduler(p);
+		if (retval)
+			return retval;
+		cpumask_and(&new_mask, in_mask, &fake_mask);
+		if (cpumask_empty(&new_mask))
+			return -EINVAL;
+		set_fake_affinity_cpumask(p, &new_mask);
+		return 0;
+	}
+
+orig:
+
 	if (!check_same_owner(p)) {
 		guard(rcu)();
 		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
@@ -1323,6 +1350,9 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
 	retval = security_task_getscheduler(p);
 	if (retval)
 		return retval;
+
+	if (fake_affinity_cpumask(p, mask))
+		return 0;
 
 	guard(raw_spinlock_irqsave)(&p->pi_lock);
 	cpumask_and(mask, &p->cpus_mask, cpu_active_mask);
