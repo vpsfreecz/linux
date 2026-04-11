@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/lsm_namespace.h>
 #include <linux/nstree.h>
+#include <linux/overflow.h>
 #include <linux/proc_ns.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/user_namespace.h>
+
+static DEFINE_MUTEX(lsm_ns_backend_lock);
+static const struct lsm_namespace_backend *lsm_ns_backends[2];
 
 static bool lsm_ns_restricts_visibility(const struct lsm_namespace *ns)
 {
@@ -53,6 +58,54 @@ static bool lsm_ns_valid_lsmid(u64 lsmid)
 	return false;
 }
 
+static int lsm_ns_backend_slot(u64 lsmid)
+{
+	switch (lsmid) {
+	case LSM_ID_APPARMOR:
+		return 0;
+	case LSM_ID_SELINUX:
+		return 1;
+	default:
+		return -EINVAL;
+	}
+}
+
+static const struct lsm_namespace_backend *lsm_ns_backend_lookup(u64 lsmid)
+{
+	int slot = lsm_ns_backend_slot(lsmid);
+
+	if (slot < 0)
+		return NULL;
+
+	return READ_ONCE(lsm_ns_backends[slot]);
+}
+
+int register_lsm_namespace_backend(const struct lsm_namespace_backend *backend)
+{
+	int slot;
+
+	if (!backend || !backend->create || !backend->destroy)
+		return -EINVAL;
+
+	if (!lsm_ns_valid_lsmid(backend->lsmid))
+		return -EOPNOTSUPP;
+
+	slot = lsm_ns_backend_slot(backend->lsmid);
+	if (slot < 0)
+		return slot;
+
+	mutex_lock(&lsm_ns_backend_lock);
+	if (lsm_ns_backends[slot]) {
+		mutex_unlock(&lsm_ns_backend_lock);
+		return -EEXIST;
+	}
+
+	WRITE_ONCE(lsm_ns_backends[slot], backend);
+	mutex_unlock(&lsm_ns_backend_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(register_lsm_namespace_backend);
+
 struct lsm_namespace *current_lsm_ns(void)
 {
 	struct user_namespace *user_ns = current_user_ns();
@@ -78,13 +131,48 @@ bool lsm_ns_visible_lsmid(u64 lsmid)
 }
 EXPORT_SYMBOL_GPL(lsm_ns_visible_lsmid);
 
-int lsm_ns_prepare_unshare(u64 lsmid)
+void lsm_ns_clear_pending_child_request(struct task_struct *task)
 {
+	if (!task)
+		return;
+
+	task->lsm_ns_for_child = false;
+	task->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
+	kfree(task->lsm_ns_for_child_ctx);
+	task->lsm_ns_for_child_ctx = NULL;
+}
+EXPORT_SYMBOL_GPL(lsm_ns_clear_pending_child_request);
+
+int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
+{
+	struct lsm_ctx *copy;
+	u64 lsmid;
+	u64 required_len;
+
+	if (!ctx || ctx->len < sizeof(*ctx))
+		return -EINVAL;
+	if (ctx->flags)
+		return -EINVAL;
+	if (check_add_overflow(sizeof(*ctx), ctx->ctx_len, &required_len) ||
+	    ctx->len != required_len)
+		return -EINVAL;
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (current_lsm_ns() != &init_lsm_ns)
+		return -EPERM;
+
+	lsmid = ctx->id;
 	if (!lsm_ns_valid_lsmid(lsmid))
 		return -EOPNOTSUPP;
 
+	copy = kmemdup(ctx, ctx->len, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+
+	lsm_ns_clear_pending_child_request(current);
 	current->lsm_ns_for_child = true;
 	current->lsm_ns_for_child_lsmid = lsmid;
+	current->lsm_ns_for_child_ctx = copy;
 
 	pr_notice("lsm_ns: arm child create current=%u lsm=%llu\n",
 		  current_lsm_ns()->ns.inum,
@@ -103,8 +191,14 @@ static void delayed_free_lsm_ns(struct rcu_head *head)
 
 void free_lsm_ns(struct lsm_namespace *ns)
 {
+	const struct lsm_namespace_backend *backend;
+
 	if (WARN_ON_ONCE(ns == &init_lsm_ns))
 		return;
+
+	backend = lsm_ns_backend_lookup(ns->lsmid);
+	if (backend && ns->backend_data)
+		backend->destroy(ns);
 
 	if (ns_tree_active(ns))
 		ns_tree_remove(ns);
@@ -161,19 +255,6 @@ clone_lsm_ns(struct user_namespace *user_ns, u64 lsmid,
 	ns->lsmid = lsmid;
 	ns->backend_data = NULL;
 
-	if (user_ns != current_user_ns() && user_ns->lsm_ns == old_ns) {
-		put_lsm_ns(user_ns->lsm_ns);
-		user_ns->lsm_ns = get_lsm_ns(ns);
-	}
-
-	__ns_tree_add(&ns->ns, &lsm_ns_tree);
-
-	pr_notice("lsm_ns: create ns=%u parent=%u user=%u lsm=%llu\n",
-		  ns->ns.inum,
-		  old_ns ? old_ns->ns.inum : 0,
-		  user_ns->ns.inum,
-		  (unsigned long long)lsmid);
-
 	return ns;
 
 fail_free:
@@ -181,19 +262,38 @@ fail_free:
 	return ERR_PTR(err);
 }
 
+static void lsm_ns_attach_userns(struct lsm_namespace *ns,
+				 struct user_namespace *user_ns,
+				 struct lsm_namespace *old_ns)
+{
+	if (user_ns != current_user_ns() && user_ns->lsm_ns == old_ns) {
+		put_lsm_ns(user_ns->lsm_ns);
+		user_ns->lsm_ns = get_lsm_ns(ns);
+	}
+}
+
 struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns,
-				  u64 lsmid,
+				  struct task_struct *task, struct cred *new_cred,
+				  const struct lsm_ctx *ctx,
 				  struct lsm_namespace *old_ns)
 {
+	struct lsm_namespace *ns;
+	u64 lsmid;
+	int err;
+
 	if (!old_ns)
 		old_ns = &init_lsm_ns;
+
+	if (new_child && !new_cred)
+		return ERR_PTR(-EINVAL);
 
 	if (!new_child)
 		return get_lsm_ns(old_ns);
 
-	if (!user_ns)
+	if (!user_ns || !ctx)
 		return ERR_PTR(-EINVAL);
 
+	lsmid = ctx->id;
 	if (!lsm_ns_valid_lsmid(lsmid))
 		return ERR_PTR(-EOPNOTSUPP);
 
@@ -218,7 +318,18 @@ struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns
 	if (user_ns->lsm_ns != old_ns)
 		return ERR_PTR(-EINVAL);
 
-	return clone_lsm_ns(user_ns, lsmid, old_ns);
+	ns = clone_lsm_ns(user_ns, lsmid, old_ns);
+	if (IS_ERR(ns))
+		return ns;
+
+	err = setup_lsm_namespace(ns, task, new_cred, ctx);
+	if (err) {
+		put_lsm_ns(ns);
+		return ERR_PTR(err);
+	}
+
+	lsm_ns_attach_userns(ns, user_ns, old_ns);
+	return ns;
 }
 EXPORT_SYMBOL_GPL(copy_lsm_ns);
 
@@ -279,10 +390,32 @@ const struct proc_ns_operations lsmns_operations = {
 };
 EXPORT_SYMBOL_GPL(lsmns_operations);
 
-int setup_lsm_namespace(struct lsm_namespace *ns)
+int setup_lsm_namespace(struct lsm_namespace *ns, struct task_struct *task,
+			struct cred *new_cred, const struct lsm_ctx *ctx)
 {
-	if (ns == &init_lsm_ns)
+	const struct lsm_namespace_backend *backend;
+	int err;
+
+	if (ns == &init_lsm_ns) {
 		__ns_tree_add(&ns->ns, &lsm_ns_tree);
+		return 0;
+	}
+
+	backend = lsm_ns_backend_lookup(ns->lsmid);
+	if (!backend)
+		return -EOPNOTSUPP;
+
+	err = backend->create(ns, task, new_cred, ctx);
+	if (err)
+		return err;
+
+	__ns_tree_add(&ns->ns, &lsm_ns_tree);
+
+	pr_notice("lsm_ns: create ns=%u parent=%u user=%u lsm=%llu\n",
+		  ns->ns.inum,
+		  ns->parent ? ns->parent->ns.inum : 0,
+		  ns->user_ns ? ns->user_ns->ns.inum : 0,
+		  (unsigned long long)ns->lsmid);
 
 	return 0;
 }
@@ -290,6 +423,6 @@ EXPORT_SYMBOL_GPL(setup_lsm_namespace);
 
 static int __init lsm_namespaces_init(void)
 {
-	return setup_lsm_namespace(&init_lsm_ns);
+	return setup_lsm_namespace(&init_lsm_ns, NULL, NULL, NULL);
 }
 subsys_initcall(lsm_namespaces_init);

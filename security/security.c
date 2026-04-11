@@ -4311,11 +4311,7 @@ int security_setselfattr(unsigned int attr, struct lsm_ctx __user *uctx,
 	}
 
 	if (attr == LSM_ATTR_UNSHARE) {
-		if (lctx->ctx_len != 0 || lctx->len != sizeof(*lctx)) {
-			rc = -EINVAL;
-			goto free_out;
-		}
-		rc = lsm_ns_prepare_unshare(lctx->id);
+		rc = lsm_ns_prepare_unshare(lctx);
 		goto free_out;
 	}
 
