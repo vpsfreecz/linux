@@ -31,6 +31,17 @@
 
 static struct kmem_cache *nsproxy_cachep;
 
+static void consume_pending_child_ns_request(struct task_struct *task)
+{
+	if (!task)
+		return;
+
+	task->syslog_ns_for_child = false;
+	task->tracing_ns_for_child = false;
+	kfree(task->syslog_ns_for_child_name);
+	task->syslog_ns_for_child_name = NULL;
+}
+
 struct nsproxy init_nsproxy = {
 	.count			= REFCOUNT_INIT(1),
 	.uts_ns			= &init_uts_ns,
@@ -147,12 +158,6 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		goto out_syslog;
 	}
 
-	if (syslog_req_task) {
-		syslog_req_task->syslog_ns_for_child = false;
-		syslog_req_task->tracing_ns_for_child = false;
-		kfree(syslog_req_task->syslog_ns_for_child_name);
-		syslog_req_task->syslog_ns_for_child_name = NULL;
-	}
 #ifdef CONFIG_TRACING_NS
 	new_nsp->tracing_ns = copy_tracing_ns(new_tracing_ns, user_ns,
 				      new_nsp->pid_ns_for_children,
@@ -163,6 +168,7 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		goto out_tracing;
 	}
 #endif
+	consume_pending_child_ns_request(syslog_req_task);
 	return new_nsp;
 
 #ifdef CONFIG_TRACING_NS
