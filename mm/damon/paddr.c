@@ -290,7 +290,8 @@ put_folio:
 	}
 	if (install_young_filter)
 		damos_destroy_filter(filter);
-	applied = reclaim_pages(&folio_list);
+	applied = reclaim_pages(&folio_list,
+			MEMCG_RECLAIM_SYSTEM_PROACTIVE_SWAP);
 	cond_resched();
 	return applied * PAGE_SIZE;
 }

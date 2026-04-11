@@ -50,7 +50,7 @@ static inline pgoff_t swap_cache_index(swp_entry_t entry)
 }
 
 void show_swap_cache_info(void);
-bool add_to_swap(struct folio *folio);
+bool add_to_swap(struct folio *folio, bool system_proactive_swap);
 void *get_shadow_from_swap_cache(swp_entry_t entry);
 int add_to_swap_cache(struct folio *folio, swp_entry_t entry,
 		      gfp_t gfp, void **shadowp);
@@ -163,7 +163,7 @@ struct folio *filemap_get_incore_folio(struct address_space *mapping,
 	return filemap_get_folio(mapping, index);
 }
 
-static inline bool add_to_swap(struct folio *folio)
+static inline bool add_to_swap(struct folio *folio, bool system_proactive_swap)
 {
 	return false;
 }
