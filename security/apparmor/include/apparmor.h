@@ -50,6 +50,7 @@ extern bool aa_g_hash_policy;
 extern bool aa_g_export_binary;
 extern int aa_g_rawdata_compression_level;
 extern bool aa_g_lock_policy;
+extern bool aa_g_root_ns_policy;
 extern bool aa_g_logsyscall;
 extern bool aa_g_paranoid_load;
 extern unsigned int aa_g_path_max;
