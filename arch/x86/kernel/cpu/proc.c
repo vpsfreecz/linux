@@ -181,7 +181,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		mutex_unlock(&show_cpuinfo_cache_setup_mutex);
 	}
 
-	mutex_lock(show_cpuinfo_cache_mutexes[cpu]);	
+	mutex_lock(show_cpuinfo_cache_mutexes[cpu]);
 	if (time_after(now, show_cpuinfo_cache_jiffies[cpu] +
 		       msecs_to_jiffies(5000))) {
 		if (show_cpuinfo_cache[cpu]) {
