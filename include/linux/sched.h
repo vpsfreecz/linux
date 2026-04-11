@@ -935,6 +935,11 @@ struct task_struct {
 	cpumask_t			fake_cpu_mask;
 #endif
 
+#ifdef CONFIG_CGROUP_SCHED
+	struct cgroup_namespace *cgns_loadavg_owner;
+	struct cgroup_namespace *sched_contributed_to_load;
+#endif
+
 #ifdef CONFIG_PREEMPT_RCU
 	int				rcu_read_lock_nesting;
 	union rcu_special		rcu_read_unlock_special;
@@ -2334,6 +2339,49 @@ static inline int sched_core_idle_cpu(int cpu) { return idle_cpu(cpu); }
 #endif
 
 extern void sched_set_stop_task(int cpu, struct task_struct *stop);
+
+struct cgroup_namespace;
+#ifdef CONFIG_CGROUP_SCHED
+int get_avenrun_fake(struct task_struct *p, unsigned long *loads,
+		     unsigned long offset, int shift);
+unsigned long cgroup_ns_nr_running(struct task_struct *p);
+int virt_loadavg_proc_show(struct seq_file *m, void *v);
+int cgroup_ns_track_loadavg(struct cgroup_namespace *ns);
+void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns);
+void cgroup_ns_loadavg_fork(struct task_struct *p);
+void cgroup_ns_loadavg_transfer(struct task_struct *p,
+				struct cgroup_namespace *new_ns);
+unsigned long cgroup_ns_nr_threads(struct task_struct *p);
+#else
+static inline int get_avenrun_fake(struct task_struct *p, unsigned long *loads,
+				   unsigned long offset, int shift)
+{
+	return 0;
+}
+
+static inline unsigned long cgroup_ns_nr_running(struct task_struct *p)
+{
+	return 0;
+}
+
+static inline int cgroup_ns_track_loadavg(struct cgroup_namespace *ns)
+{
+	return 0;
+}
+
+static inline void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns) { }
+static inline void cgroup_ns_loadavg_fork(struct task_struct *p) { }
+static inline void
+cgroup_ns_loadavg_transfer(struct task_struct *p,
+			   struct cgroup_namespace *new_ns)
+{
+}
+
+static inline unsigned long cgroup_ns_nr_threads(struct task_struct *p)
+{
+	return 0;
+}
+#endif
 
 #ifdef CONFIG_MEM_ALLOC_PROFILING
 static __always_inline struct alloc_tag *alloc_tag_save(struct alloc_tag *tag)
