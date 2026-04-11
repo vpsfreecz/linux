@@ -2930,7 +2930,9 @@ static int do_sysinfo(struct sysinfo *info)
 	timens_add_boottime(&tp);
 	info->uptime = tp.tv_sec + (tp.tv_nsec ? 1 : 0);
 
-	get_avenrun(info->loads, 0, SI_LOAD_SHIFT - FSHIFT);
+	if (!get_avenrun_fake(current, info->loads, 0,
+			      SI_LOAD_SHIFT - FSHIFT))
+		get_avenrun(info->loads, 0, SI_LOAD_SHIFT - FSHIFT);
 
 	info->procs = nr_threads;
 

@@ -731,6 +731,8 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 		goto out;
 	}
 	err = seal_and_publish_nsproxy(*new_nsp, unshare_flags, &sealed);
+	if (!err && (unshare_flags & CLONE_NEWCGROUP))
+		err = cgroup_ns_activate_loadavg((*new_nsp)->cgroup_ns);
 	if (err) {
 		if (restore_child_userns_boundary_defaults(
 			    user_ns, *new_nsp, old_nsproxy)) {
@@ -760,6 +762,7 @@ int switch_task_namespaces_checked_where(struct task_struct *p,
 	    !auth_guard_task_begin_transition_where(p, where))
 		return -EACCES;
 
+	cgroup_ns_loadavg_transfer(p, new ? new->cgroup_ns : NULL);
 	task_lock(p);
 	mutation = auth_guard_task_replace_nsproxy_in_transition_where(
 		p, new, &old, where);
@@ -790,6 +793,7 @@ void exit_task_namespaces(struct task_struct *p)
 	bool trusted;
 
 	auth_guard_status = auth_guard_task_begin_teardown_transition(p);
+	cgroup_ns_loadavg_transfer(p, NULL);
 
 	task_lock(p);
 	expected = READ_ONCE(p->nsproxy);
@@ -1489,6 +1493,8 @@ static int commit_nsset(struct nsset *nsset)
 		timens_commit(me, nsset->nsproxy->time_ns);
 #endif
 
+	/* transfer ownership */
+	cgroup_ns_loadavg_transfer(me, nsset->nsproxy->cgroup_ns);
 	task_lock(me);
 	mutation = auth_guard_task_replace_nsproxy_in_transition(
 		me, nsset->nsproxy, &old_nsproxy);
