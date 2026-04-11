@@ -592,6 +592,7 @@ void memcg1_swapout(struct folio *folio, swp_entry_t entry)
 {
 	struct mem_cgroup *memcg, *swap_memcg;
 	unsigned int nr_entries;
+	bool system_proactive_swap;
 
 	VM_BUG_ON_FOLIO(folio_test_lru(folio), folio);
 	VM_BUG_ON_FOLIO(folio_ref_count(folio), folio);
@@ -615,12 +616,16 @@ void memcg1_swapout(struct folio *folio, swp_entry_t entry)
 	 */
 	swap_memcg = mem_cgroup_id_get_online(memcg);
 	nr_entries = folio_nr_pages(folio);
+	system_proactive_swap = lookup_swap_cgroup_proactive(entry);
 	/* Get references for the tail pages, too */
 	if (nr_entries > 1)
 		mem_cgroup_id_get_many(swap_memcg, nr_entries - 1);
 	mod_memcg_state(swap_memcg, MEMCG_SWAP, nr_entries);
 
-	swap_cgroup_record(folio, mem_cgroup_id(swap_memcg), entry);
+	if (system_proactive_swap && !mem_cgroup_is_root(swap_memcg))
+		mem_cgroup_proactive_swap_charge(swap_memcg, nr_entries);
+	swap_cgroup_record(folio, mem_cgroup_id(swap_memcg),
+			   system_proactive_swap, entry);
 
 	folio_unqueue_deferred_split(folio);
 	folio->memcg_data = 0;
