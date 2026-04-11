@@ -25,6 +25,7 @@
 #include <linux/vpsadminos.h>
 #include <linux/nstree.h>
 #include <linux/tracing_namespace.h>
+#include <linux/lsm_namespace.h>
 
 static struct kmem_cache *user_ns_cachep __ro_after_init;
 static DEFINE_MUTEX(userns_state_mutex);
@@ -151,6 +152,9 @@ int create_user_ns(struct cred *new)
 #ifdef CONFIG_TRACING_NS
 	ns->tracing_ns = get_tracing_ns(current_tracing_ns());
 #endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	ns->lsm_ns = get_lsm_ns(current_lsm_ns());
+#endif
 
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
 	mutex_lock(&userns_state_mutex);
@@ -163,7 +167,9 @@ int create_user_ns(struct cred *new)
 #endif
 	ret = -ENOMEM;
 	if (!setup_userns_sysctls(ns))
-#ifdef CONFIG_TRACING_NS
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+		goto fail_put_lsm;
+#elif defined(CONFIG_TRACING_NS)
 		goto fail_put_tracing;
 #else
 		goto fail_put_syslog;
@@ -187,6 +193,10 @@ int create_user_ns(struct cred *new)
 	fake_sysctl_bufs_init(ns);
 	ns_tree_add(ns);
 	return 0;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+fail_put_lsm:
+	put_lsm_ns(ns->lsm_ns);
+#endif
 #ifdef CONFIG_TRACING_NS
 fail_put_tracing:
 	put_tracing_ns(ns->tracing_ns);
@@ -253,6 +263,9 @@ static void free_user_ns(struct work_struct *work)
 		put_syslog_ns(ns->syslog_ns);
 #ifdef CONFIG_TRACING_NS
 		put_tracing_ns(ns->tracing_ns);
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+		put_lsm_ns(ns->lsm_ns);
 #endif
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
@@ -1443,6 +1456,9 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 		return -EPERM;
 
 	if (tracing_ns_check_userns_setns(user_ns))
+		return -EPERM;
+
+	if (lsm_ns_check_userns_setns(user_ns))
 		return -EPERM;
 
 	cred = nsset_cred(nsset);
