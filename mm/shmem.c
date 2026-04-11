@@ -1603,7 +1603,7 @@ try_split:
 		folio_mark_uptodate(folio);
 	}
 
-	swap = folio_alloc_swap(folio);
+		swap = folio_alloc_swap(folio, false);
 	if (!swap.val) {
 		if (nr_pages > 1)
 			goto try_split;
