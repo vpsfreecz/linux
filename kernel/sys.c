@@ -65,6 +65,7 @@
 #include <linux/rcupdate.h>
 #include <linux/uidgid.h>
 #include <linux/cred.h>
+#include <linux/vpsadminos.h>
 
 #include <linux/nospec.h>
 
@@ -2898,6 +2899,7 @@ static int do_sysinfo(struct sysinfo *info)
 	unsigned long mem_total, sav_total;
 	unsigned int mem_unit, bitcount;
 	struct timespec64 tp;
+	struct mem_cgroup *memcg;
 
 	memset(info, 0, sizeof(struct sysinfo));
 
@@ -2911,6 +2913,50 @@ static int do_sysinfo(struct sysinfo *info)
 
 	si_meminfo(info);
 	si_swapinfo(info);
+
+	memcg = get_current_most_limited_memcg();
+	if (memcg) {
+		unsigned long memusage = page_counter_read(&memcg->memory);
+		unsigned long totalram = READ_ONCE(memcg->memory.max);
+		unsigned long swapmax, swapusage;
+
+		info->totalram = totalram;
+		info->totalhigh = totalram;
+		info->freeram = totalram - memusage;
+		info->freehigh = totalram - memusage;
+		info->bufferram = memcg_page_state(memcg, NR_FILE_PAGES);
+		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
+
+		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) {
+			swapmax = READ_ONCE(memcg->memsw.max);
+			swapusage = page_counter_read(&memcg->memsw);
+
+			if (!swapmax || swapmax == totalram) {
+				info->totalswap = 0;
+				info->freeswap = 0;
+			} else if (swapmax == PAGE_COUNTER_MAX) {
+				info->freeswap = info->totalswap - (swapusage - memusage);
+			} else {
+				info->totalswap = swapmax - totalram;
+				info->freeswap = info->totalswap - (swapusage - memusage);
+			}
+		} else {
+			swapmax = READ_ONCE(memcg->swap.max);
+			swapusage = page_counter_read(&memcg->swap);
+
+			if (!swapmax) {
+				info->totalswap = 0;
+				info->freeswap = 0;
+			} else if (swapmax == PAGE_COUNTER_MAX) {
+				info->freeswap = info->totalswap - swapusage;
+			} else {
+				info->totalswap = swapmax;
+				info->freeswap = info->totalswap - swapusage;
+			}
+		}
+
+		mem_cgroup_put(memcg);
+	}
 
 	/*
 	 * If the sum of all the available memory (i.e. ram + swap)
