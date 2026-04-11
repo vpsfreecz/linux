@@ -1875,6 +1875,11 @@ bool aa_g_lock_policy;
 module_param_named(lock_policy, aa_g_lock_policy, aalockpolicy,
 		   S_IRUSR | S_IWUSR);
 
+/* allow policy administration in the AppArmor root namespace */
+bool aa_g_root_ns_policy =
+	IS_ENABLED(CONFIG_SECURITY_APPARMOR_ALLOW_ROOT_NS_POLICY);
+module_param_named(root_ns_policy, aa_g_root_ns_policy, bool, 0400);
+
 /* Syscall logging mode */
 bool aa_g_logsyscall;
 module_param_named(logsyscall, aa_g_logsyscall, aabool, S_IRUSR | S_IWUSR);
