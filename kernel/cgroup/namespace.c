@@ -31,6 +31,18 @@ static struct cgroup_namespace *alloc_cgroup_ns(void)
 	ret = ns_common_init(new_ns);
 	if (ret)
 		return ERR_PTR(ret);
+
+#ifdef CONFIG_CGROUP_SCHED
+	INIT_LIST_HEAD(&new_ns->cgns_avenrun_list);
+	atomic_long_set(&new_ns->nr_threads, 0);
+	atomic_long_set(&new_ns->nr_running, 0);
+	atomic_set(&new_ns->nr_uninterruptible, 0);
+	new_ns->avenrun[0] = 0;
+	new_ns->avenrun[1] = 0;
+	new_ns->avenrun[2] = 0;
+	mutex_init(&new_ns->cgns_avenrun_lock);
+#endif
+
 	return no_free_ptr(new_ns);
 }
 
@@ -44,6 +56,19 @@ int cgroup_ns_publish(struct cgroup_namespace *ns)
 		return -EACCES;
 
 	ns_tree_add(ns);
+	return 0;
+}
+
+int cgroup_ns_activate_loadavg(struct cgroup_namespace *ns)
+{
+	if (!ns || WARN_ON_ONCE(!ns_tree_active(ns)))
+		return -EINVAL;
+
+#ifdef CONFIG_CGROUP_SCHED
+	if (ns->user_ns->parent == &init_user_ns &&
+	    ns->user_ns != &init_user_ns)
+		return cgroup_ns_track_loadavg(ns);
+#endif
 	return 0;
 }
 
@@ -69,10 +94,16 @@ void free_cgroup_ns(struct cgroup_namespace *ns)
 	trusted = auth_guard_cgroup_ns_root_destroy_complete(ns, expected,
 							     old_valid,
 							     root_cset == expected);
+#ifdef CONFIG_CGROUP_SCHED
+	cgroup_ns_untrack_loadavg(ns);
+#endif
 	if (root_cset && trusted)
 		put_css_set(root_cset);
 	dec_cgroup_namespaces(ns->ucounts);
 	put_user_ns(ns->user_ns);
+#ifdef CONFIG_CGROUP_SCHED
+	put_cgroup_ns(ns->parent);
+#endif
 	ns_common_free(ns);
 	/* Concurrent nstree traversal depends on a grace period. */
 	kfree_rcu(ns, ns.ns_rcu);
@@ -132,6 +163,12 @@ struct cgroup_namespace *copy_cgroup_ns(u64 flags,
 	new_ns->user_ns = get_user_ns(user_ns);
 	new_ns->ucounts = ucounts;
 	new_ns->root_cset = cset;
+#ifdef CONFIG_CGROUP_SCHED
+	get_cgroup_ns(old_ns);
+	new_ns->parent = old_ns;
+
+#endif
+
 	if (!auth_guard_cgroup_ns_root_init(new_ns)) {
 		put_cgroup_ns(new_ns);
 		return ERR_PTR(-EACCES);
