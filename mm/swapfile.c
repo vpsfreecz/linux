@@ -50,6 +50,8 @@
 #include "internal.h"
 #include "swap.h"
 
+#include <linux/vpsadminos.h>
+
 static bool swap_count_continued(struct swap_info_struct *, pgoff_t,
 				 unsigned char);
 static void free_swap_count_continuations(struct swap_info_struct *);
@@ -3096,10 +3098,71 @@ static const struct seq_operations swaps_op = {
 	.show =		swap_show
 };
 
+static int fake_swap_show(struct seq_file *swap, void *v)
+{
+	struct mem_cgroup *memcg = swap->private;
+	unsigned long totalram = READ_ONCE(memcg->memory.max);
+	unsigned long memusage = page_counter_read(&memcg->memory);
+	unsigned long swapmax, swapusage, totalswap, usedswap;
+	struct sysinfo i;
+
+	si_swapinfo(&i);
+
+	seq_puts(swap, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+
+	if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) {
+		swapmax = READ_ONCE(memcg->memsw.max);
+		swapusage = page_counter_read(&memcg->memsw);
+
+		if (!swapmax || swapmax == totalram)
+			return 0;
+
+		if (swapmax == PAGE_COUNTER_MAX)
+			totalswap = i.totalswap * PAGE_SIZE;
+		else
+			totalswap = (swapmax - totalram) * PAGE_SIZE;
+		usedswap = (swapusage - memusage) * PAGE_SIZE;
+	} else {
+		swapmax = READ_ONCE(memcg->swap.max);
+		swapusage = page_counter_read(&memcg->swap);
+
+		if (!swapmax)
+			return 0;
+
+		if (swapmax == PAGE_COUNTER_MAX)
+			totalswap = i.totalswap * PAGE_SIZE;
+		else
+			totalswap = swapmax * PAGE_SIZE;
+		usedswap = swapusage * PAGE_SIZE;
+	}
+
+	seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+		   "virtual",
+		   "virtual\t",
+		   totalswap, totalswap < 10000000 ? "\t" : "",
+		   usedswap, usedswap < 10000000 ? "\t" : "",
+		   -1);
+	return 0;
+}
+
 static int swaps_open(struct inode *inode, struct file *file)
 {
 	struct seq_file *seq;
+	struct mem_cgroup *memcg;
 	int ret;
+
+	memcg = get_current_most_limited_memcg();
+	if (memcg) {
+		ret = single_open(file, fake_swap_show, memcg);
+		if (ret) {
+			mem_cgroup_put(memcg);
+			return ret;
+		}
+
+		seq = file->private_data;
+		seq->poll_event = atomic_read(&proc_poll_event);
+		return 0;
+	}
 
 	ret = seq_open(file, &swaps_op);
 	if (ret)
@@ -3110,12 +3173,25 @@ static int swaps_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int swaps_release(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq = file->private_data;
+
+	if (seq && seq->private)
+		mem_cgroup_put(seq->private);
+
+	if (seq && seq->op == &swaps_op)
+		return seq_release(inode, file);
+
+	return single_release(inode, file);
+}
+
 static const struct proc_ops swaps_proc_ops = {
 	.proc_flags	= PROC_ENTRY_PERMANENT,
 	.proc_open	= swaps_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= seq_release,
+	.proc_release	= swaps_release,
 	.proc_poll	= swaps_poll,
 };
 
