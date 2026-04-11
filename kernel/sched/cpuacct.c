@@ -27,7 +27,14 @@ struct cpuacct {
 	struct cgroup_subsys_state	css;
 	/* cpuusage holds pointer to a u64-type object on every CPU */
 	u64 __percpu	*cpuusage;
+#ifdef CONFIG_CFS_BANDWIDTH
+	struct kernel_cpustat __percpu	*cpustat_old;
+	struct kernel_cpustat __percpu	*cpustat_fake;
+#endif
 	struct kernel_cpustat __percpu	*cpustat;
+#ifdef CONFIG_CFS_BANDWIDTH
+	u64 timestamp_old;
+#endif
 };
 
 static inline struct cpuacct *css_ca(struct cgroup_subsys_state *css)
@@ -69,12 +76,33 @@ cpuacct_css_alloc(struct cgroup_subsys_state *parent_css)
 	if (!ca->cpuusage)
 		goto out_free_ca;
 
+#ifdef CONFIG_CFS_BANDWIDTH
+	ca->cpustat_old = alloc_percpu(struct kernel_cpustat);
+	if (!ca->cpustat_old)
+		goto out_free_cpuusage;
+
+	ca->cpustat_fake = alloc_percpu(struct kernel_cpustat);
+	if (!ca->cpustat_fake)
+		goto out_free_cpustat_old;
+#endif
+
 	ca->cpustat = alloc_percpu(struct kernel_cpustat);
+#ifdef CONFIG_CFS_BANDWIDTH
+	if (!ca->cpustat)
+		goto out_free_cpustat_fake;
+#else
 	if (!ca->cpustat)
 		goto out_free_cpuusage;
+#endif
 
 	return &ca->css;
 
+#ifdef CONFIG_CFS_BANDWIDTH
+out_free_cpustat_fake:
+	free_percpu(ca->cpustat_fake);
+out_free_cpustat_old:
+	free_percpu(ca->cpustat_old);
+#endif
 out_free_cpuusage:
 	free_percpu(ca->cpuusage);
 out_free_ca:
@@ -90,6 +118,10 @@ static void cpuacct_css_free(struct cgroup_subsys_state *css)
 
 	free_percpu(ca->cpustat);
 	free_percpu(ca->cpuusage);
+#ifdef CONFIG_CFS_BANDWIDTH
+	free_percpu(ca->cpustat_old);
+	free_percpu(ca->cpustat_fake);
+#endif
 	kfree(ca);
 }
 
@@ -363,3 +395,116 @@ struct cgroup_subsys cpuacct_cgrp_subsys = {
 	.legacy_cftypes	= files,
 	.early_init	= true,
 };
+
+#ifdef CONFIG_CFS_BANDWIDTH
+u64 cpustat_fake_set_timestamp(struct cgroup_subsys_state *css, u64 new)
+{
+	struct cpuacct *ca = css_ca(css);
+	u64 old = ca->timestamp_old;
+
+	ca->timestamp_old = new;
+	return old;
+}
+
+static u64 cpustat_fake_add(u64 left, u64 right)
+{
+	u64 sum;
+
+	if (check_add_overflow(left, right, &sum))
+		return U64_MAX;
+	return sum;
+}
+
+void cpustat_fake_readout(struct cgroup_subsys_state *css, int cpu,
+			  u64 *user, u64 *system,
+			  u64 *user_old, u64 *system_old)
+{
+	struct cpuacct *ca = css_ca(css);
+	u64 *cpustat = per_cpu_ptr(ca->cpustat, cpu)->cpustat;
+	u64 *cpustat_old = per_cpu_ptr(ca->cpustat_old, cpu)->cpustat;
+
+#ifndef CONFIG_64BIT
+	/*
+	 * Take rq->lock to make 64-bit read safe on 32-bit platforms.
+	 */
+	raw_spin_lock_irq(&cpu_rq(cpu)->lock);
+#endif
+	if (WARN_ON_ONCE(ca == &root_cpuacct)) {
+		*user_old = 0;
+		*system_old = 0;
+		*user = 0;
+		*system = 0;
+		goto out;
+	}
+
+	*user_old = cpustat_old[CPUTIME_USER];
+	*system_old = cpustat_old[CPUTIME_SYSTEM];
+
+	*user = cpustat_fake_add(cpustat[CPUTIME_USER],
+				 cpustat[CPUTIME_NICE]);
+	*system = cpustat_fake_add(cpustat[CPUTIME_SYSTEM],
+				   cpustat[CPUTIME_IRQ]);
+	*system = cpustat_fake_add(*system, cpustat[CPUTIME_SOFTIRQ]);
+
+	cpustat_old[CPUTIME_USER] = *user;
+	cpustat_old[CPUTIME_SYSTEM] = *system;
+
+out:
+#ifndef CONFIG_64BIT
+	raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
+#endif
+}
+
+void cpustat_fake_readout_percpu(struct cgroup_subsys_state *css,
+				 int cpu, u64 *user, u64 *system)
+{
+	struct cpuacct *ca = css_ca(css);
+	u64 *cpustat_fake = per_cpu_ptr(ca->cpustat_fake, cpu)->cpustat;
+
+#ifndef CONFIG_64BIT
+	/*
+	 * Take rq->lock to make 64-bit write safe on 32-bit platforms.
+	 */
+	raw_spin_lock_irq(&cpu_rq(cpu)->lock);
+#endif
+	if (WARN_ON_ONCE(ca == &root_cpuacct)) {
+		*user = 0;
+		*system = 0;
+		goto out_percpu;
+	}
+
+	*user = cpustat_fake[CPUTIME_USER];
+	*system = cpustat_fake[CPUTIME_SYSTEM];
+
+out_percpu:
+#ifndef CONFIG_64BIT
+	raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
+#endif
+}
+
+void cpustat_fake_write(struct cgroup_subsys_state *css, int cpu,
+			u64 user, u64 system)
+{
+	struct cpuacct *ca = css_ca(css);
+	u64 *cpustat_fake = per_cpu_ptr(ca->cpustat_fake, cpu)->cpustat;
+
+#ifndef CONFIG_64BIT
+	/*
+	 * Take rq->lock to make 64-bit write safe on 32-bit platforms.
+	 */
+	raw_spin_lock_irq(&cpu_rq(cpu)->lock);
+#endif
+	if (WARN_ON_ONCE(ca == &root_cpuacct))
+		goto out_write;
+
+	cpustat_fake[CPUTIME_USER] =
+		cpustat_fake_add(cpustat_fake[CPUTIME_USER], user);
+	cpustat_fake[CPUTIME_SYSTEM] =
+		cpustat_fake_add(cpustat_fake[CPUTIME_SYSTEM], system);
+
+out_write:
+#ifndef CONFIG_64BIT
+	raw_spin_unlock_irq(&cpu_rq(cpu)->lock);
+#endif
+}
+#endif /* CONFIG_CFS_BANDWIDTH */
