@@ -9615,6 +9615,22 @@ static u64 tg_get_cfs_quota(struct task_group *tg)
 	return quota_us;
 }
 
+void cpu_cfs_quota_period_read(struct cgroup_subsys_state *css, s64 *quota,
+			       u64 *period)
+{
+	struct task_group *tg = css_tg(css);
+	struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
+	unsigned long flags;
+	u64 quota_us;
+
+	raw_spin_lock_irqsave(&cfs_b->lock, flags);
+	quota_us = tg_get_cfs_quota(tg);
+	*period = tg_get_cfs_period(tg);
+	raw_spin_unlock_irqrestore(&cfs_b->lock, flags);
+
+	*quota = quota_us;
+}
+
 static u64 tg_get_cfs_burst(struct task_group *tg)
 {
 	u64 burst_us;
