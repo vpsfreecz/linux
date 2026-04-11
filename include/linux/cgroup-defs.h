@@ -598,6 +598,9 @@ struct cgroup {
 	struct cgroup_base_stat last_bstat;
 	struct cgroup_base_stat bstat;
 	struct prev_cputime prev_cputime;	/* for printing out cputime */
+	u64 rstat_cpu_fake_timestamp;
+	struct prev_cputime prev_cputime_real;
+	struct prev_cputime __percpu *prev_cputime_fake;
 
 	/*
 	 * list of pidlists, up to two for each namespace (one for procs, one
