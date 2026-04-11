@@ -66,6 +66,8 @@ static void consume_pending_child_ns_request(struct task_struct *task,
 	if (consume_lsm) {
 		task->lsm_ns_for_child = false;
 		task->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
+		kfree(task->lsm_ns_for_child_ctx);
+		task->lsm_ns_for_child_ctx = NULL;
 	}
 #endif
 	kfree(task->syslog_ns_for_child_name);
@@ -117,14 +119,15 @@ static inline struct nsproxy *create_nsproxy(void)
  */
 static struct nsproxy *create_new_namespaces(u64 flags,
 	struct task_struct *tsk, struct task_struct *syslog_req_task,
-	struct user_namespace *user_ns, struct fs_struct *new_fs)
+	struct user_namespace *user_ns, struct cred *new_cred,
+	struct fs_struct *new_fs)
 {
 	bool new_syslog_ns = false;
 	bool new_tracing_ns = false;
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	bool new_lsm_ns = false;
 	bool consume_lsm_req = false;
-	u64 new_lsmid = LSM_ID_UNDEF;
+	struct lsm_ctx *new_lsm_ctx = NULL;
 	struct lsm_namespace *created_lsm_ns;
 #endif
 	char *syslog_name = NULL;
@@ -188,7 +191,7 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		consume_lsm_req = lsm_child_ns_request_consumable(syslog_req_task,
 							   user_ns);
 		new_lsm_ns = consume_lsm_req;
-		new_lsmid = syslog_req_task->lsm_ns_for_child_lsmid;
+		new_lsm_ctx = syslog_req_task->lsm_ns_for_child_ctx;
 #endif
 		syslog_name = syslog_req_task->syslog_ns_for_child_name;
 	}
@@ -212,8 +215,8 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 #endif
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	if (new_lsm_ns) {
-		created_lsm_ns = copy_lsm_ns(true, user_ns, new_lsmid,
-					     current_lsm_ns());
+		created_lsm_ns = copy_lsm_ns(true, user_ns, tsk, new_cred,
+					     new_lsm_ctx, current_lsm_ns());
 		if (IS_ERR(created_lsm_ns)) {
 			err = PTR_ERR(created_lsm_ns);
 			goto out_lsm;
@@ -286,7 +289,7 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 		(CLONE_NEWIPC | CLONE_SYSVSEM))
 		return -EINVAL;
 
-	new_ns = create_new_namespaces(flags, tsk, current, user_ns,
+	new_ns = create_new_namespaces(flags, tsk, current, user_ns, NULL,
 				       tsk->fs);
 	if (IS_ERR(new_ns))
 		return  PTR_ERR(new_ns);
@@ -335,7 +338,7 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 		return -EPERM;
 
 	*new_nsp = create_new_namespaces(unshare_flags, current, current,
-					 user_ns, new_fs ? new_fs : current->fs);
+					 user_ns, new_cred, new_fs ? new_fs : current->fs);
 	if (IS_ERR(*new_nsp)) {
 		err = PTR_ERR(*new_nsp);
 		goto out;
@@ -378,7 +381,7 @@ int exec_task_namespaces(void)
 	 * It must not consume a pending child-boundary namespace request,
 	 * which is meant for the next real clone/unshare namespace duplication.
 	 */
-	new = create_new_namespaces(0, tsk, NULL, current_user_ns(),
+	new = create_new_namespaces(0, tsk, NULL, current_user_ns(), NULL,
 				    tsk->fs);
 	if (IS_ERR(new))
 		return PTR_ERR(new);
@@ -453,7 +456,7 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 	 * here; it belongs to the next real clone/unshare boundary.
 	 */
 	nsset->nsproxy = create_new_namespaces(0, me, NULL,
-			       current_user_ns(), me->fs);
+			       current_user_ns(), NULL, me->fs);
 	if (IS_ERR(nsset->nsproxy))
 		return PTR_ERR(nsset->nsproxy);
 
