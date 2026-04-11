@@ -373,6 +373,14 @@ struct cgroup_base_stat {
 	u64 ntime;
 };
 
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+struct cgroup_fake_cputime {
+	u64 user;
+	u64 system;
+};
+#endif
+
 /*
  * rstat - cgroup scalable recursive statistics.  Accounting is done
  * per-cpu in css_rstat_cpu which is then lazily propagated up the
@@ -603,6 +611,14 @@ struct cgroup {
 	struct cgroup_base_stat last_bstat;
 	struct cgroup_base_stat bstat;
 	struct prev_cputime prev_cputime;	/* for printing out cputime */
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	u64 rstat_cpu_fake_timestamp;
+	struct prev_cputime prev_cputime_real;
+	u64 rstat_cpu_fake_user;
+	u64 rstat_cpu_fake_system;
+	struct cgroup_fake_cputime __percpu *rstat_cpu_fake;
+#endif
 
 	/*
 	 * list of pidlists, up to two for each namespace (one for procs, one

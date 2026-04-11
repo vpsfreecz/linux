@@ -85,6 +85,11 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.max_allowed_capacity	= SCHED_CAPACITY_SCALE,
 	.syslog_ns_for_child = false,
 	.syslog_ns_for_child_name = NULL,
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	.set_fake_cpu_mask = 0,
+	.fake_cpu_mask = CPU_MASK_ALL,
+#endif
 	.nr_cpus_allowed= NR_CPUS,
 	.mm		= NULL,
 	.active_mm	= &init_mm,

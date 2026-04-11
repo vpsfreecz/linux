@@ -2632,6 +2632,10 @@ static void init_cgroup_housekeeping(struct cgroup *cgrp)
 	cgrp->max_descendants = INT_MAX;
 	cgrp->max_depth = INT_MAX;
 	prev_cputime_init(&cgrp->prev_cputime);
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	prev_cputime_init(&cgrp->prev_cputime_real);
+#endif
 
 	for_each_subsys(ss, ssid)
 		INIT_LIST_HEAD(&cgrp->e_csets[ssid]);
