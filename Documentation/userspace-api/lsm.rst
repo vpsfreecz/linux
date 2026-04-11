@@ -71,3 +71,7 @@ Additional documentation
 
 * Documentation/security/lsm.rst
 * Documentation/security/lsm-development.rst
+
+
+``unshare``
+  Arm creation of a new child LSM namespace boundary for the next clone/unshare namespace duplication. The selected backend is carried in ``struct lsm_ctx.id`` and no context payload is used.

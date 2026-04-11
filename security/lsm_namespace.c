@@ -7,9 +7,26 @@
 #include <linux/nstree.h>
 #include <linux/proc_ns.h>
 #include <linux/rcupdate.h>
+#include <linux/sched.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/user_namespace.h>
+
+static bool lsm_ns_restricts_visibility(const struct lsm_namespace *ns)
+{
+	return ns && ns != &init_lsm_ns && ns->lsmid != LSM_ID_UNDEF;
+}
+
+static bool lsm_ns_is_managed_major(u64 lsmid)
+{
+	switch (lsmid) {
+	case LSM_ID_APPARMOR:
+	case LSM_ID_SELINUX:
+		return true;
+	default:
+		return false;
+	}
+}
 
 struct lsm_namespace init_lsm_ns = {
 	.user_ns = &init_user_ns,
@@ -46,6 +63,35 @@ struct lsm_namespace *current_lsm_ns(void)
 	return &init_lsm_ns;
 }
 EXPORT_SYMBOL_GPL(current_lsm_ns);
+
+bool lsm_ns_visible_lsmid(u64 lsmid)
+{
+	struct lsm_namespace *ns = current_lsm_ns();
+
+	if (!lsm_ns_restricts_visibility(ns))
+		return true;
+
+	if (!lsm_ns_is_managed_major(lsmid))
+		return true;
+
+	return ns->lsmid == lsmid;
+}
+EXPORT_SYMBOL_GPL(lsm_ns_visible_lsmid);
+
+int lsm_ns_prepare_unshare(u64 lsmid)
+{
+	if (!lsm_ns_valid_lsmid(lsmid))
+		return -EOPNOTSUPP;
+
+	current->lsm_ns_for_child = true;
+	current->lsm_ns_for_child_lsmid = lsmid;
+
+	pr_notice("lsm_ns: arm child create current=%u lsm=%llu\n",
+		  current_lsm_ns()->ns.inum,
+		  (unsigned long long)lsmid);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(lsm_ns_prepare_unshare);
 
 static void delayed_free_lsm_ns(struct rcu_head *head)
 {

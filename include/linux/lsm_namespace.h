@@ -32,6 +32,8 @@ struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns
 int setup_lsm_namespace(struct lsm_namespace *ns);
 void free_lsm_ns(struct lsm_namespace *ns);
 int lsm_ns_check_userns_setns(const struct user_namespace *user_ns);
+int lsm_ns_prepare_unshare(u64 lsmid);
+bool lsm_ns_visible_lsmid(u64 lsmid);
 
 static inline struct lsm_namespace *to_lsm_ns(struct ns_common *ns)
 {
@@ -76,6 +78,16 @@ static inline void free_lsm_ns(struct lsm_namespace *ns)
 static inline int lsm_ns_check_userns_setns(const struct user_namespace *user_ns)
 {
 	return 0;
+}
+
+static inline int lsm_ns_prepare_unshare(u64 lsmid)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline bool lsm_ns_visible_lsmid(u64 lsmid)
+{
+	return true;
 }
 
 static inline struct lsm_namespace *to_lsm_ns(struct ns_common *ns)
