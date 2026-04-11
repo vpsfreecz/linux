@@ -95,6 +95,87 @@ static bool kernfs_vpsa_kernfs_filter_path_build_locked(const struct kernfs_node
 	return true;
 }
 
+static bool kernfs_vpsa_segment_eq(const char *segment, u16 len,
+				   const char *want)
+{
+	return strlen(want) == len && !strncmp(segment, want, len);
+}
+
+static bool kernfs_vpsa_cpu_segment_id(const char *segment, u16 len,
+				       unsigned int *id)
+{
+	unsigned int value = 0;
+	u16 i;
+
+	if (len <= 3 || strncmp(segment, "cpu", 3))
+		return false;
+
+	for (i = 3; i < len; i++) {
+		unsigned int digit;
+
+		if (segment[i] < '0' || segment[i] > '9')
+			return false;
+		digit = segment[i] - '0';
+		if (value > (UINT_MAX - digit) / 10)
+			return false;
+		value = value * 10 + digit;
+	}
+
+	*id = value;
+	return true;
+}
+
+static bool kernfs_vpsa_cpu_path_hidden(const char *const *segments,
+					const u16 *lens, u16 depth,
+					bool *cpu_path)
+{
+	struct cpumask cpu_fake_mask;
+	unsigned int id;
+
+	if (cpu_path)
+		*cpu_path = false;
+
+	if (depth < 4 ||
+	    !kernfs_vpsa_segment_eq(segments[0], lens[0], "devices") ||
+	    !kernfs_vpsa_segment_eq(segments[1], lens[1], "system") ||
+	    !kernfs_vpsa_segment_eq(segments[2], lens[2], "cpu") ||
+	    !kernfs_vpsa_cpu_segment_id(segments[3], lens[3], &id))
+		return false;
+
+	if (cpu_path)
+		*cpu_path = true;
+
+	if (!current->nsproxy ||
+	    current->nsproxy->cgroup_ns == &init_cgroup_ns ||
+	    !fake_online_cpumask(current, &cpu_fake_mask))
+		return false;
+
+	return id >= nr_cpu_ids || !cpumask_test_cpu(id, &cpu_fake_mask);
+}
+
+static bool
+kernfs_vpsa_cpu_path_hidden_locked(const struct kernfs_node *kn,
+				   const struct qstr *leaf, bool *cpu_path)
+{
+	const char *segments[VPSA_KERNFS_FILTER_MAX_DEPTH];
+	u16 lens[VPSA_KERNFS_FILTER_MAX_DEPTH];
+	u16 depth;
+
+	if (!cpu_path &&
+	    (!current->nsproxy ||
+	     current->nsproxy->cgroup_ns == &init_cgroup_ns))
+		return false;
+
+	if (!kernfs_vpsa_kernfs_filter_path_build_locked(kn, leaf, segments,
+							 lens, &depth)) {
+		if (cpu_path)
+			*cpu_path = false;
+		return false;
+	}
+
+	return kernfs_vpsa_cpu_path_hidden(segments, lens, depth, cpu_path);
+}
+
 static enum vpsa_kernfs_filter_decision
 kernfs_vpsa_kernfs_filter_kn_decide_locked_view(const struct kernfs_node *kn,
 						const struct qstr *leaf,
@@ -104,22 +185,33 @@ kernfs_vpsa_kernfs_filter_kn_decide_locked_view(const struct kernfs_node *kn,
 	const char *segments[VPSA_KERNFS_FILTER_MAX_DEPTH];
 	u16 lens[VPSA_KERNFS_FILTER_MAX_DEPTH];
 	struct kernfs_root *root;
+	bool cpu_view;
 	u16 depth;
 
 	if (!kn)
 		return vpsa_kernfs_filter_path_unavailable(mask, view);
-	if (!view && !vpsa_kernfs_filter_subject_restricted_current())
+	cpu_view = current->nsproxy &&
+		   current->nsproxy->cgroup_ns != &init_cgroup_ns;
+	if (!cpu_view && !view &&
+	    !vpsa_kernfs_filter_subject_restricted_current())
 		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
 
 	root = kernfs_root(kn);
 	if (!root)
 		return vpsa_kernfs_filter_path_unavailable(mask, view);
-	if (!kernfs_vpsa_kernfs_filter_root_enabled(root))
+	if (!cpu_view && !kernfs_vpsa_kernfs_filter_root_enabled(root))
 		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
 
 	if (!kernfs_vpsa_kernfs_filter_path_build_locked(kn, leaf, segments, lens, &depth))
 		return vpsa_kernfs_filter_path_unavailable(mask, view);
 	if (!depth)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (cpu_view &&
+	    kernfs_vpsa_cpu_path_hidden(segments, lens, depth, NULL))
+		return VPSA_KERNFS_FILTER_DECISION_HIDE;
+	if (!view && !vpsa_kernfs_filter_subject_restricted_current())
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (!kernfs_vpsa_kernfs_filter_root_enabled(root))
 		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
 	if (view)
 		return vpsa_kernfs_filter_sysfs_path_decide_view(segments, lens, depth, mask,
@@ -1314,6 +1406,15 @@ static int kernfs_dop_revalidate(struct inode *dir, const struct qstr *name,
 		down_read(&root->kernfs_rwsem);
 		parent = kernfs_dentry_node(dentry->d_parent);
 		if (parent) {
+			bool cpu_path;
+			bool hidden;
+
+			hidden = kernfs_vpsa_cpu_path_hidden_locked(parent, name,
+								    &cpu_path);
+			if (cpu_path && !hidden) {
+				up_read(&root->kernfs_rwsem);
+				return 0;
+			}
 			if (kernfs_dir_changed(parent, dentry)) {
 				up_read(&root->kernfs_rwsem);
 				return 0;
@@ -1347,6 +1448,9 @@ static int kernfs_dop_revalidate(struct inode *dir, const struct qstr *name,
 	/* The kernfs node has been moved to a different namespace */
 	if (parent && kernfs_ns_enabled(parent) &&
 	    kernfs_info(dentry->d_sb)->ns != kn->ns)
+		goto out_bad;
+
+	if (kernfs_vpsa_cpu_path_hidden_locked(kn, NULL, NULL))
 		goto out_bad;
 
 	up_read(&root->kernfs_rwsem);
