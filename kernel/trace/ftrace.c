@@ -35,6 +35,7 @@
 #include <linux/hash.h>
 #include <linux/rcupdate.h>
 #include <linux/kprobes.h>
+#include <linux/tracing_namespace.h>
 
 #include <trace/events/sched.h>
 
@@ -4646,6 +4647,9 @@ ftrace_regex_open(struct ftrace_ops *ops, int flag,
 
 	ftrace_ops_init(ops);
 
+	if ((file->f_mode & FMODE_WRITE) && tracing_ns_current_is_guest())
+		return -EACCES;
+
 	if (unlikely(ftrace_disabled))
 		return -ENODEV;
 
@@ -6827,6 +6831,9 @@ ftrace_graph_open(struct inode *inode, struct file *file)
 	struct ftrace_graph_data *fgd;
 	int ret;
 
+	if ((file->f_mode & FMODE_WRITE) && tracing_ns_current_is_guest())
+		return -EACCES;
+
 	if (unlikely(ftrace_disabled))
 		return -ENODEV;
 
@@ -6854,6 +6861,9 @@ ftrace_graph_notrace_open(struct inode *inode, struct file *file)
 {
 	struct ftrace_graph_data *fgd;
 	int ret;
+
+	if ((file->f_mode & FMODE_WRITE) && tracing_ns_current_is_guest())
+		return -EACCES;
 
 	if (unlikely(ftrace_disabled))
 		return -ENODEV;
