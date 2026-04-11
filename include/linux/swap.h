@@ -420,6 +420,7 @@ extern unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 
 #define MEMCG_RECLAIM_MAY_SWAP (1 << 1)
 #define MEMCG_RECLAIM_PROACTIVE (1 << 2)
+#define MEMCG_RECLAIM_SYSTEM_PROACTIVE_SWAP (1 << 3)
 #define MIN_SWAPPINESS 0
 #define MAX_SWAPPINESS 200
 extern unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
@@ -487,7 +488,7 @@ static inline long get_nr_swap_pages(void)
 }
 
 extern void si_swapinfo(struct sysinfo *);
-swp_entry_t folio_alloc_swap(struct folio *folio);
+swp_entry_t folio_alloc_swap(struct folio *folio, bool system_proactive_swap);
 bool folio_free_swap(struct folio *folio);
 void put_swap_folio(struct folio *folio, swp_entry_t entry);
 extern swp_entry_t get_swap_page_of_type(int);
@@ -597,7 +598,8 @@ static inline int swp_swapcount(swp_entry_t entry)
 	return 0;
 }
 
-static inline swp_entry_t folio_alloc_swap(struct folio *folio)
+static inline swp_entry_t folio_alloc_swap(struct folio *folio,
+		bool system_proactive_swap)
 {
 	swp_entry_t entry;
 	entry.val = 0;
@@ -663,13 +665,15 @@ static inline void folio_throttle_swaprate(struct folio *folio, gfp_t gfp)
 
 #if defined(CONFIG_MEMCG) && defined(CONFIG_SWAP)
 void mem_cgroup_swapout(struct folio *folio, swp_entry_t entry);
-int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry);
+int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry,
+		bool system_proactive_swap);
 static inline int mem_cgroup_try_charge_swap(struct folio *folio,
-		swp_entry_t entry)
+		swp_entry_t entry, bool system_proactive_swap)
 {
 	if (mem_cgroup_disabled())
 		return 0;
-	return __mem_cgroup_try_charge_swap(folio, entry);
+	return __mem_cgroup_try_charge_swap(folio, entry,
+			system_proactive_swap);
 }
 
 extern void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages);
@@ -680,15 +684,18 @@ static inline void mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_p
 	__mem_cgroup_uncharge_swap(entry, nr_pages);
 }
 
-extern long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg);
-extern bool mem_cgroup_swap_full(struct folio *folio);
+extern long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg,
+		bool system_proactive_swap);
+extern bool mem_cgroup_swap_full(struct folio *folio,
+		bool system_proactive_swap);
 #else
 static inline void mem_cgroup_swapout(struct folio *folio, swp_entry_t entry)
 {
 }
 
 static inline int mem_cgroup_try_charge_swap(struct folio *folio,
-					     swp_entry_t entry)
+					     swp_entry_t entry,
+					     bool system_proactive_swap)
 {
 	return 0;
 }
@@ -698,12 +705,14 @@ static inline void mem_cgroup_uncharge_swap(swp_entry_t entry,
 {
 }
 
-static inline long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg)
+static inline long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg,
+						bool system_proactive_swap)
 {
 	return get_nr_swap_pages();
 }
 
-static inline bool mem_cgroup_swap_full(struct folio *folio)
+static inline bool mem_cgroup_swap_full(struct folio *folio,
+					bool system_proactive_swap)
 {
 	return vm_swap_full();
 }
