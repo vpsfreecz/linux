@@ -420,10 +420,10 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 		} else
 			folio_deactivate(folio);
 huge_unlock:
-		spin_unlock(ptl);
-		if (pageout)
-			reclaim_pages(&folio_list);
-		return 0;
+			spin_unlock(ptl);
+			if (pageout)
+				reclaim_pages(&folio_list, 0);
+			return 0;
 	}
 
 regular_folio:
@@ -545,10 +545,10 @@ restart:
 	if (start_pte) {
 		arch_leave_lazy_mmu_mode();
 		pte_unmap_unlock(start_pte, ptl);
-	}
-	if (pageout)
-		reclaim_pages(&folio_list);
-	cond_resched();
+		}
+		if (pageout)
+			reclaim_pages(&folio_list, 0);
+		cond_resched();
 
 	return 0;
 }

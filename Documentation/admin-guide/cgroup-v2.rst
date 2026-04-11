@@ -1685,7 +1685,8 @@ The following nested keys are defined.
 	cgroups.
 
 	The total amount of swap currently being used by the cgroup
-	and its descendants.
+	and its descendants.  This includes swap that was imposed by
+	system-managed proactive reclaim.
 
   memory.swap.high
 	A read-write single value file which exists on non-root
@@ -1718,7 +1719,10 @@ The following nested keys are defined.
 	cgroups.  The default is "max".
 
 	Swap usage hard limit.  If a cgroup's swap usage reaches this
-	limit, anonymous memory of the cgroup will not be swapped out.
+	limit, anonymous memory of the cgroup will not be swapped out
+	during regular reclaim.  System-managed proactive reclaim can
+	still swap out cold anonymous memory and let ``memory.swap.current``
+	exceed this limit.
 
   memory.swap.events
 	A read-only flat-keyed file which exists on non-root cgroups.
@@ -1739,6 +1743,11 @@ The following nested keys are defined.
 		The number of times swap allocation failed either
 		because of running out of swap system-wide or max
 		limit.
+
+	  proactive
+		The number of times system-managed proactive reclaim
+		swapped out the cgroup's anonymous memory while
+		bypassing ``memory.swap.max``.
 
 	When reduced under the current usage, the existing swap
 	entries are reclaimed gradually and the swap usage may stay

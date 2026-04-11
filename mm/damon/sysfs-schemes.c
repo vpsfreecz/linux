@@ -847,6 +847,8 @@ struct damos_sysfs_quota_goal {
 static const char * const damos_sysfs_quota_goal_metric_strs[] = {
 	"user_input",
 	"some_mem_psi_us",
+	"free_mem_rate",
+	"free_mem_bytes",
 };
 
 static struct damos_sysfs_quota_goal *damos_sysfs_quota_goal_alloc(void)
