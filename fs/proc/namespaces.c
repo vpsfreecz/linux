@@ -11,6 +11,7 @@
 #include <linux/user_namespace.h>
 #include <linux/syslog_namespace.h>
 #include <linux/tracing_namespace.h>
+#include <linux/lsm_namespace.h>
 #include "internal.h"
 
 
@@ -44,6 +45,9 @@ static const struct proc_ns_operations *const ns_entries[] = {
 #endif
 #ifdef CONFIG_TRACING_NS
 	&tracingns_operations,
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	&lsmns_operations,
 #endif
 };
 
