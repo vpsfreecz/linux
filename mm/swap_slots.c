@@ -302,7 +302,7 @@ direct_free:
 	}
 }
 
-swp_entry_t folio_alloc_swap(struct folio *folio)
+swp_entry_t folio_alloc_swap(struct folio *folio, bool system_proactive_swap)
 {
 	swp_entry_t entry;
 	struct swap_slots_cache *cache;
@@ -345,7 +345,7 @@ repeat:
 
 	get_swap_pages(1, &entry, 0);
 out:
-	if (mem_cgroup_try_charge_swap(folio, entry)) {
+	if (mem_cgroup_try_charge_swap(folio, entry, system_proactive_swap)) {
 		put_swap_folio(folio, entry);
 		entry.val = 0;
 	}
