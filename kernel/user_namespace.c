@@ -5,6 +5,7 @@
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
 #include <linux/user_namespace.h>
+#include <linux/syslog_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/highuid.h>
 #include <linux/cred.h>
@@ -145,6 +146,7 @@ int create_user_ns(struct cred *new)
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_SIGPENDING, rlimit(RLIMIT_SIGPENDING));
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_MEMLOCK, rlimit(RLIMIT_MEMLOCK));
 	ns->ucounts = ucounts;
+	ns->syslog_ns = get_syslog_ns(current->nsproxy->syslog_ns);
 
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
 	mutex_lock(&userns_state_mutex);
@@ -157,12 +159,28 @@ int create_user_ns(struct cred *new)
 #endif
 	ret = -ENOMEM;
 	if (!setup_userns_sysctls(ns))
-		goto fail_keyring;
+		goto fail_put_syslog;
+
+	/*
+	 * When a new user namespace inherits a non-init syslog namespace from
+	 * the init user namespace, hand ownership over only after all failure
+	 * points are behind us. If a new child syslog namespace is pending,
+	 * copy_syslog_ns() will attach that namespace to the new userns
+	 * directly instead.
+	 */
+	if (!current->syslog_ns_for_child &&
+	    ns->syslog_ns != &init_syslog_ns &&
+	    ns->syslog_ns->user_ns == &init_user_ns) {
+		put_user_ns(ns->syslog_ns->user_ns);
+		ns->syslog_ns->user_ns = get_user_ns(ns);
+	}
 
 	set_cred_user_ns(new, ns);
 	fake_sysctl_bufs_init(ns);
 	ns_tree_add(ns);
 	return 0;
+fail_put_syslog:
+	put_syslog_ns(ns->syslog_ns);
 fail_keyring:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	key_put(ns->persistent_keyring_register);
@@ -220,6 +238,7 @@ static void free_user_ns(struct work_struct *work)
 #if IS_ENABLED(CONFIG_BINFMT_MISC)
 		kfree(ns->binfmt_misc);
 #endif
+		put_syslog_ns(ns->syslog_ns);
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		fake_sysctl_bufs_free(ns);

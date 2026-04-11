@@ -186,6 +186,7 @@ static inline struct task_struct *alloc_task_struct_node(int node)
 
 static inline void free_task_struct(struct task_struct *tsk)
 {
+	kfree(tsk->syslog_ns_for_child_name);
 	kmem_cache_free(task_struct_cachep, tsk);
 }
 
@@ -2013,6 +2014,12 @@ __latent_entropy struct task_struct *copy_process(
 	p = dup_task_struct(current, node);
 	if (!p)
 		goto fork_out;
+	/*
+	 * Pending syslog-ns-on-next-clone state belongs to the current task and
+	 * must not be inherited by the freshly duplicated child task_struct.
+	 */
+	p->syslog_ns_for_child = false;
+	p->syslog_ns_for_child_name = NULL;
 	p->flags &= ~PF_KTHREAD;
 	if (args->kthread)
 		p->flags |= PF_KTHREAD;
