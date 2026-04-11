@@ -16,6 +16,7 @@
 #include <linux/ipc_namespace.h>
 #include <linux/time_namespace.h>
 #include <linux/utsname.h>
+#include <linux/syslog_namespace.h>
 #include <linux/exportfs.h>
 #include <linux/nstree.h>
 #include <net/net_namespace.h>
@@ -560,6 +561,12 @@ static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 	case CLONE_NEWUTS:
 		if (!current_in_namespace(to_uts_ns(ns)))
 			owning_ns = to_uts_ns(ns)->user_ns;
+		break;
+#endif
+#ifdef CONFIG_SYSLOG_NS
+	case SYSLOG_ACTION_NEW_NS:
+		if (current_syslog_ns() != to_syslog_ns(ns))
+			owning_ns = to_syslog_ns(ns)->user_ns;
 		break;
 #endif
 	default:
