@@ -4,6 +4,7 @@
 #include <linux/proc_ns.h>
 #include <linux/syslog_namespace.h>
 #include <linux/tracing_namespace.h>
+#include <linux/lsm_namespace.h>
 #include <linux/vfsdebug.h>
 
 /**
@@ -89,6 +90,13 @@ struct ns_tree tracing_ns_tree = {
 	.ns_list = LIST_HEAD_INIT(tracing_ns_tree.ns_list),
 	.ns_tree_lock = __SEQLOCK_UNLOCKED(tracing_ns_tree.ns_tree_lock),
 	.type = TRACING_NS_TYPE,
+};
+
+struct ns_tree lsm_ns_tree = {
+	.ns_tree = RB_ROOT,
+	.ns_list = LIST_HEAD_INIT(lsm_ns_tree.ns_list),
+	.ns_tree_lock = __SEQLOCK_UNLOCKED(lsm_ns_tree.ns_tree_lock),
+	.type = LSM_NS_TYPE,
 };
 
 DEFINE_COOKIE(namespace_cookie);
@@ -190,6 +198,8 @@ static struct ns_tree *ns_tree_from_type(int ns_type)
 		return &syslog_ns_tree;
 	case TRACING_NS_TYPE:
 		return &tracing_ns_tree;
+	case LSM_NS_TYPE:
+		return &lsm_ns_tree;
 	}
 
 	return NULL;
