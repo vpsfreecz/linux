@@ -260,7 +260,7 @@ again:
 
 	need_reclaim = ((flags & TTRS_ANYWAY) ||
 			((flags & TTRS_UNMAPPED) && !folio_mapped(folio)) ||
-			((flags & TTRS_FULL) && mem_cgroup_swap_full(folio)));
+			((flags & TTRS_FULL) && mem_cgroup_swap_full(folio, false)));
 	if (!need_reclaim || !folio_swapcache_freeable(folio))
 		goto out_unlock;
 
@@ -1421,6 +1421,7 @@ static bool swap_sync_discard(void)
  * folio_alloc_swap - allocate swap space for a folio
  * @folio: folio we want to move to swap
  * @gfp: gfp mask for shadow nodes
+ * @system_proactive_swap: allow host-managed reclaim past memcg swap limits
  *
  * Allocate swap space for the folio and add the folio to the
  * swap cache.
@@ -1428,7 +1429,8 @@ static bool swap_sync_discard(void)
  * Context: Caller needs to hold the folio lock.
  * Return: Whether the folio was added to the swap cache.
  */
-int folio_alloc_swap(struct folio *folio, gfp_t gfp)
+int folio_alloc_swap(struct folio *folio, gfp_t gfp,
+		     bool system_proactive_swap)
 {
 	unsigned int order = folio_order(folio);
 	unsigned int size = 1 << order;
@@ -1467,7 +1469,8 @@ again:
 	}
 
 	/* Need to call this even if allocation failed, for MEMCG_SWAP_FAIL. */
-	if (mem_cgroup_try_charge_swap(folio, entry))
+	if (mem_cgroup_try_charge_swap(folio, entry,
+				       system_proactive_swap))
 		goto out_free;
 
 	if (!entry.val)
@@ -3141,32 +3144,57 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 {
 	struct vpsadminos_memcg_view *view = swap->private;
 	struct mem_cgroup *swap_memcg = view->swap;
+	unsigned long proactive_usedswap_kb;
 	unsigned long swapmax_pages, swapusage_pages;
-	unsigned long totalswap_kb, usedswap_kb;
+	unsigned long totalswap_kb, usedswap_kb, normal_usedswap_kb;
 	struct sysinfo i;
 
 	si_swapinfo(&i);
+	proactive_usedswap_kb =
+		K(mem_cgroup_proactive_swap_usage(swap_memcg));
 
 	seq_puts(swap, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
 
 	swapmax_pages = vpsadminos_memcg_swap_limit(swap_memcg);
 	swapusage_pages = vpsadminos_memcg_swap_usage(swap_memcg);
-	if (!swapmax_pages)
+
+	if (!swapmax_pages) {
+		totalswap_kb = 0;
+		usedswap_kb = 0;
+	} else if (swapmax_pages == PAGE_COUNTER_MAX) {
+		totalswap_kb = K(i.totalswap);
+		usedswap_kb = K(swapusage_pages);
+	} else {
+		totalswap_kb = K(swapmax_pages);
+		usedswap_kb = K(swapusage_pages);
+	}
+	normal_usedswap_kb =
+		vpsadminos_saturating_sub(usedswap_kb,
+					  proactive_usedswap_kb);
+	normal_usedswap_kb = min(normal_usedswap_kb, totalswap_kb);
+
+	if (!totalswap_kb && !proactive_usedswap_kb)
 		return 0;
 
-	if (swapmax_pages == PAGE_COUNTER_MAX)
-		totalswap_kb = K(i.totalswap);
-	else
-		totalswap_kb = K(swapmax_pages);
-	usedswap_kb = K(swapusage_pages);
-	usedswap_kb = min(usedswap_kb, totalswap_kb);
+	if (totalswap_kb)
+		seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+			   "virtual",
+			   "virtual\t",
+			   totalswap_kb,
+			   totalswap_kb < 10000000 ? "\t" : "",
+			   normal_usedswap_kb,
+			   normal_usedswap_kb < 10000000 ? "\t" : "",
+			   -1);
 
-	seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
-		   "virtual",
-		   "virtual\t",
-		   totalswap_kb, totalswap_kb < 10000000 ? "\t" : "",
-		   usedswap_kb, usedswap_kb < 10000000 ? "\t" : "",
-		   -1);
+	if (proactive_usedswap_kb)
+		seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+			   "virtual-system",
+			   "virtual\t",
+			   proactive_usedswap_kb,
+			   proactive_usedswap_kb < 10000000 ? "\t" : "",
+			   proactive_usedswap_kb,
+			   proactive_usedswap_kb < 10000000 ? "\t" : "",
+			   -2);
 	return 0;
 }
 #endif

@@ -37,6 +37,12 @@ out memory regions that didn't accessed longer time first.  System
 administrators can also configure under what situation this scheme should
 automatically activated and deactivated with three memory pressure watermarks.
 
+On this tree, DAMON_RECLAIM is treated as system-managed proactive reclaim.
+That means it can page out cold anonymous memory even if the charged memory
+cgroup has ``memory.swap.max`` set to zero.  The swapped pages are still charged
+to their original memory cgroups, and such swaps are reported in
+``memory.swap.current`` and ``memory.swap.events``.
+
 Interface: Module Parameters
 ============================
 
@@ -132,6 +138,32 @@ memory pressure is incurred.  System-wide ``some`` memory PSI in microseconds
 per quota reset interval (``quota_reset_interval_ms``) is collected and
 compared to this value to see if the aim is satisfied.  Value zero means
 disabling this auto-tuning feature.
+
+Disabled by default.
+
+quota_free_mem_rate
+-------------------
+
+Desired system free memory rate in [0, 1000].
+
+While keeping the caps that set by other quotas, DAMON_RECLAIM automatically
+increases and decreases the effective level of the quota aiming this free
+memory rate.  Higher values make DAMON_RECLAIM try to keep a larger free-memory
+tail by reclaiming more cold pages.  Value zero means disabling this
+auto-tuning feature.
+
+Disabled by default.
+
+quota_free_mem_bytes
+--------------------
+
+Desired system free memory in bytes.
+
+While keeping the caps that set by other quotas, DAMON_RECLAIM automatically
+increases and decreases the effective level of the quota aiming this free
+memory amount.  Higher values make DAMON_RECLAIM try to maintain a larger
+free-memory tail by reclaiming more cold pages.  Value zero means disabling
+this auto-tuning feature.
 
 Disabled by default.
 
