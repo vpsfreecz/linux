@@ -11,6 +11,7 @@
 
 struct syslog_namespace;
 struct tracing_namespace;
+struct lsm_namespace;
 
 extern struct ns_tree cgroup_ns_tree;
 extern struct ns_tree ipc_ns_tree;
@@ -19,6 +20,7 @@ extern struct ns_tree net_ns_tree;
 extern struct ns_tree pid_ns_tree;
 extern struct ns_tree syslog_ns_tree;
 extern struct ns_tree tracing_ns_tree;
+extern struct ns_tree lsm_ns_tree;
 extern struct ns_tree time_ns_tree;
 extern struct ns_tree user_ns_tree;
 extern struct ns_tree uts_ns_tree;
@@ -32,6 +34,7 @@ extern struct ns_tree uts_ns_tree;
 		struct mnt_namespace *:    &(mnt_ns_tree),	\
 		struct syslog_namespace * : &(syslog_ns_tree),\
 		struct tracing_namespace *: &(tracing_ns_tree),\
+		struct lsm_namespace * :   &(lsm_ns_tree),\
 		struct time_namespace *:   &(time_ns_tree),	\
 		struct user_namespace *:   &(user_ns_tree),	\
 		struct uts_namespace *:    &(uts_ns_tree))
