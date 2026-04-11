@@ -3924,6 +3924,22 @@ DEFINE_CLASS(sched_change, struct sched_change_ctx *,
 
 DEFINE_CLASS_IS_UNCONDITIONAL(sched_change)
 
+#ifdef CONFIG_CFS_BANDWIDTH
+void cpu_cfs_quota_period_read(struct cgroup_subsys_state *css, s64 *quota,
+			       u64 *period);
+#endif
+
+#if defined(CONFIG_CFS_BANDWIDTH) && defined(CONFIG_CGROUP_CPUACCT)
+u64 cpustat_fake_set_timestamp(struct cgroup_subsys_state *css, u64 new);
+void cpustat_fake_readout(struct cgroup_subsys_state *css, int cpu,
+			  u64 *user, u64 *system,
+			  u64 *user_old, u64 *system_old);
+void cpustat_fake_readout_percpu(struct cgroup_subsys_state *css,
+				 int cpu, u64 *user, u64 *system);
+void cpustat_fake_write(struct cgroup_subsys_state *css, int cpu,
+			u64 user, u64 system);
+#endif
+
 #include "ext.h"
 
 #endif /* _KERNEL_SCHED_SCHED_H */

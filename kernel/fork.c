@@ -879,6 +879,10 @@ void set_task_stack_end_magic(struct task_struct *tsk)
 static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 {
 	struct task_struct *tsk;
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	unsigned long flags;
+#endif
 	int err;
 
 	if (node == NUMA_NO_NODE)
@@ -928,6 +932,15 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	if (orig->cpus_ptr == &orig->cpus_mask)
 		tsk->cpus_ptr = &tsk->cpus_mask;
 	dup_user_cpus_ptr(tsk, orig, node);
+
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	raw_spin_lock_irqsave(&orig->pi_lock, flags);
+	tsk->set_fake_cpu_mask = orig->set_fake_cpu_mask;
+	if (tsk->set_fake_cpu_mask)
+		cpumask_copy(&tsk->fake_cpu_mask, &orig->fake_cpu_mask);
+	raw_spin_unlock_irqrestore(&orig->pi_lock, flags);
+#endif
 
 	/*
 	 * One for the user space visible state that goes away when reaped.

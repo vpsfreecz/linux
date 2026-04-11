@@ -6,10 +6,12 @@
 #include <linux/stddef.h>
 #include <linux/types.h>
 
+struct cpumask;
 struct dentry;
 struct kernfs_open_file;
 struct mem_cgroup;
 struct proc_dir_entry;
+struct task_struct;
 struct user_namespace;
 struct vpsa_kernfs_filter_view;
 
@@ -82,6 +84,17 @@ ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 			    size_t count, loff_t pos, bool *handled);
 void fake_sysctl_bufs_init(struct user_namespace *ns);
 void fake_sysctl_bufs_free(struct user_namespace *ns);
+
+unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p);
+bool fake_cputime_readout(struct task_struct *p, u64 timestamp, u64 *user,
+			  u64 *system, struct cpumask *cpu_fake_mask);
+u64 fake_cputime_idle(u64 timestamp, u64 user, u64 system, unsigned int cpus);
+void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user,
+				 u64 *system);
+void set_fake_affinity_cpumask(struct task_struct *p,
+			       const struct cpumask *srcmask);
+int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask);
+int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask);
 
 extern struct proc_dir_entry *proc_vpsadminos;
 

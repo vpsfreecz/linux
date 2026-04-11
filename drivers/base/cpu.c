@@ -21,6 +21,7 @@
 #include <linux/pm_qos.h>
 #include <linux/delay.h>
 #include <linux/sched/isolation.h>
+#include <linux/vpsadminos.h>
 
 #include "base.h"
 
@@ -217,7 +218,12 @@ static ssize_t show_cpus_attr(struct device *dev,
 			      char *buf)
 {
 	struct cpu_attr *ca = container_of(attr, struct cpu_attr, attr);
+	struct cpumask mask;
 
+	if (fake_online_cpumask(current, &mask)) {
+		cpumask_and(&mask, &mask, ca->map);
+		return cpumap_print_to_pagebuf(true, buf, &mask);
+	}
 	return cpumap_print_to_pagebuf(true, buf, ca->map);
 }
 
@@ -237,6 +243,10 @@ static struct cpu_attr cpu_attrs[] = {
 static ssize_t print_cpus_kernel_max(struct device *dev,
 				     struct device_attribute *attr, char *buf)
 {
+	struct cpumask mask;
+
+	if (fake_online_cpumask(current, &mask))
+		return sysfs_emit(buf, "%u\n", cpumask_last(&mask));
 	return sysfs_emit(buf, "%d\n", NR_CPUS - 1);
 }
 static DEVICE_ATTR(kernel_max, 0444, print_cpus_kernel_max, NULL);
@@ -249,16 +259,22 @@ static ssize_t print_cpus_offline(struct device *dev,
 {
 	int len = 0;
 	cpumask_var_t offline;
+	struct cpumask fake_mask;
+	bool fake;
 
 	/* display offline cpus < nr_cpu_ids */
 	if (!alloc_cpumask_var(&offline, GFP_KERNEL))
 		return -ENOMEM;
-	cpumask_andnot(offline, cpu_possible_mask, cpu_online_mask);
+	fake = fake_online_cpumask(current, &fake_mask);
+	if (fake)
+		cpumask_andnot(offline, &fake_mask, cpu_online_mask);
+	else
+		cpumask_andnot(offline, cpu_possible_mask, cpu_online_mask);
 	len += sysfs_emit_at(buf, len, "%*pbl", cpumask_pr_args(offline));
 	free_cpumask_var(offline);
 
 	/* display offline cpus >= nr_cpu_ids */
-	if (total_cpus && nr_cpu_ids < total_cpus) {
+	if (!fake && total_cpus && nr_cpu_ids < total_cpus) {
 		len += sysfs_emit_at(buf, len, ",");
 
 		if (nr_cpu_ids == total_cpus-1)
@@ -277,6 +293,12 @@ static DEVICE_ATTR(offline, 0444, print_cpus_offline, NULL);
 static ssize_t print_cpus_enabled(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
+	struct cpumask mask;
+
+	if (fake_online_cpumask(current, &mask)) {
+		cpumask_and(&mask, &mask, cpu_enabled_mask);
+		return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&mask));
+	}
 	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(cpu_enabled_mask));
 }
 static DEVICE_ATTR(enabled, 0444, print_cpus_enabled, NULL);
@@ -286,12 +308,15 @@ static ssize_t print_cpus_isolated(struct device *dev,
 {
 	int len;
 	cpumask_var_t isolated;
+	struct cpumask fake_mask;
 
 	if (!alloc_cpumask_var(&isolated, GFP_KERNEL))
 		return -ENOMEM;
 
 	cpumask_andnot(isolated, cpu_possible_mask,
 		       housekeeping_cpumask(HK_TYPE_DOMAIN));
+	if (fake_online_cpumask(current, &fake_mask))
+		cpumask_and(isolated, isolated, &fake_mask);
 	len = sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(isolated));
 
 	free_cpumask_var(isolated);
@@ -304,6 +329,12 @@ static DEVICE_ATTR(isolated, 0444, print_cpus_isolated, NULL);
 static ssize_t print_cpus_nohz_full(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
+	struct cpumask mask;
+
+	if (fake_online_cpumask(current, &mask)) {
+		cpumask_and(&mask, &mask, tick_nohz_full_mask);
+		return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(&mask));
+	}
 	return sysfs_emit(buf, "%*pbl\n", cpumask_pr_args(tick_nohz_full_mask));
 }
 static DEVICE_ATTR(nohz_full, 0444, print_cpus_nohz_full, NULL);
