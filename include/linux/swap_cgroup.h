@@ -6,22 +6,36 @@
 
 #if defined(CONFIG_MEMCG) && defined(CONFIG_SWAP)
 
-extern void swap_cgroup_record(struct folio *folio, unsigned short id, swp_entry_t ent);
-extern unsigned short swap_cgroup_clear(swp_entry_t ent, unsigned int nr_ents);
+void swap_cgroup_record(struct folio *folio, unsigned short id,
+			bool system_proactive_swap, swp_entry_t ent);
+void swap_cgroup_record_proactive(struct folio *folio,
+				  bool system_proactive_swap, swp_entry_t ent);
+unsigned short swap_cgroup_clear(swp_entry_t ent, unsigned int nr_ents,
+				 unsigned int *nr_proactive);
 extern unsigned short lookup_swap_cgroup_id(swp_entry_t ent);
+bool lookup_swap_cgroup_proactive(swp_entry_t ent);
 extern int swap_cgroup_swapon(int type, unsigned long max_pages);
 extern void swap_cgroup_swapoff(int type);
 
 #else
 
-static inline
-void swap_cgroup_record(struct folio *folio, unsigned short id, swp_entry_t ent)
+static inline void
+swap_cgroup_record(struct folio *folio, unsigned short id,
+		   bool system_proactive_swap, swp_entry_t ent)
 {
 }
 
 static inline
-unsigned short swap_cgroup_clear(swp_entry_t ent, unsigned int nr_ents)
+void swap_cgroup_record_proactive(struct folio *folio,
+				  bool system_proactive_swap, swp_entry_t ent)
 {
+}
+
+static inline unsigned short swap_cgroup_clear(swp_entry_t ent,
+					       unsigned int nr_ents,
+					       unsigned int *nr_proactive)
+{
+	*nr_proactive = 0;
 	return 0;
 }
 
@@ -29,6 +43,11 @@ static inline
 unsigned short lookup_swap_cgroup_id(swp_entry_t ent)
 {
 	return 0;
+}
+
+static inline bool lookup_swap_cgroup_proactive(swp_entry_t ent)
+{
+	return false;
 }
 
 static inline int

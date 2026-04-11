@@ -283,7 +283,10 @@ What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/schemes/<S>/quotas/g
 Date:		Feb 2024
 Contact:	SeongJae Park <sj@kernel.org>
 Description:	Writing to and reading from this file sets and gets the quota
-		auto-tuning goal metric.
+		auto-tuning goal metric.  Supported strings include
+		"user_input", "some_mem_psi_us", "node_mem_used_bp",
+		"node_mem_free_bp", "free_mem_rate", and
+		"free_mem_bytes".
 
 What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/schemes/<S>/quotas/goals/<G>/target_value
 Date:		Nov 2023

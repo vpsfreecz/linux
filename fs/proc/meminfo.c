@@ -64,6 +64,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	struct mem_cgroup *swap_memcg = NULL;
 	unsigned long cached_inactive;
 	unsigned long memusage, totalram, swapmax, swapusage;
+	unsigned long proactive_swap, normal_swap_usage;
 #endif
 	struct mem_cgroup *memcg = NULL;
 	unsigned long swapcache = 0;
@@ -108,6 +109,9 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 
 		swapmax = vpsadminos_memcg_swap_limit(swap_memcg);
 		swapusage = vpsadminos_memcg_swap_usage(swap_memcg);
+		proactive_swap = mem_cgroup_proactive_swap_usage(swap_memcg);
+		normal_swap_usage =
+			vpsadminos_saturating_sub(swapusage, proactive_swap);
 
 		if (!swapmax) {
 			i.totalswap = 0;
@@ -116,8 +120,10 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 			if (swapmax != PAGE_COUNTER_MAX)
 				i.totalswap = swapmax;
 			i.freeswap = vpsadminos_saturating_sub(i.totalswap,
-							       swapusage);
+							       normal_swap_usage);
 		}
+		i.totalswap =
+			vpsadminos_saturating_add(i.totalswap, proactive_swap);
 
 		available = vpsadminos_saturating_add(i.freeram, sreclaimable);
 		available = vpsadminos_saturating_add(available, cached_inactive);
