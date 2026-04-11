@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/atomic.h>
 #include <linux/capability.h>
+#include <linux/cgroup.h>
 #include <linux/ctype.h>
 #include <linux/cred.h>
 #include <linux/dcache.h>
@@ -9,6 +10,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/kernfs.h>
+#include <linux/math64.h>
 #include <linux/memcontrol.h>
 #include <linux/kobject.h>
 #include <linux/mm.h>
@@ -19,6 +21,7 @@
 #include <linux/proc_fs.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
+#include <linux/sched/cputime.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -30,6 +33,8 @@
 #include <linux/xarray.h>
 
 #include <asm/page.h>
+
+#include "sched/sched.h"
 
 struct proc_dir_entry *proc_vpsadminos;
 
@@ -315,6 +320,415 @@ ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 		return count;
 	}
 	return 0;
+}
+
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+static unsigned int
+online_cpus_in_cpu_snapshot(struct cgroup_task_auth_snapshot *snapshot)
+{
+	struct cgroup_subsys_state *css, *css_parent;
+	s64 quota;
+	u64 cpus = 0, period, remainder;
+	unsigned int mincpus = UINT_MAX;
+	bool limited = false;
+
+	if (snapshot->cgroup_ns == &init_cgroup_ns)
+		return 0;
+	css = snapshot->task_css;
+	if (!css)
+		return 1;
+	/* Transfer the requested controller reference out of the snapshot. */
+	snapshot->task_css = NULL;
+
+up:
+	cpu_cfs_quota_period_read(css, &quota, &period);
+
+	if (quota > 0 && period > 0) {
+		limited = true;
+		cpus = div64_u64_rem((u64)quota, period, &remainder);
+		if (remainder)
+			cpus++;
+		if (cpus > UINT_MAX)
+			cpus = UINT_MAX;
+		if (cpus > 0 && cpus < mincpus)
+			mincpus = cpus;
+	}
+
+	rcu_read_lock();
+	if (css->parent && css->parent != css) {
+		css_parent = css->parent;
+		if (css_tryget_online(css_parent)) {
+			css_put(css);
+			css = css_parent;
+			rcu_read_unlock();
+			goto up;
+		}
+	}
+	rcu_read_unlock();
+
+	pr_debug("%s:%d quota=%lld period=%llu cpus=%llu\n",
+		 __func__, __LINE__, (long long)quota,
+		 (unsigned long long)period, (unsigned long long)cpus);
+	css_put(css);
+	return limited ? mincpus : 0;
+}
+
+static int fake_online_cpumask_from_count(unsigned int cpus,
+					  struct cpumask *dstmask)
+{
+	unsigned int cpu, want;
+
+	cpumask_clear(dstmask);
+	if (!cpus)
+		return 0;
+
+	want = cpus;
+	for_each_possible_cpu(cpu) {
+		if (!cpus)
+			break;
+		cpumask_set_cpu(cpu, dstmask);
+		cpus--;
+	}
+	return want - cpus;
+}
+#endif
+
+unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
+{
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+	enum auth_guard_check_result result;
+
+	result = cgroup_task_auth_snapshot_get(p, cpu_cgrp_id, &snapshot);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		return result == AUTH_GUARD_CHECK_UNAVAILABLE ? 0 : 1;
+
+	return online_cpus_in_cpu_snapshot(&snapshot);
+#else
+	return 0;
+#endif
+}
+
+/* The caller is responsible for keeping @p alive. */
+int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
+{
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	return fake_online_cpumask_from_count(online_cpus_in_cpu_cgroup(p),
+					       dstmask);
+#else
+	cpumask_clear(dstmask);
+	return 0;
+#endif
+}
+
+/* The caller is responsible for keeping @p alive. */
+void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcmask)
+{
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	cpumask_copy(&p->fake_cpu_mask, srcmask);
+	p->set_fake_cpu_mask = 1;
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+#endif
+}
+
+/* The caller is responsible for keeping @p alive. */
+int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
+{
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	struct cpumask current_fake;
+	unsigned long flags;
+	int ret;
+
+	cpumask_clear(dstmask);
+	ret = fake_online_cpumask(p, &current_fake);
+	if (!ret) {
+		raw_spin_lock_irqsave(&p->pi_lock, flags);
+		p->set_fake_cpu_mask = 0;
+		cpumask_clear(&p->fake_cpu_mask);
+		raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+		return 0;
+	}
+	cpumask_and(&current_fake, &current_fake, cpu_active_mask);
+
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	if (p->set_fake_cpu_mask) {
+		cpumask_and(dstmask, &p->fake_cpu_mask, &current_fake);
+		if (cpumask_empty(dstmask))
+			cpumask_copy(dstmask, &current_fake);
+	} else {
+		cpumask_copy(dstmask, &current_fake);
+	}
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+
+	return 1;
+#else
+	cpumask_clear(dstmask);
+	return 0;
+#endif
+}
+
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+static DEFINE_MUTEX(fake_cputime_mutex);
+
+static u64 fake_cputime_add(u64 left, u64 right)
+{
+	u64 sum;
+
+	if (check_add_overflow(left, right, &sum))
+		return U64_MAX;
+	return sum;
+}
+
+static void fake_cputime_split(u64 slice, u64 user_time, u64 run_time,
+			       u64 *user, u64 *system)
+{
+	*user = mul_u64_u64_div_u64(slice, user_time, run_time);
+	*system = slice - *user;
+}
+
+static bool
+fake_cputime_v1(struct cgroup_task_auth_snapshot *snapshot, u64 timestamp,
+		u64 *user, u64 *system, const struct cpumask *cpu_fake_mask)
+{
+	struct cgroup_subsys_state *css;
+	int i;
+	u64 timestamp_old;
+	u64 elapsed, user_time, system_time, run_time, total_time;
+	u64 usr = 0, sys = 0, sys_old = 0, usr_old = 0;
+	u64 tmpusr, tmpusr_old, tmpsys, tmpsys_old;
+
+	css = snapshot->root_cset->subsys[cpuacct_cgrp_id];
+	if (!css || !css_tryget_online(css))
+		return false;
+
+	timestamp_old = cpustat_fake_set_timestamp(css, timestamp);
+	for_each_possible_cpu(i) {
+		cpustat_fake_readout(css, i, &tmpusr, &tmpsys,
+				     &tmpusr_old, &tmpsys_old);
+		usr = fake_cputime_add(usr, tmpusr);
+		sys = fake_cputime_add(sys, tmpsys);
+		usr_old = fake_cputime_add(usr_old, tmpusr_old);
+		sys_old = fake_cputime_add(sys_old, tmpsys_old);
+	}
+	*user = usr;
+	*system = sys;
+
+	if (timestamp <= timestamp_old)
+		goto out;
+	elapsed = timestamp - timestamp_old;
+
+	user_time = usr > usr_old ? usr - usr_old : 0;
+	system_time = sys > sys_old ? sys - sys_old : 0;
+	if (check_add_overflow(user_time, system_time, &run_time))
+		run_time = U64_MAX;
+	total_time = run_time;
+
+	if (!run_time)
+		goto out;
+
+	for_each_cpu(i, cpu_fake_mask) {
+		u64 slice = min(run_time, elapsed);
+
+		if (slice) {
+			fake_cputime_split(slice, user_time, total_time,
+					   &usr, &sys);
+			run_time -= slice;
+		} else {
+			usr = 0;
+			sys = 0;
+		}
+		cpustat_fake_write(css, i, usr, sys);
+	}
+out:
+	css_put(css);
+	return true;
+}
+
+static bool
+fake_cputime_v2(struct cgroup_task_auth_snapshot *snapshot, u64 timestamp,
+		u64 *user, u64 *system, const struct cpumask *cpu_fake_mask)
+{
+	struct cgroup *cgrp;
+	int i;
+	u64 timestamp_old;
+	u64 elapsed, user_time, system_time, run_time, total_time;
+	u64 usr = 0, sys = 0, sys_old = 0, usr_old = 0;
+
+	cgrp = snapshot->root_cset->dfl_cgrp;
+	if (!cgrp || !cgroup_tryget(cgrp)) {
+		pr_debug("%s: cgrp is NULL\n", __func__);
+		return false;
+	}
+
+	if (!cgroup_parent(cgrp))
+		goto out;
+
+	timestamp_old = cgrp->rstat_cpu_fake_timestamp;
+	cgrp->rstat_cpu_fake_timestamp = timestamp;
+	css_rstat_flush(&cgrp->self);
+	usr_old = cgrp->rstat_cpu_fake_user;
+	sys_old = cgrp->rstat_cpu_fake_system;
+	cputime_adjust(&cgrp->bstat.cputime, &cgrp->prev_cputime_real,
+		       &usr, &sys);
+	cgrp->rstat_cpu_fake_user = usr;
+	cgrp->rstat_cpu_fake_system = sys;
+	*user = usr;
+	*system = sys;
+
+	if (timestamp <= timestamp_old)
+		goto out_handled;
+	elapsed = timestamp - timestamp_old;
+
+	user_time = usr > usr_old ? usr - usr_old : 0;
+	system_time = sys > sys_old ? sys - sys_old : 0;
+	if (check_add_overflow(user_time, system_time, &run_time))
+		run_time = U64_MAX;
+	total_time = run_time;
+
+	if (!run_time)
+		goto out_handled;
+
+	for_each_cpu(i, cpu_fake_mask) {
+		struct cgroup_fake_cputime *cputime_fake;
+		u64 slice = min(run_time, elapsed);
+
+		cputime_fake = per_cpu_ptr(cgrp->rstat_cpu_fake, i);
+		if (slice) {
+			fake_cputime_split(slice, user_time, total_time,
+					   &usr, &sys);
+			run_time -= slice;
+		} else {
+			usr = 0;
+			sys = 0;
+		}
+		cputime_fake->user = fake_cputime_add(cputime_fake->user, usr);
+		cputime_fake->system = fake_cputime_add(cputime_fake->system, sys);
+	}
+out_handled:
+	cgroup_put(cgrp);
+	return true;
+out:
+	cgroup_put(cgrp);
+	return false;
+}
+#endif
+
+bool fake_cputime_readout(struct task_struct *p, u64 timestamp, u64 *user,
+			  u64 *system, struct cpumask *cpu_fake_mask)
+{
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+	enum auth_guard_check_result result;
+	bool handled;
+#endif
+
+	*user = 0;
+	*system = 0;
+	cpumask_clear(cpu_fake_mask);
+
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	result = cgroup_task_auth_snapshot_get(p, cpu_cgrp_id, &snapshot);
+	if (result != AUTH_GUARD_CHECK_VALID) {
+		if (result == AUTH_GUARD_CHECK_UNAVAILABLE)
+			return false;
+		fake_online_cpumask_from_count(1, cpu_fake_mask);
+		return true;
+	}
+
+	mutex_lock(&fake_cputime_mutex);
+	if (!fake_online_cpumask_from_count(online_cpus_in_cpu_snapshot(&snapshot),
+					    cpu_fake_mask)) {
+		handled = false;
+		goto out;
+	}
+
+	if (cgroup_subsys_on_dfl(cpuacct_cgrp_subsys))
+		handled = fake_cputime_v2(&snapshot, timestamp, user, system,
+					  cpu_fake_mask);
+	else
+		handled = fake_cputime_v1(&snapshot, timestamp, user, system,
+					  cpu_fake_mask);
+	if (!handled)
+		cpumask_clear(cpu_fake_mask);
+out:
+	mutex_unlock(&fake_cputime_mutex);
+	return handled;
+#else
+	return false;
+#endif
+}
+
+u64 fake_cputime_idle(u64 timestamp, u64 user, u64 system, unsigned int cpus)
+{
+	u64 total;
+
+	if (check_mul_overflow(timestamp, (u64)cpus, &total))
+		total = U64_MAX;
+	if (user >= total)
+		return 0;
+	total -= user;
+	if (system >= total)
+		return 0;
+
+	return total - system;
+}
+
+void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user,
+				 u64 *system)
+{
+	*user = 0;
+	*system = 0;
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+
+	if (cgroup_task_auth_snapshot_get(p, -1, &snapshot) !=
+	    AUTH_GUARD_CHECK_VALID)
+		return;
+
+	mutex_lock(&fake_cputime_mutex);
+
+	if (cgroup_subsys_on_dfl(cpuacct_cgrp_subsys)) {
+		struct cgroup *cgrp;
+		struct cgroup_fake_cputime *cputime_fake;
+
+		cgrp = snapshot.root_cset->dfl_cgrp;
+		if (!cgrp || !cgroup_tryget(cgrp))
+			goto out;
+
+		cputime_fake = per_cpu_ptr(cgrp->rstat_cpu_fake, cpu);
+		*user = cputime_fake->user;
+		*system = cputime_fake->system;
+
+		cgroup_put(cgrp);
+	} else {
+		struct cgroup_subsys_state *css;
+
+		css = snapshot.root_cset->subsys[cpuacct_cgrp_id];
+		if (!css || !css_tryget_online(css))
+			goto out;
+
+		cpustat_fake_readout_percpu(css, cpu, user, system);
+
+		css_put(css);
+	}
+out:
+	mutex_unlock(&fake_cputime_mutex);
+#endif
 }
 
 #define VPSA_KERNFS_FILTER_POLICY_VERSION		1

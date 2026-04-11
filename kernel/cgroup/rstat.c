@@ -442,6 +442,11 @@ __bpf_kfunc void css_rstat_flush(struct cgroup_subsys_state *css)
 int css_rstat_init(struct cgroup_subsys_state *css)
 {
 	struct cgroup *cgrp = css->cgroup;
+	bool base_allocated = false;
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	bool fake_allocated = false;
+#endif
 	int cpu;
 	bool is_self = css_is_self(css);
 
@@ -451,19 +456,29 @@ int css_rstat_init(struct cgroup_subsys_state *css)
 			cgrp->rstat_base_cpu = alloc_percpu(struct cgroup_rstat_base_cpu);
 			if (!cgrp->rstat_base_cpu)
 				return -ENOMEM;
+			base_allocated = true;
 		}
+
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+		if (!cgrp->rstat_cpu_fake) {
+			cgrp->rstat_cpu_fake = alloc_percpu(struct cgroup_fake_cputime);
+			if (!cgrp->rstat_cpu_fake)
+				goto err_free_base;
+			fake_allocated = true;
+		}
+		cgrp->rstat_cpu_fake_timestamp = 0;
+		cgrp->rstat_cpu_fake_user = 0;
+		cgrp->rstat_cpu_fake_system = 0;
+#endif
 	} else if (css->ss->css_rstat_flush == NULL)
 		return 0;
 
 	/* the root cgrp's self css has rstat_cpu preallocated */
 	if (!css->rstat_cpu) {
 		css->rstat_cpu = alloc_percpu(struct css_rstat_cpu);
-		if (!css->rstat_cpu) {
-			if (is_self)
-				free_percpu(cgrp->rstat_base_cpu);
-
-			return -ENOMEM;
-		}
+		if (!css->rstat_cpu)
+			goto err_free_fake;
 	}
 
 	/* ->updated_children list is self terminated */
@@ -478,10 +493,35 @@ int css_rstat_init(struct cgroup_subsys_state *css)
 
 			rstatbc = cgroup_rstat_base_cpu(cgrp, cpu);
 			u64_stats_init(&rstatbc->bsync);
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+			{
+				struct cgroup_fake_cputime *fake;
+
+				fake = per_cpu_ptr(cgrp->rstat_cpu_fake, cpu);
+				fake->user = 0;
+				fake->system = 0;
+			}
+#endif
 		}
 	}
 
 	return 0;
+
+err_free_fake:
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	if (fake_allocated) {
+		free_percpu(cgrp->rstat_cpu_fake);
+		cgrp->rstat_cpu_fake = NULL;
+	}
+err_free_base:
+#endif
+	if (base_allocated) {
+		free_percpu(cgrp->rstat_base_cpu);
+		cgrp->rstat_base_cpu = NULL;
+	}
+	return -ENOMEM;
 }
 
 void css_rstat_exit(struct cgroup_subsys_state *css)
@@ -510,6 +550,11 @@ void css_rstat_exit(struct cgroup_subsys_state *css)
 
 		free_percpu(cgrp->rstat_base_cpu);
 		cgrp->rstat_base_cpu = NULL;
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+		free_percpu(cgrp->rstat_cpu_fake);
+		cgrp->rstat_cpu_fake = NULL;
+#endif
 	}
 
 	free_percpu(css->rstat_cpu);

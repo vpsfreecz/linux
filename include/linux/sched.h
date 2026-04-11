@@ -924,6 +924,12 @@ struct task_struct {
 	unsigned short			migration_disabled;
 	unsigned short			migration_flags;
 
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH) && \
+	defined(CONFIG_CGROUP_CPUACCT)
+	bool				set_fake_cpu_mask;
+	cpumask_t			fake_cpu_mask;
+#endif
+
 #ifdef CONFIG_PREEMPT_RCU
 	int				rcu_read_lock_nesting;
 	union rcu_special		rcu_read_unlock_special;
