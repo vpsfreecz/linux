@@ -30,15 +30,33 @@ static struct cgroup_namespace *alloc_cgroup_ns(void)
 	ret = ns_common_init(new_ns);
 	if (ret)
 		return ERR_PTR(ret);
+
+#ifdef CONFIG_CGROUP_SCHED
+	INIT_LIST_HEAD(&new_ns->cgns_avenrun_list);
+	atomic_long_set(&new_ns->nr_threads, 0);
+	atomic_long_set(&new_ns->nr_running, 0);
+	atomic_set(&new_ns->nr_uninterruptible, 0);
+	new_ns->avenrun[0] = 0;
+	new_ns->avenrun[1] = 0;
+	new_ns->avenrun[2] = 0;
+	mutex_init(&new_ns->cgns_avenrun_lock);
+#endif
+
 	return no_free_ptr(new_ns);
 }
 
 void free_cgroup_ns(struct cgroup_namespace *ns)
 {
+#ifdef CONFIG_CGROUP_SCHED
+	cgroup_ns_untrack_loadavg(ns);
+#endif
 	ns_tree_remove(ns);
 	put_css_set(ns->root_cset);
 	dec_cgroup_namespaces(ns->ucounts);
 	put_user_ns(ns->user_ns);
+#ifdef CONFIG_CGROUP_SCHED
+	put_cgroup_ns(ns->parent);
+#endif
 	ns_common_free(ns);
 	/* Concurrent nstree traversal depends on a grace period. */
 	kfree_rcu(ns, ns.ns_rcu);
@@ -52,6 +70,9 @@ struct cgroup_namespace *copy_cgroup_ns(u64 flags,
 	struct cgroup_namespace *new_ns;
 	struct ucounts *ucounts;
 	struct css_set *cset;
+#ifdef CONFIG_CGROUP_SCHED
+	int ret;
+#endif
 
 	BUG_ON(!old_ns);
 
@@ -84,9 +105,31 @@ struct cgroup_namespace *copy_cgroup_ns(u64 flags,
 	new_ns->user_ns = get_user_ns(user_ns);
 	new_ns->ucounts = ucounts;
 	new_ns->root_cset = cset;
+#ifdef CONFIG_CGROUP_SCHED
+	get_cgroup_ns(old_ns);
+	new_ns->parent = old_ns;
+
+	if (new_ns->user_ns != &init_user_ns &&
+	    new_ns->user_ns->parent == &init_user_ns) {
+		ret = cgroup_ns_track_loadavg(new_ns);
+		if (ret)
+			goto out_free;
+	}
+#endif
 
 	ns_tree_add(new_ns);
 	return new_ns;
+
+#ifdef CONFIG_CGROUP_SCHED
+out_free:
+	put_css_set(new_ns->root_cset);
+	dec_cgroup_namespaces(new_ns->ucounts);
+	put_user_ns(new_ns->user_ns);
+	put_cgroup_ns(new_ns->parent);
+	ns_common_free(new_ns);
+	kfree(new_ns);
+	return ERR_PTR(ret);
+#endif
 }
 
 static int cgroupns_install(struct nsset *nsset, struct ns_common *ns)

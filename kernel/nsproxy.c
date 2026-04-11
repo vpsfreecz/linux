@@ -322,6 +322,7 @@ void switch_task_namespaces(struct task_struct *p, struct nsproxy *new)
 
 	might_sleep();
 
+	cgroup_ns_loadavg_transfer(p, new ? new->cgroup_ns : NULL);
 	task_lock(p);
 	ns = p->nsproxy;
 	p->nsproxy = new;
