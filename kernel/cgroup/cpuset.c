@@ -40,6 +40,7 @@
 #include <linux/sched/isolation.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <linux/vpsadminos.h>
 #include <linux/task_work.h>
 
 DEFINE_STATIC_KEY_FALSE(cpusets_pre_enable_key);
@@ -3306,6 +3307,10 @@ ssize_t cpuset_write_resmask(struct kernfs_open_file *of,
 	if (cs == &top_cpuset)
 		return -EACCES;
 
+	if (current->nsproxy && current->nsproxy->cgroup_ns != &init_cgroup_ns &&
+	    online_cpus_in_cpu_cgroup(current) > 0)
+		return nbytes;
+
 	buf = strstrip(buf);
 	cpuset_full_lock();
 	if (!is_cpuset_online(cs))
@@ -3355,7 +3360,26 @@ int cpuset_common_seq_show(struct seq_file *sf, void *v)
 	struct cpuset *cs = css_cs(seq_css(sf));
 	cpuset_filetype_t type = seq_cft(sf)->private;
 	int ret = 0;
+	cpumask_t fake_mask;
 
+	if (current->nsproxy && current->nsproxy->cgroup_ns != &init_cgroup_ns) {
+		if (!fake_online_cpumask(current, &fake_mask))
+			goto orig;
+		switch (type) {
+		case FILE_CPULIST:
+		case FILE_EFFECTIVE_CPULIST:
+			seq_printf(sf, "%*pbl\n", cpumask_pr_args(&fake_mask));
+			break;
+		case FILE_MEMLIST:
+		case FILE_EFFECTIVE_MEMLIST:
+			seq_puts(sf, "0\n");
+			break;
+		default:
+		}
+		return ret;
+	}
+
+orig:
 	spin_lock_irq(&callback_lock);
 
 	switch (type) {
