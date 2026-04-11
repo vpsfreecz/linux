@@ -2952,7 +2952,8 @@ static int do_sysinfo(struct sysinfo *info)
 	if (memcg) {
 		unsigned long memusage = page_counter_read(&memcg->memory);
 		unsigned long totalram = READ_ONCE(memcg->memory.max);
-		unsigned long swapmax, swapusage;
+		unsigned long swapmax, swapusage, proactive_swap;
+		unsigned long normal_swap_usage;
 
 		info->totalram = totalram;
 		info->totalhigh = totalram;
@@ -2960,9 +2961,11 @@ static int do_sysinfo(struct sysinfo *info)
 		info->freehigh = info->freeram;
 		info->bufferram = 0;
 		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
-
 		swapmax = vpsadminos_memcg_swap_limit(swap_memcg);
 		swapusage = vpsadminos_memcg_swap_usage(swap_memcg);
+		proactive_swap = mem_cgroup_proactive_swap_usage(swap_memcg);
+		normal_swap_usage =
+			vpsadminos_saturating_sub(swapusage, proactive_swap);
 
 		if (!swapmax) {
 			info->totalswap = 0;
@@ -2972,8 +2975,10 @@ static int do_sysinfo(struct sysinfo *info)
 				info->totalswap = swapmax;
 			info->freeswap =
 				vpsadminos_saturating_sub(info->totalswap,
-							  swapusage);
+							  normal_swap_usage);
 		}
+		info->totalswap = vpsadminos_saturating_add(info->totalswap,
+							    proactive_swap);
 
 		vpsadminos_put_memcg_view(&memcg_view);
 	}

@@ -408,7 +408,10 @@ four parameters for the quota auto-tuning goals that specified on the
 :ref:`design doc <damon_design_damos_quotas_auto_tuning>` by writing to and
 reading from each of the files.  Note that users should further write
 ``commit_schemes_quota_goals`` to the ``state`` file of the :ref:`kdamond
-directory <sysfs_kdamond>` to pass the feedback to DAMON.
+directory <sysfs_kdamond>` to pass the feedback to DAMON.  Supported goal
+metric strings currently include ``user_input``, ``some_mem_psi_us``,
+``node_mem_used_bp``, ``node_mem_free_bp``, ``free_mem_rate``, and
+``free_mem_bytes``.
 
 .. _sysfs_watermarks:
 
