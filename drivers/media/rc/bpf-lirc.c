@@ -102,9 +102,9 @@ lirc_mode2_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	case BPF_FUNC_map_peek_elem:
 		return &bpf_map_peek_elem_proto;
 	case BPF_FUNC_ktime_get_ns:
-		return &bpf_ktime_get_ns_proto;
+		return bpf_ktime_get_ns_proto_for_prog(prog);
 	case BPF_FUNC_ktime_get_boot_ns:
-		return &bpf_ktime_get_boot_ns_proto;
+		return bpf_ktime_get_boot_ns_proto_for_prog(prog);
 	case BPF_FUNC_tail_call:
 		return &bpf_tail_call_proto;
 	case BPF_FUNC_get_prandom_u32:

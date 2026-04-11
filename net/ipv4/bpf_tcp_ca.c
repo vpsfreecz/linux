@@ -182,7 +182,7 @@ bpf_tcp_ca_get_func_proto(enum bpf_func_id func_id,
 			return &bpf_sk_getsockopt_proto;
 		return NULL;
 	case BPF_FUNC_ktime_get_coarse_ns:
-		return &bpf_ktime_get_coarse_ns_proto;
+		return bpf_ktime_get_coarse_ns_proto_for_prog(prog);
 	default:
 		return bpf_base_func_proto(func_id, prog);
 	}
