@@ -7,6 +7,7 @@
 
 struct kernfs_open_file;
 struct mem_cgroup;
+struct proc_dir_entry;
 struct user_namespace;
 
 struct vpsadminos_memcg_view {
@@ -72,5 +73,6 @@ ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 			    size_t count, loff_t pos, bool *handled);
 void fake_sysctl_bufs_init(struct user_namespace *ns);
 void fake_sysctl_bufs_free(struct user_namespace *ns);
+extern struct proc_dir_entry *proc_vpsadminos;
 
 #endif /* _LINUX_VPSADMINOS_H */
