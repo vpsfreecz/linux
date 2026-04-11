@@ -2131,12 +2131,16 @@ inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 
 void activate_task(struct rq *rq, struct task_struct *p, int flags)
 {
-	if (task_on_rq_migrating(p))
+	bool migrating = task_on_rq_migrating(p);
+
+	if (migrating)
 		flags |= ENQUEUE_MIGRATED;
 	if (flags & ENQUEUE_MIGRATED)
 		sched_mm_cid_migrate_to(rq, p);
 
 	enqueue_task(rq, p, flags);
+	if (!migrating)
+		inc_cgns_nr_running(p);
 
 	WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
@@ -3695,8 +3699,10 @@ ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
 
 	lockdep_assert_rq_held(rq);
 
-	if (p->sched_contributes_to_load)
+	if (p->sched_contributes_to_load) {
 		rq->nr_uninterruptible--;
+		dec_cgns_nr_uninterruptible(p);
+	}
 
 	if (wake_flags & WF_RQ_SELECTED)
 		en_flags |= ENQUEUE_RQ_SELECTED;
@@ -9517,6 +9523,397 @@ static u64 cpu_shares_read_u64(struct cgroup_subsys_state *css,
 	return tg_weight(css_tg(css));
 }
 #endif /* CONFIG_GROUP_SCHED_WEIGHT */
+
+static LIST_HEAD(cgns_avenrun_list);
+static DEFINE_MUTEX(cgns_avenrun_list_lock);
+static DEFINE_MUTEX(cgns_avenrund_lock);
+static struct task_struct *cgns_avenrund_task;
+
+static struct cgroup_namespace *
+cgns_loadavg_owner(struct cgroup_namespace *ns)
+{
+	struct cgroup_namespace *owner = NULL;
+
+	while (ns && ns != &init_cgroup_ns) {
+		if (READ_ONCE(ns->loadavg_virt_enabled))
+			owner = ns;
+		ns = ns->parent;
+	}
+
+	return owner;
+}
+
+/* The returned namespace holds a reference owned by the caller. */
+static struct cgroup_namespace *
+cgns_loadavg_owner_get(struct cgroup_namespace *ns)
+{
+	struct cgroup_namespace *owner = cgns_loadavg_owner(ns);
+
+	if (owner)
+		get_cgroup_ns(owner);
+	return owner;
+}
+
+static enum auth_guard_check_result
+cgns_loadavg_snapshot_get(struct task_struct *task,
+			  struct cgroup_task_auth_snapshot *snapshot,
+			  struct cgroup_namespace **owner)
+{
+	enum auth_guard_check_result result;
+
+	result = cgroup_task_auth_snapshot_get(task, -1, snapshot);
+	if (result == AUTH_GUARD_CHECK_VALID)
+		*owner = cgns_loadavg_owner(snapshot->cgroup_ns);
+	return result;
+}
+
+static unsigned long cgns_nr_running(struct cgroup_namespace *ns)
+{
+	long nr_running;
+	int nr_uninterruptible;
+	unsigned long nr_active = 0;
+
+	nr_running = atomic_long_read(&ns->nr_running);
+	if (nr_running > 0)
+		nr_active = nr_running;
+	nr_uninterruptible = atomic_read(&ns->nr_uninterruptible);
+	if (nr_uninterruptible > 0)
+		nr_active += nr_uninterruptible;
+
+	return nr_active;
+}
+
+static unsigned long cgns_nr_threads(struct cgroup_namespace *ns)
+{
+	return atomic_long_read(&ns->nr_threads);
+}
+
+static unsigned long
+cgns_loadavg_read(struct task_struct *task, unsigned long host_value,
+		  unsigned long (*owner_read)(struct cgroup_namespace *))
+{
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+	struct cgroup_namespace *owner = NULL;
+	enum auth_guard_check_result result;
+
+	result = cgns_loadavg_snapshot_get(task, &snapshot, &owner);
+	if (result != AUTH_GUARD_CHECK_VALID) {
+		if (result != AUTH_GUARD_CHECK_UNAVAILABLE)
+			return 0;
+	} else if (owner) {
+		return owner_read(owner);
+	}
+	return host_value;
+}
+
+unsigned long cgroup_ns_nr_running(struct task_struct *task)
+{
+	return cgns_loadavg_read(task, nr_running(), cgns_nr_running);
+}
+
+void cgroup_ns_loadavg_fork(struct task_struct *p)
+{
+	struct cgroup_namespace *owner;
+
+	/*
+	 * The child is not published or runnable yet, so no task lock or
+	 * runnable-count transfer is needed.
+	 */
+	owner = cgns_loadavg_owner_get(p->nsproxy ?
+				       p->nsproxy->cgroup_ns : NULL);
+	WRITE_ONCE(p->cgns_loadavg_owner, owner);
+	if (owner)
+		atomic_long_inc(&owner->nr_threads);
+}
+
+void cgroup_ns_loadavg_transfer(struct task_struct *p,
+				struct cgroup_namespace *new_ns)
+{
+	struct cgroup_namespace *old_owner;
+	struct cgroup_namespace *new_owner;
+	bool runnable;
+
+	new_owner = cgns_loadavg_owner_get(new_ns);
+
+	task_lock(p);
+	old_owner = READ_ONCE(p->cgns_loadavg_owner);
+	if (old_owner == new_owner) {
+		task_unlock(p);
+		if (new_owner)
+			put_cgroup_ns(new_owner);
+		return;
+	}
+
+	runnable = READ_ONCE(p->on_rq) != 0;
+	if (new_owner) {
+		atomic_long_inc(&new_owner->nr_threads);
+		if (runnable)
+			atomic_long_inc(&new_owner->nr_running);
+	}
+	WRITE_ONCE(p->cgns_loadavg_owner, new_owner);
+	task_unlock(p);
+	if (old_owner) {
+		if (runnable)
+			atomic_long_dec(&old_owner->nr_running);
+		atomic_long_dec(&old_owner->nr_threads);
+		put_cgroup_ns(old_owner);
+	}
+}
+
+unsigned long cgroup_ns_nr_threads(struct task_struct *task)
+{
+	return cgns_loadavg_read(task, nr_threads, cgns_nr_threads);
+}
+
+void inc_cgns_nr_running(struct task_struct *p)
+{
+	struct cgroup_namespace *ns = READ_ONCE(p->cgns_loadavg_owner);
+
+	if (ns)
+		atomic_long_inc(&ns->nr_running);
+}
+
+void dec_cgns_nr_running(struct task_struct *p)
+{
+	struct cgroup_namespace *ns = READ_ONCE(p->cgns_loadavg_owner);
+
+	if (ns)
+		atomic_long_dec(&ns->nr_running);
+}
+
+void inc_cgns_nr_uninterruptible(struct rq *rq, struct task_struct *p)
+{
+	struct cgroup_namespace *ns;
+	struct cgroup_namespace *owner;
+	struct nsproxy *nsproxy;
+
+	lockdep_assert_rq_held(rq);
+	if (WARN_ON_ONCE(task_rq(p) != rq))
+		return;
+	if (!auth_guard_task_check(p))
+		return;
+
+	nsproxy = READ_ONCE(p->nsproxy);
+	if (!nsproxy)
+		return;
+	ns = READ_ONCE(nsproxy->cgroup_ns);
+	if (!cgroup_ns_root_cset_checked(ns))
+		return;
+	owner = cgns_loadavg_owner(ns);
+	if (READ_ONCE(p->nsproxy) != nsproxy ||
+	    READ_ONCE(nsproxy->cgroup_ns) != ns ||
+	    READ_ONCE(p->cgns_loadavg_owner) != owner) {
+		(void)auth_guard_task_check(p);
+		return;
+	}
+
+	if (!owner)
+		return;
+	if (WARN_ON_ONCE(p->sched_contributed_to_load))
+		return;
+
+	get_cgroup_ns(owner);
+	atomic_inc(&owner->nr_uninterruptible);
+	WRITE_ONCE(p->sched_contributed_to_load, owner);
+}
+
+void dec_cgns_nr_uninterruptible(struct task_struct *p)
+{
+	struct cgroup_namespace *ns;
+
+	ns = READ_ONCE(p->sched_contributed_to_load);
+	if (!ns)
+		return;
+
+	atomic_dec(&ns->nr_uninterruptible);
+	WRITE_ONCE(p->sched_contributed_to_load, NULL);
+	put_cgroup_ns(ns);
+}
+
+static void cgns_calc_avenrun(unsigned int periods)
+{
+	struct cgroup_namespace *ns;
+	unsigned long nr_active;
+
+	mutex_lock(&cgns_avenrun_list_lock);
+	list_for_each_entry(ns, &cgns_avenrun_list, cgns_avenrun_list) {
+		nr_active = cgns_nr_running(ns);
+		nr_active = nr_active > 0 ? nr_active * FIXED_1 : 0;
+		mutex_lock(&ns->cgns_avenrun_lock);
+		ns->avenrun[0] = calc_load_n(ns->avenrun[0], EXP_1, nr_active, periods);
+		ns->avenrun[1] = calc_load_n(ns->avenrun[1], EXP_5, nr_active, periods);
+		ns->avenrun[2] = calc_load_n(ns->avenrun[2], EXP_15, nr_active, periods);
+		mutex_unlock(&ns->cgns_avenrun_lock);
+	}
+	mutex_unlock(&cgns_avenrun_list_lock);
+}
+
+static int cgns_avenrund(void *data)
+{
+	unsigned long next_update = jiffies + LOAD_FREQ;
+
+	while (!kthread_should_stop()) {
+		unsigned long now = jiffies;
+		unsigned int periods;
+
+		if (time_before(now, next_update)) {
+			schedule_timeout_interruptible(next_update - now);
+			continue;
+		}
+
+		periods = 1 + (now - next_update) / LOAD_FREQ;
+		cgns_calc_avenrun(periods);
+		next_update += periods * LOAD_FREQ;
+		pr_debug("cgroup namespace loadavg updated\n");
+	}
+
+	return 0;
+}
+
+static int cgns_avenrund_start(void)
+{
+	int ret;
+
+	lockdep_assert_held(&cgns_avenrund_lock);
+	if (cgns_avenrund_task)
+		return 0;
+
+	cgns_avenrund_task = kthread_run(cgns_avenrund, NULL, "cgns_avenrund");
+	if (IS_ERR(cgns_avenrund_task)) {
+		ret = PTR_ERR(cgns_avenrund_task);
+		cgns_avenrund_task = NULL;
+		return ret;
+	}
+
+	pr_info("cgroup namespace loadavg tracking started\n");
+	return 0;
+}
+
+static void cgns_avenrund_stop(void)
+{
+	lockdep_assert_held(&cgns_avenrund_lock);
+	if (cgns_avenrund_task)
+		kthread_stop(cgns_avenrund_task);
+	cgns_avenrund_task = NULL;
+	pr_info("cgroup namespace loadavg tracking stopped\n");
+}
+
+int cgroup_ns_track_loadavg(struct cgroup_namespace *ns)
+{
+	struct cgroup_namespace *owner;
+	int ret;
+
+	if (ns == &init_cgroup_ns)
+		return 0;
+
+	owner = cgns_loadavg_owner_get(ns->parent);
+	if (owner) {
+		put_cgroup_ns(owner);
+		return 0;
+	}
+
+	mutex_lock(&cgns_avenrund_lock);
+	if (READ_ONCE(ns->loadavg_virt_enabled)) {
+		ret = 0;
+		goto out_unlock;
+	}
+
+	ret = cgns_avenrund_start();
+	if (ret)
+		goto out_unlock;
+
+	mutex_lock(&cgns_avenrun_list_lock);
+	list_add(&ns->cgns_avenrun_list, &cgns_avenrun_list);
+	WRITE_ONCE(ns->loadavg_virt_enabled, true);
+	mutex_unlock(&cgns_avenrun_list_lock);
+out_unlock:
+	mutex_unlock(&cgns_avenrund_lock);
+	return ret;
+}
+
+void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns)
+{
+	bool stop_avenrund = false;
+
+	if (ns == &init_cgroup_ns)
+		return;
+
+	if (!READ_ONCE(ns->loadavg_virt_enabled))
+		return;
+
+	mutex_lock(&cgns_avenrund_lock);
+	mutex_lock(&cgns_avenrun_list_lock);
+	list_del_init(&ns->cgns_avenrun_list);
+	WRITE_ONCE(ns->loadavg_virt_enabled, false);
+	if (list_empty(&cgns_avenrun_list))
+		stop_avenrund = true;
+	mutex_unlock(&cgns_avenrun_list_lock);
+
+	if (stop_avenrund)
+		cgns_avenrund_stop();
+	mutex_unlock(&cgns_avenrund_lock);
+}
+
+static void get_avenrun_fake_ns(struct cgroup_namespace *ns,
+				unsigned long *loads,
+				unsigned long offset, int shift)
+{
+	mutex_lock(&ns->cgns_avenrun_lock);
+	loads[0] = (ns->avenrun[0] + offset) << shift;
+	loads[1] = (ns->avenrun[1] + offset) << shift;
+	loads[2] = (ns->avenrun[2] + offset) << shift;
+	mutex_unlock(&ns->cgns_avenrun_lock);
+}
+
+int get_avenrun_fake(struct task_struct *p, unsigned long *loads, unsigned long offset, int shift)
+{
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+	struct cgroup_namespace *owner = NULL;
+	enum auth_guard_check_result result;
+
+	result = cgns_loadavg_snapshot_get(p, &snapshot, &owner);
+	if (result != AUTH_GUARD_CHECK_VALID) {
+		if (result == AUTH_GUARD_CHECK_UNAVAILABLE)
+			return 0;
+		loads[0] = 0;
+		loads[1] = 0;
+		loads[2] = 0;
+		return 1;
+	}
+	if (!owner)
+		return 0;
+
+	get_avenrun_fake_ns(owner, loads, offset, shift);
+	return 1;
+}
+
+int virt_loadavg_proc_show(struct seq_file *m, void *v)
+{
+	unsigned long avnrun[3];
+	unsigned int nr_r, nr_t;
+	struct cgroup_namespace *ns;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	mutex_lock(&cgns_avenrun_list_lock);
+	list_for_each_entry(ns, &cgns_avenrun_list, cgns_avenrun_list) {
+		get_avenrun_fake_ns(ns, avnrun, FIXED_1 / 200, 0);
+		nr_r = (unsigned int)cgns_nr_running(ns);
+		nr_t = (unsigned int)atomic_long_read(&ns->nr_threads);
+
+		seq_printf(m, "%u\t%lu.%02lu %lu.%02lu %lu.%02lu %u/%u\n",
+			   ns->ns.inum,
+			   LOAD_INT(avnrun[0]), LOAD_FRAC(avnrun[0]),
+			   LOAD_INT(avnrun[1]), LOAD_FRAC(avnrun[1]),
+			   LOAD_INT(avnrun[2]), LOAD_FRAC(avnrun[2]),
+			   nr_r, nr_t);
+	}
+	mutex_unlock(&cgns_avenrun_list_lock);
+	return 0;
+}
 
 #ifdef CONFIG_CFS_BANDWIDTH
 static DEFINE_MUTEX(cfs_constraints_mutex);
