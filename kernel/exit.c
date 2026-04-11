@@ -136,6 +136,7 @@ static void __unhash_process(struct release_task_post *post, struct task_struct 
 {
 	struct pid *pid = task_pid(p);
 
+	dec_cgns_nr_threads(p);
 	nr_threads--;
 
 	detach_pid(post->pids, p, PIDTYPE_PID);
