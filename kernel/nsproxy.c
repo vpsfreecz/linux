@@ -23,6 +23,7 @@
 #include <linux/proc_fs.h>
 #include <linux/syslog_namespace.h>
 #include <linux/tracing_namespace.h>
+#include <linux/lsm_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/file.h>
 #include <linux/syscalls.h>
@@ -31,13 +32,42 @@
 
 static struct kmem_cache *nsproxy_cachep;
 
-static void consume_pending_child_ns_request(struct task_struct *task)
+static bool lsm_child_ns_request_consumable(const struct task_struct *task,
+				      const struct user_namespace *user_ns)
+{
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	if (task && task->lsm_ns_for_child && user_ns && user_ns != current_user_ns())
+		return true;
+#endif
+	return false;
+}
+
+static bool has_pending_child_ns_request(const struct task_struct *task,
+				 const struct user_namespace *user_ns)
+{
+	if (!task)
+		return false;
+
+	if (task->syslog_ns_for_child || task->tracing_ns_for_child)
+		return true;
+
+	return lsm_child_ns_request_consumable(task, user_ns);
+}
+
+static void consume_pending_child_ns_request(struct task_struct *task,
+				     bool consume_lsm)
 {
 	if (!task)
 		return;
 
 	task->syslog_ns_for_child = false;
 	task->tracing_ns_for_child = false;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	if (consume_lsm) {
+		task->lsm_ns_for_child = false;
+		task->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
+	}
+#endif
 	kfree(task->syslog_ns_for_child_name);
 	task->syslog_ns_for_child_name = NULL;
 }
@@ -91,6 +121,12 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 {
 	bool new_syslog_ns = false;
 	bool new_tracing_ns = false;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	bool new_lsm_ns = false;
+	bool consume_lsm_req = false;
+	u64 new_lsmid = LSM_ID_UNDEF;
+	struct lsm_namespace *created_lsm_ns;
+#endif
 	char *syslog_name = NULL;
 	struct nsproxy *new_nsp;
 	int err;
@@ -148,6 +184,12 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 	if (syslog_req_task) {
 		new_syslog_ns = syslog_req_task->syslog_ns_for_child;
 		new_tracing_ns = syslog_req_task->tracing_ns_for_child;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+		consume_lsm_req = lsm_child_ns_request_consumable(syslog_req_task,
+							   user_ns);
+		new_lsm_ns = consume_lsm_req;
+		new_lsmid = syslog_req_task->lsm_ns_for_child_lsmid;
+#endif
 		syslog_name = syslog_req_task->syslog_ns_for_child_name;
 	}
 
@@ -168,8 +210,23 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		goto out_tracing;
 	}
 #endif
-	consume_pending_child_ns_request(syslog_req_task);
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	if (new_lsm_ns) {
+		created_lsm_ns = copy_lsm_ns(true, user_ns, new_lsmid,
+					     current_lsm_ns());
+		if (IS_ERR(created_lsm_ns)) {
+			err = PTR_ERR(created_lsm_ns);
+			goto out_lsm;
+		}
+		put_lsm_ns(created_lsm_ns);
+	}
+#endif
+	consume_pending_child_ns_request(syslog_req_task, consume_lsm_req);
 	return new_nsp;
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+out_lsm:
+#endif
 
 #ifdef CONFIG_TRACING_NS
 out_tracing:
@@ -209,8 +266,7 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			      CLONE_NEWPID | CLONE_NEWNET |
 			      CLONE_NEWCGROUP | CLONE_NEWTIME))) &&
-	    likely(!current->syslog_ns_for_child) &&
-	    likely(!current->tracing_ns_for_child)) {
+	    likely(!has_pending_child_ns_request(current, user_ns))) {
 		if ((flags & CLONE_VM) ||
 		    likely(old_ns->time_ns_for_children == old_ns->time_ns)) {
 			get_nsproxy(old_ns);
@@ -269,14 +325,12 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 	struct user_namespace *user_ns;
 	int err = 0;
 
+	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!(unshare_flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			       CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWCGROUP |
-			       CLONE_NEWTIME))
-	    && !current->syslog_ns_for_child
-	    && !current->tracing_ns_for_child)
+			       CLONE_NEWTIME)) &&
+	    !has_pending_child_ns_request(current, user_ns))
 		return 0;
-
-	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
@@ -395,7 +449,7 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 
 	/*
 	 * setns() needs a transient duplicate of the caller's namespaces for
-	 * validation and commit. Do not consume a pending child-syslog request
+	 * validation and commit. Do not consume a pending child-boundary namespace request
 	 * here; it belongs to the next real clone/unshare boundary.
 	 */
 	nsset->nsproxy = create_new_namespaces(0, me, NULL,
