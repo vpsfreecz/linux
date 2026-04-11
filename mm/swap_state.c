@@ -177,7 +177,7 @@ void __delete_from_swap_cache(struct folio *folio,
  * Context: Caller needs to hold the folio lock.
  * Return: Whether the folio was added to the swap cache.
  */
-bool add_to_swap(struct folio *folio)
+bool add_to_swap(struct folio *folio, bool system_proactive_swap)
 {
 	swp_entry_t entry;
 	int err;
@@ -185,7 +185,7 @@ bool add_to_swap(struct folio *folio)
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(!folio_test_uptodate(folio), folio);
 
-	entry = folio_alloc_swap(folio);
+	entry = folio_alloc_swap(folio, system_proactive_swap);
 	if (!entry.val)
 		return false;
 

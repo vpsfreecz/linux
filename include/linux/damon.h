@@ -135,6 +135,8 @@ enum damos_action {
  *
  * @DAMOS_QUOTA_USER_INPUT:	User-input value.
  * @DAMOS_QUOTA_SOME_MEM_PSI_US:	System level some memory PSI in us.
+ * @DAMOS_QUOTA_FREE_MEM_RATE:	System free memory rate in [0, 1000].
+ * @DAMOS_QUOTA_FREE_MEM_BYTES:	System free memory in bytes.
  * @NR_DAMOS_QUOTA_GOAL_METRICS:	Number of DAMOS quota goal metrics.
  *
  * Metrics equal to larger than @NR_DAMOS_QUOTA_GOAL_METRICS are unsupported.
@@ -142,6 +144,8 @@ enum damos_action {
 enum damos_quota_goal_metric {
 	DAMOS_QUOTA_USER_INPUT,
 	DAMOS_QUOTA_SOME_MEM_PSI_US,
+	DAMOS_QUOTA_FREE_MEM_RATE,
+	DAMOS_QUOTA_FREE_MEM_BYTES,
 	NR_DAMOS_QUOTA_GOAL_METRICS,
 };
 
