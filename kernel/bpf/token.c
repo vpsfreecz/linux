@@ -325,6 +325,7 @@ static bool bpf_token_allow_helper(const struct bpf_token *token,
 	case BPF_FUNC_get_numa_node_id:
 	case BPF_FUNC_tail_call:
 	case BPF_FUNC_ktime_get_ns:
+	case BPF_FUNC_ktime_get_coarse_ns:
 	case BPF_FUNC_ktime_get_boot_ns:
 	case BPF_FUNC_ktime_get_tai_ns:
 	case BPF_FUNC_jiffies64:

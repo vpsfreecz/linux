@@ -2594,6 +2594,7 @@ static inline void bpf_map_dec_elem_count(struct bpf_map *map)
 
 extern int sysctl_unprivileged_bpf_disabled;
 extern int sysctl_bpf_container_tracing_enabled;
+extern int sysctl_unprivileged_bpf_time_adjust_nsec;
 
 static inline bool bpf_container_tracing_enabled(void)
 {
@@ -3684,6 +3685,40 @@ extern const struct bpf_func_proto bpf_snprintf_proto;
 extern const struct bpf_func_proto bpf_per_cpu_ptr_proto;
 extern const struct bpf_func_proto bpf_this_cpu_ptr_proto;
 extern const struct bpf_func_proto bpf_ktime_get_coarse_ns_proto;
+#ifdef CONFIG_BPF_SYSCALL
+const struct bpf_func_proto *
+bpf_ktime_get_ns_proto_for_prog(const struct bpf_prog *prog);
+const struct bpf_func_proto *
+bpf_ktime_get_boot_ns_proto_for_prog(const struct bpf_prog *prog);
+const struct bpf_func_proto *
+bpf_ktime_get_coarse_ns_proto_for_prog(const struct bpf_prog *prog);
+const struct bpf_func_proto *
+bpf_ktime_get_tai_ns_proto_for_prog(const struct bpf_prog *prog);
+#else
+static inline const struct bpf_func_proto *
+bpf_ktime_get_ns_proto_for_prog(const struct bpf_prog *prog)
+{
+	return &bpf_ktime_get_ns_proto;
+}
+
+static inline const struct bpf_func_proto *
+bpf_ktime_get_boot_ns_proto_for_prog(const struct bpf_prog *prog)
+{
+	return &bpf_ktime_get_boot_ns_proto;
+}
+
+static inline const struct bpf_func_proto *
+bpf_ktime_get_coarse_ns_proto_for_prog(const struct bpf_prog *prog)
+{
+	return &bpf_ktime_get_coarse_ns_proto;
+}
+
+static inline const struct bpf_func_proto *
+bpf_ktime_get_tai_ns_proto_for_prog(const struct bpf_prog *prog)
+{
+	return &bpf_ktime_get_tai_ns_proto;
+}
+#endif
 extern const struct bpf_func_proto bpf_sock_from_file_proto;
 extern const struct bpf_func_proto bpf_get_socket_ptr_cookie_proto;
 extern const struct bpf_func_proto bpf_task_storage_get_recur_proto;

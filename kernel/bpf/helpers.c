@@ -174,6 +174,18 @@ const struct bpf_func_proto bpf_get_numa_node_id_proto = {
 	.ret_type	= RET_INTEGER,
 };
 
+int sysctl_unprivileged_bpf_time_adjust_nsec __read_mostly = 5 * NSEC_PER_MSEC;
+
+static __always_inline u64 bpf_time_adjust_container(u64 time)
+{
+	int adjust = READ_ONCE(sysctl_unprivileged_bpf_time_adjust_nsec);
+
+	if (adjust)
+		return time - (time % adjust);
+
+	return time;
+}
+
 BPF_CALL_0(bpf_ktime_get_ns)
 {
 	/* NMI safe access to clock monotonic */
@@ -185,6 +197,26 @@ const struct bpf_func_proto bpf_ktime_get_ns_proto = {
 	.gpl_only	= false,
 	.ret_type	= RET_INTEGER,
 };
+
+BPF_CALL_0(bpf_ktime_get_ns_container)
+{
+	return bpf_time_adjust_container(ktime_get_mono_fast_ns());
+}
+
+static const struct bpf_func_proto bpf_ktime_get_ns_container_proto = {
+	.func		= bpf_ktime_get_ns_container,
+	.gpl_only	= false,
+	.ret_type	= RET_INTEGER,
+};
+
+const struct bpf_func_proto *
+bpf_ktime_get_ns_proto_for_prog(const struct bpf_prog *prog)
+{
+	if (bpf_token_is_container(prog->aux->token))
+		return &bpf_ktime_get_ns_container_proto;
+
+	return &bpf_ktime_get_ns_proto;
+}
 
 BPF_CALL_0(bpf_ktime_get_boot_ns)
 {
@@ -198,6 +230,26 @@ const struct bpf_func_proto bpf_ktime_get_boot_ns_proto = {
 	.ret_type	= RET_INTEGER,
 };
 
+BPF_CALL_0(bpf_ktime_get_boot_ns_container)
+{
+	return bpf_time_adjust_container(ktime_get_boot_fast_ns());
+}
+
+static const struct bpf_func_proto bpf_ktime_get_boot_ns_container_proto = {
+	.func		= bpf_ktime_get_boot_ns_container,
+	.gpl_only	= false,
+	.ret_type	= RET_INTEGER,
+};
+
+const struct bpf_func_proto *
+bpf_ktime_get_boot_ns_proto_for_prog(const struct bpf_prog *prog)
+{
+	if (bpf_token_is_container(prog->aux->token))
+		return &bpf_ktime_get_boot_ns_container_proto;
+
+	return &bpf_ktime_get_boot_ns_proto;
+}
+
 BPF_CALL_0(bpf_ktime_get_coarse_ns)
 {
 	return ktime_get_coarse_ns();
@@ -208,6 +260,26 @@ const struct bpf_func_proto bpf_ktime_get_coarse_ns_proto = {
 	.gpl_only	= false,
 	.ret_type	= RET_INTEGER,
 };
+
+BPF_CALL_0(bpf_ktime_get_coarse_ns_container)
+{
+	return bpf_time_adjust_container(ktime_get_coarse_ns());
+}
+
+static const struct bpf_func_proto bpf_ktime_get_coarse_ns_container_proto = {
+	.func		= bpf_ktime_get_coarse_ns_container,
+	.gpl_only	= false,
+	.ret_type	= RET_INTEGER,
+};
+
+const struct bpf_func_proto *
+bpf_ktime_get_coarse_ns_proto_for_prog(const struct bpf_prog *prog)
+{
+	if (bpf_token_is_container(prog->aux->token))
+		return &bpf_ktime_get_coarse_ns_container_proto;
+
+	return &bpf_ktime_get_coarse_ns_proto;
+}
 
 BPF_CALL_0(bpf_ktime_get_tai_ns)
 {
@@ -220,6 +292,26 @@ const struct bpf_func_proto bpf_ktime_get_tai_ns_proto = {
 	.gpl_only	= false,
 	.ret_type	= RET_INTEGER,
 };
+
+BPF_CALL_0(bpf_ktime_get_tai_ns_container)
+{
+	return bpf_time_adjust_container(ktime_get_tai_fast_ns());
+}
+
+static const struct bpf_func_proto bpf_ktime_get_tai_ns_container_proto = {
+	.func		= bpf_ktime_get_tai_ns_container,
+	.gpl_only	= false,
+	.ret_type	= RET_INTEGER,
+};
+
+const struct bpf_func_proto *
+bpf_ktime_get_tai_ns_proto_for_prog(const struct bpf_prog *prog)
+{
+	if (bpf_token_is_container(prog->aux->token))
+		return &bpf_ktime_get_tai_ns_container_proto;
+
+	return &bpf_ktime_get_tai_ns_proto;
+}
 
 BPF_CALL_0(bpf_get_current_pid_tgid)
 {
@@ -1968,11 +2060,11 @@ bpf_base_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	case BPF_FUNC_tail_call:
 		return &bpf_tail_call_proto;
 	case BPF_FUNC_ktime_get_ns:
-		return &bpf_ktime_get_ns_proto;
+		return bpf_ktime_get_ns_proto_for_prog(prog);
 	case BPF_FUNC_ktime_get_boot_ns:
-		return &bpf_ktime_get_boot_ns_proto;
+		return bpf_ktime_get_boot_ns_proto_for_prog(prog);
 	case BPF_FUNC_ktime_get_tai_ns:
-		return &bpf_ktime_get_tai_ns_proto;
+		return bpf_ktime_get_tai_ns_proto_for_prog(prog);
 	case BPF_FUNC_ringbuf_output:
 		return &bpf_ringbuf_output_proto;
 	case BPF_FUNC_ringbuf_reserve:
