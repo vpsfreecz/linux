@@ -6766,6 +6766,15 @@ static const struct ctl_table bpf_syscall_table[] = {
 		.extra2		= SYSCTL_TWO,
 	},
 	{
+		.procname	= "sysctl_unprivileged_bpf_time_adjust_nsec",
+		.data		= &sysctl_unprivileged_bpf_time_adjust_nsec,
+		.maxlen		= sizeof(sysctl_unprivileged_bpf_time_adjust_nsec),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
+	},
+	{
 		.procname	= "bpf_stats_enabled",
 		.data		= &bpf_stats_enabled_key.key,
 		.mode		= 0644,
