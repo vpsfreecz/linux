@@ -46,6 +46,7 @@
 #include <linux/mm_inline.h>
 #include <linux/memblock.h>
 #include <linux/nsproxy.h>
+#include <linux/syslog_namespace.h>
 #include <linux/capability.h>
 #include <linux/cpu.h>
 #include <linux/cgroup.h>
@@ -187,6 +188,7 @@ static inline struct task_struct *alloc_task_struct_node(int node)
 
 static inline void free_task_struct(struct task_struct *tsk)
 {
+	kfree(tsk->syslog_ns_for_child_name);
 	kmem_cache_free(task_struct_cachep, tsk);
 }
 
@@ -876,6 +878,8 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 		return NULL;
 
 	err = arch_dup_task_struct(tsk, orig);
+	tsk->syslog_ns_for_child = false;
+	tsk->syslog_ns_for_child_name = NULL;
 	if (err)
 		goto free_tsk;
 
@@ -2368,6 +2372,8 @@ __latent_entropy struct task_struct *copy_process(
 	}
 
 	/* No more failure paths after this point. */
+	if (clone_flags & CLONE_NEWUSER)
+		syslog_ns_claim_user_ns(task_cred_xxx(p, user_ns));
 
 	/*
 	 * Copy seccomp details explicitly here, in case they were changed
@@ -3153,6 +3159,10 @@ int ksys_unshare(unsigned long unshare_flags)
 			exit_shm(current);
 			shm_init_task(current);
 		}
+
+		/* Namespace preparation can no longer fail after this point. */
+		if (new_cred)
+			syslog_ns_claim_user_ns(new_cred->user_ns);
 
 		if (new_nsproxy) {
 			switch_task_namespaces(current, new_nsproxy);

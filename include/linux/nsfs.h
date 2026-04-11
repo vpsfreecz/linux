@@ -11,6 +11,7 @@
 struct path;
 struct task_struct;
 struct proc_ns_operations;
+struct syslog_namespace;
 
 int ns_get_path(struct path *path, struct task_struct *task,
 		const struct proc_ns_operations *ns_ops);
@@ -31,6 +32,7 @@ void nsfs_init(void);
 		struct net *:              current->nsproxy->net_ns,	\
 		struct pid_namespace *:    task_active_pid_ns(current),	\
 		struct mnt_namespace *:    current->nsproxy->mnt_ns,	\
+		struct syslog_namespace * : current->nsproxy->syslog_ns,\
 		struct time_namespace *:   current->nsproxy->time_ns,	\
 		struct user_namespace *:   current_user_ns(),		\
 		struct uts_namespace *:    current->nsproxy->uts_ns)

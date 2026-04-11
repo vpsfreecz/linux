@@ -49,6 +49,7 @@
 #include <linux/tracepoint-defs.h>
 #include <linux/unwind_deferred_types.h>
 #include <asm/kmap_size.h>
+#include <linux/syslog.h>
 #ifndef COMPILE_OFFSETS
 #include <generated/rq-offsets.h>
 #endif
@@ -1609,6 +1610,9 @@ struct task_struct {
 #endif
 	/* Used by BPF for per-TASK xdp storage */
 	struct bpf_net_context		*bpf_net_context;
+
+	bool				syslog_ns_for_child;
+	char				*syslog_ns_for_child_name;
 
 #ifdef CONFIG_KSTACK_ERASE
 	unsigned long			lowest_stack;

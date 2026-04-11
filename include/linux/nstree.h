@@ -9,11 +9,14 @@
 #include <linux/rculist.h>
 #include <linux/cookie.h>
 
+struct syslog_namespace;
+
 extern struct ns_tree cgroup_ns_tree;
 extern struct ns_tree ipc_ns_tree;
 extern struct ns_tree mnt_ns_tree;
 extern struct ns_tree net_ns_tree;
 extern struct ns_tree pid_ns_tree;
+extern struct ns_tree syslog_ns_tree;
 extern struct ns_tree time_ns_tree;
 extern struct ns_tree user_ns_tree;
 extern struct ns_tree uts_ns_tree;
@@ -25,6 +28,7 @@ extern struct ns_tree uts_ns_tree;
 		struct net *:              &(net_ns_tree),	\
 		struct pid_namespace *:    &(pid_ns_tree),	\
 		struct mnt_namespace *:    &(mnt_ns_tree),	\
+		struct syslog_namespace * : &(syslog_ns_tree),\
 		struct time_namespace *:   &(time_ns_tree),	\
 		struct user_namespace *:   &(user_ns_tree),	\
 		struct uts_namespace *:    &(uts_ns_tree))

@@ -5,6 +5,7 @@
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
 #include <linux/user_namespace.h>
+#include <linux/syslog_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/highuid.h>
 #include <linux/cred.h>
@@ -145,6 +146,8 @@ int create_user_ns(struct cred *new)
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_SIGPENDING, rlimit(RLIMIT_SIGPENDING));
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_MEMLOCK, rlimit(RLIMIT_MEMLOCK));
 	ns->ucounts = ucounts;
+	ns->syslog_ns = get_syslog_ns(current->nsproxy->syslog_ns);
+	ns->syslog_ns_is_owner = false;
 
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
 	mutex_lock(&userns_state_mutex);
@@ -157,13 +160,14 @@ int create_user_ns(struct cred *new)
 #endif
 	ret = -ENOMEM;
 	if (!setup_userns_sysctls(ns))
-		goto fail_keyring;
+		goto fail_put_syslog;
 
 	set_cred_user_ns(new, ns);
 	fake_sysctl_bufs_init(ns);
 	ns_tree_add(ns);
 	return 0;
-fail_keyring:
+fail_put_syslog:
+	put_syslog_ns(ns->syslog_ns);
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	key_put(ns->persistent_keyring_register);
 #endif
@@ -220,6 +224,10 @@ static void free_user_ns(struct work_struct *work)
 #if IS_ENABLED(CONFIG_BINFMT_MISC)
 		kfree(ns->binfmt_misc);
 #endif
+		if (ns->syslog_ns_is_owner)
+			put_syslog_ns_structural(ns->syslog_ns);
+		else
+			put_syslog_ns(ns->syslog_ns);
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		fake_sysctl_bufs_free(ns);

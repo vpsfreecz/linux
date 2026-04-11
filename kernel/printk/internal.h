@@ -5,6 +5,8 @@
 #include <linux/console.h>
 #include <linux/percpu.h>
 #include <linux/types.h>
+#include <linux/syslog_namespace.h>
+#include <linux/printk_ringbuffer.h>
 
 #if defined(CONFIG_PRINTK) && defined(CONFIG_SYSCTL)
 struct ctl_table;
@@ -67,11 +69,13 @@ extern bool printk_kthreads_running;
 extern bool printk_kthreads_ready;
 extern bool debug_non_panic_cpus;
 
-__printf(4, 0)
-int vprintk_store(int facility, int level,
-		  const struct dev_printk_info *dev_info,
-		  const char *fmt, va_list args);
+__printf(5, 0)
+int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
+		     const struct dev_printk_info *dev_info,
+		     const char *fmt, va_list args);
 
+__printf(2, 0) int vprintk_ns(struct syslog_namespace *ns,
+			      const char *fmt, va_list args);
 __printf(1, 0) int vprintk_default(const char *fmt, va_list args);
 
 void __printk_safe_enter(void);
@@ -91,7 +95,7 @@ bool printk_percpu_data_ready(void);
 		local_irq_restore(flags);	\
 	} while (0)
 
-void defer_console_output(void);
+void defer_console_output(struct syslog_namespace *ns);
 bool is_printk_legacy_deferred(void);
 bool is_printk_force_console(void);
 
@@ -191,7 +195,7 @@ static inline void nbcon_kthread_wake(struct console *con)
 #define printk_safe_exit_irqrestore(flags) local_irq_restore(flags)
 
 static inline bool printk_percpu_data_ready(void) { return false; }
-static inline void defer_console_output(void) { }
+static inline void defer_console_output(struct syslog_namespace *ns) { }
 static inline bool is_printk_legacy_deferred(void) { return false; }
 static inline u64 nbcon_seq_read(struct console *con) { return 0; }
 static inline void nbcon_seq_force(struct console *con, u64 seq) { }
@@ -326,12 +330,14 @@ struct printk_buffers {
  *		nothing to output and this record should be skipped.
  * @seq:	The sequence number of the record used for @pbufs->outbuf.
  * @dropped:	The number of dropped records from reading @seq.
+ * @ns:		The syslog namespace backing the ringbuffer being read.
  */
 struct printk_message {
 	struct printk_buffers	*pbufs;
 	unsigned int		outbuf_len;
 	u64			seq;
 	unsigned long		dropped;
+	struct syslog_namespace	*ns;
 };
 
 bool printk_get_next_message(struct printk_message *pmsg, u64 seq,

@@ -19,6 +19,7 @@
 #include <linux/export.h>
 #include <linux/user_namespace.h>
 #include <linux/binfmts.h>
+#include <linux/syslog_namespace.h>
 #include <linux/proc_ns.h>
 
 #if IS_ENABLED(CONFIG_BINFMT_MISC)
@@ -67,6 +68,8 @@ struct user_namespace init_user_ns = {
 	},
 	.ns.ns_type = ns_common_type(&init_user_ns),
 	.ns.__ns_ref = REFCOUNT_INIT(3),
+	.syslog_ns = &init_syslog_ns,
+	.syslog_ns_is_owner = true,
 	.owner = GLOBAL_ROOT_UID,
 	.group = GLOBAL_ROOT_GID,
 	.ns.inum = ns_init_inum(&init_user_ns),

@@ -9,6 +9,7 @@
 #include <linux/cpumask.h>
 #include <linux/printk.h>
 #include <linux/kprobes.h>
+#include <linux/syslog_namespace.h>
 
 #include "internal.h"
 

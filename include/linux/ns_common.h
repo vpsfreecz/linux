@@ -13,6 +13,7 @@ struct ipc_namespace;
 struct mnt_namespace;
 struct net;
 struct pid_namespace;
+struct syslog_namespace;
 struct time_namespace;
 struct user_namespace;
 struct uts_namespace;
@@ -68,6 +69,8 @@ void __ns_common_free(struct ns_common *ns);
 		const struct net *:              &(__ns)->ns, \
 		struct pid_namespace *:          &(__ns)->ns, \
 		const struct pid_namespace *:    &(__ns)->ns, \
+		struct syslog_namespace * :      &(__ns)->ns, \
+		const struct syslog_namespace * : &(__ns)->ns, \
 		struct time_namespace *:         &(__ns)->ns, \
 		const struct time_namespace *:   &(__ns)->ns, \
 		struct user_namespace *:         &(__ns)->ns, \

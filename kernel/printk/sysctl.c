@@ -7,6 +7,7 @@
 #include <linux/printk.h>
 #include <linux/capability.h>
 #include <linux/ratelimit.h>
+#include <linux/syslog_namespace.h>
 #include "internal.h"
 
 static const int ten_thousand = 10000;
@@ -18,6 +19,28 @@ static int proc_dointvec_minmax_sysadmin(const struct ctl_table *table, int writ
 		return -EPERM;
 
 	return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+}
+
+static int
+proc_dmesg_restrict_sysadmin(const struct ctl_table *table, int write,
+			     void *buffer, size_t *lenp, loff_t *ppos)
+{
+	int ret;
+
+	/*
+	 * The syslog namespace port uses init_syslog_ns.dmesg_restrict for the
+	 * init namespace checks and inherits that value into child syslog
+	 * namespaces. Keep the historical global dmesg_restrict knob in sync so
+	 * /proc/sys/kernel/dmesg_restrict continues to control the real init
+	 * namespace policy.
+	 */
+	WRITE_ONCE(dmesg_restrict, READ_ONCE(init_syslog_ns.dmesg_restrict));
+
+	ret = proc_dointvec_minmax_sysadmin(table, write, buffer, lenp, ppos);
+	if (!ret)
+		WRITE_ONCE(init_syslog_ns.dmesg_restrict, READ_ONCE(dmesg_restrict));
+
+	return ret;
 }
 
 static const struct ctl_table printk_sysctls[] = {
@@ -61,6 +84,15 @@ static const struct ctl_table printk_sysctls[] = {
 	{
 		.procname	= "dmesg_restrict",
 		.data		= &dmesg_restrict,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dmesg_restrict_sysadmin,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "syslog_ns_print_to_init_ns",
+		.data		= &syslog_ns_print_to_init_ns,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax_sysadmin,

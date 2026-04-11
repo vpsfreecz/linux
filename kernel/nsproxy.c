@@ -21,6 +21,7 @@
 #include <linux/time_namespace.h>
 #include <linux/fs_struct.h>
 #include <linux/proc_fs.h>
+#include <linux/syslog_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/file.h>
 #include <linux/syscalls.h>
@@ -47,6 +48,7 @@ struct nsproxy init_nsproxy = {
 	.time_ns		= &init_time_ns,
 	.time_ns_for_children	= &init_time_ns,
 #endif
+	.syslog_ns		= &init_syslog_ns,
 };
 
 static inline struct nsproxy *create_nsproxy(void)
@@ -63,11 +65,17 @@ static inline struct nsproxy *create_nsproxy(void)
  * Create new nsproxy and all of its the associated namespaces.
  * Return the newly created nsproxy.  Do not attach this to the task,
  * leave it to the caller to do proper locking and attach it to task.
+ *
+ * @syslog_req_task is the task owning a pending SYSLOG_ACTION_NEW_NS
+ * request to consume while duplicating namespaces. Callers that only need
+ * a transient nsproxy clone should pass NULL so the request survives.
  */
 static struct nsproxy *create_new_namespaces(u64 flags,
-	struct task_struct *tsk, struct user_namespace *user_ns,
-	struct fs_struct *new_fs)
+	struct task_struct *tsk, struct task_struct *syslog_req_task,
+	struct user_namespace *user_ns, struct fs_struct *new_fs)
 {
+	bool new_syslog_ns = false;
+	char *syslog_name = NULL;
 	struct nsproxy *new_nsp;
 	int err;
 
@@ -121,8 +129,29 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 	}
 	new_nsp->time_ns = get_time_ns(tsk->nsproxy->time_ns);
 
+	if (syslog_req_task) {
+		new_syslog_ns = syslog_req_task->syslog_ns_for_child;
+		syslog_name = syslog_req_task->syslog_ns_for_child_name;
+	}
+
+	new_nsp->syslog_ns = copy_syslog_ns(new_syslog_ns, syslog_name,
+					    user_ns, tsk->nsproxy->syslog_ns);
+	if (IS_ERR(new_nsp->syslog_ns)) {
+		err = PTR_ERR(new_nsp->syslog_ns);
+		goto out_syslog;
+	}
+
+	if (syslog_req_task) {
+		syslog_req_task->syslog_ns_for_child = false;
+		kfree(syslog_req_task->syslog_ns_for_child_name);
+		syslog_req_task->syslog_ns_for_child_name = NULL;
+	}
 	return new_nsp;
 
+out_syslog:
+	put_time_ns(new_nsp->time_ns);
+	if (new_nsp->time_ns_for_children)
+		put_time_ns(new_nsp->time_ns_for_children);
 out_time:
 	put_net(new_nsp->net_ns);
 out_net:
@@ -152,7 +181,8 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 
 	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			      CLONE_NEWPID | CLONE_NEWNET |
-			      CLONE_NEWCGROUP | CLONE_NEWTIME)))) {
+			      CLONE_NEWCGROUP | CLONE_NEWTIME))) &&
+	    likely(!current->syslog_ns_for_child)) {
 		if ((flags & CLONE_VM) ||
 		    likely(old_ns->time_ns_for_children == old_ns->time_ns)) {
 			get_nsproxy(old_ns);
@@ -172,7 +202,8 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 		(CLONE_NEWIPC | CLONE_SYSVSEM))
 		return -EINVAL;
 
-	new_ns = create_new_namespaces(flags, tsk, user_ns, tsk->fs);
+	new_ns = create_new_namespaces(flags, tsk, current, user_ns,
+				       tsk->fs);
 	if (IS_ERR(new_ns))
 		return  PTR_ERR(new_ns);
 
@@ -191,6 +222,7 @@ void free_nsproxy(struct nsproxy *ns)
 	put_pid_ns(ns->pid_ns_for_children);
 	put_time_ns(ns->time_ns);
 	put_time_ns(ns->time_ns_for_children);
+	put_syslog_ns(ns->syslog_ns);
 	put_cgroup_ns(ns->cgroup_ns);
 	put_net(ns->net_ns);
 	kmem_cache_free(nsproxy_cachep, ns);
@@ -208,15 +240,16 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 
 	if (!(unshare_flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			       CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWCGROUP |
-			       CLONE_NEWTIME)))
+			       CLONE_NEWTIME)) &&
+	    !current->syslog_ns_for_child)
 		return 0;
 
 	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	*new_nsp = create_new_namespaces(unshare_flags, current, user_ns,
-					 new_fs ? new_fs : current->fs);
+	*new_nsp = create_new_namespaces(unshare_flags, current, current,
+					 user_ns, new_fs ? new_fs : current->fs);
 	if (IS_ERR(*new_nsp)) {
 		err = PTR_ERR(*new_nsp);
 		goto out;
@@ -254,7 +287,13 @@ int exec_task_namespaces(void)
 	if (tsk->nsproxy->time_ns_for_children == tsk->nsproxy->time_ns)
 		return 0;
 
-	new = create_new_namespaces(0, tsk, current_user_ns(), tsk->fs);
+	/*
+	 * exec only syncs the deferred time namespace into the active nsproxy.
+	 * It must not consume a pending SYSLOG_ACTION_NEW_NS request, which is
+	 * meant for the next real clone/unshare namespace duplication.
+	 */
+	new = create_new_namespaces(0, tsk, NULL, current_user_ns(),
+				    tsk->fs);
 	if (IS_ERR(new))
 		return PTR_ERR(new);
 
@@ -322,7 +361,13 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 {
 	struct task_struct *me = current;
 
-	nsset->nsproxy = create_new_namespaces(0, me, current_user_ns(), me->fs);
+	/*
+	 * setns() needs a transient duplicate of the caller's namespaces for
+	 * validation and commit. Do not consume a pending child-syslog request
+	 * here; it belongs to the next real clone/unshare boundary.
+	 */
+	nsset->nsproxy = create_new_namespaces(0, me, NULL,
+					       current_user_ns(), me->fs);
 	if (IS_ERR(nsset->nsproxy))
 		return PTR_ERR(nsset->nsproxy);
 
