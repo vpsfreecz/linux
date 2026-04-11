@@ -72,6 +72,14 @@ struct remote_function_call {
 };
 
 #ifdef CONFIG_BPF_SYSCALL
+static struct pmu perf_tracepoint;
+#ifdef CONFIG_KPROBE_EVENTS
+static struct pmu perf_kprobe;
+#endif
+#ifdef CONFIG_UPROBE_EVENTS
+static struct pmu perf_uprobe;
+#endif
+
 static bool perf_event_token_is_container(const struct perf_event *event)
 {
 	return bpf_token_is_container(event->token);
@@ -97,6 +105,28 @@ static bool perf_event_container_same_domain(const struct perf_event *event,
 	return bpf_token_same_container_domain(event->token, prog->aux->token);
 }
 
+static bool perf_event_container_tracing_pmu(const struct perf_event *event)
+{
+	const struct pmu *pmu;
+
+	if (!perf_event_token_is_container(event))
+		return false;
+
+	pmu = event->pmu;
+	if (pmu == &perf_tracepoint)
+		return true;
+#ifdef CONFIG_KPROBE_EVENTS
+	if (pmu == &perf_kprobe)
+		return true;
+#endif
+#ifdef CONFIG_UPROBE_EVENTS
+	if (pmu == &perf_uprobe)
+		return true;
+#endif
+
+	return false;
+}
+
 static bool perf_event_container_mmappable(const struct perf_event *event)
 {
 	if (!perf_event_token_is_container(event))
@@ -118,26 +148,26 @@ static bool perf_event_container_sysadmin_capable(const struct perf_event *event
 	       bpf_token_capable(event->token, CAP_SYS_ADMIN);
 }
 
-static int perf_allow_kernel_container(void)
+static int perf_allow_kernel_container_event(const struct perf_event *event)
 {
 	int err = perf_allow_kernel();
 
 	if (!err)
 		return 0;
-	if (sysctl_bpf_container_tracing_enabled &&
-	    bpf_token_current_container_capable(CAP_PERFMON))
+	if (perf_event_container_tracing_pmu(event) &&
+	    perf_event_container_perfmon_capable(event))
 		return 0;
 	return err;
 }
 
-static int perf_allow_cpu_container(void)
+static int perf_allow_cpu_container_event(const struct perf_event *event)
 {
 	int err = perf_allow_cpu();
 
 	if (!err)
 		return 0;
-	if (sysctl_bpf_container_tracing_enabled &&
-	    bpf_token_current_container_capable(CAP_PERFMON))
+	if (perf_event_container_tracing_pmu(event) &&
+	    perf_event_container_perfmon_capable(event))
 		return 0;
 	return err;
 }
@@ -173,13 +203,17 @@ static bool perf_event_container_sysadmin_capable(const struct perf_event *event
 	return false;
 }
 
-static int perf_allow_kernel_container(void)
+static int perf_allow_kernel_container_event(const struct perf_event *event)
 {
+	(void)event;
+
 	return perf_allow_kernel();
 }
 
-static int perf_allow_cpu_container(void)
+static int perf_allow_cpu_container_event(const struct perf_event *event)
 {
+	(void)event;
+
 	return perf_allow_cpu();
 }
 #endif
@@ -5075,8 +5109,8 @@ find_get_context(struct task_struct *task, struct perf_event *event)
 	int err;
 
 	if (!task) {
-		/* Must be root to operate on a CPU event: */
-		err = perf_allow_cpu_container();
+		/* CPU-wide container overrides are allowed only for tracing PMUs. */
+		err = perf_allow_cpu_container_event(event);
 		if (err)
 			return ERR_PTR(err);
 
@@ -13556,6 +13590,7 @@ SYSCALL_DEFINE5(perf_event_open,
 	int err;
 	int f_flags = O_RDWR;
 	int cgroup_fd = -1;
+	bool defer_container_kernel_check = false;
 
 	/* for future expandability... */
 	if (flags & ~PERF_FLAG_ALL)
@@ -13571,9 +13606,13 @@ SYSCALL_DEFINE5(perf_event_open,
 		return err;
 
 	if (!attr.exclude_kernel) {
-		err = perf_allow_kernel_container();
-		if (err)
-			return err;
+		err = perf_allow_kernel();
+		if (err) {
+			if (!(sysctl_bpf_container_tracing_enabled &&
+			      bpf_token_current_container_capable(CAP_PERFMON)))
+				return err;
+			defer_container_kernel_check = true;
+		}
 	}
 
 	if (attr.namespaces) {
@@ -13685,6 +13724,12 @@ SYSCALL_DEFINE5(perf_event_open,
 	 * any hardware group.
 	 */
 	pmu = event->pmu;
+
+	if (!attr.exclude_kernel && defer_container_kernel_check) {
+		err = perf_allow_kernel_container_event(event);
+		if (err)
+			goto err_alloc;
+	}
 
 	if (attr.use_clockid) {
 		err = perf_event_set_clock(event, attr.clockid);
