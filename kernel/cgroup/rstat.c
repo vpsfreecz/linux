@@ -440,6 +440,16 @@ int css_rstat_init(struct cgroup_subsys_state *css)
 			if (!cgrp->rstat_base_cpu)
 				return -ENOMEM;
 		}
+
+		if (!cgrp->prev_cputime_fake) {
+			cgrp->prev_cputime_fake = alloc_percpu(struct prev_cputime);
+			if (!cgrp->prev_cputime_fake) {
+				if (!cgroup_parent(cgrp))
+					free_percpu(cgrp->rstat_base_cpu);
+				return -ENOMEM;
+			}
+		}
+		cgrp->rstat_cpu_fake_timestamp = 0;
 	} else if (css->ss->css_rstat_flush == NULL)
 		return 0;
 
@@ -447,8 +457,12 @@ int css_rstat_init(struct cgroup_subsys_state *css)
 	if (!css->rstat_cpu) {
 		css->rstat_cpu = alloc_percpu(struct css_rstat_cpu);
 		if (!css->rstat_cpu) {
-			if (is_self)
-				free_percpu(cgrp->rstat_base_cpu);
+			if (is_self) {
+				if (!cgroup_parent(cgrp))
+					free_percpu(cgrp->rstat_base_cpu);
+				free_percpu(cgrp->prev_cputime_fake);
+				cgrp->prev_cputime_fake = NULL;
+			}
 
 			return -ENOMEM;
 		}
@@ -498,6 +512,8 @@ void css_rstat_exit(struct cgroup_subsys_state *css)
 
 		free_percpu(cgrp->rstat_base_cpu);
 		cgrp->rstat_base_cpu = NULL;
+		free_percpu(cgrp->prev_cputime_fake);
+		cgrp->prev_cputime_fake = NULL;
 	}
 
 	free_percpu(css->rstat_cpu);
