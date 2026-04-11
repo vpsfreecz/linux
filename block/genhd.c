@@ -26,6 +26,7 @@
 #include <linux/badblocks.h>
 #include <linux/part_stat.h>
 #include <linux/blktrace_api.h>
+#include <linux/user_namespace.h>
 
 #include "blk-throttle.h"
 #include "blk.h"
@@ -1353,6 +1354,9 @@ static int diskstats_show(struct seq_file *seqf, void *v)
 	unsigned int inflight;
 	struct disk_stats stat;
 	unsigned long idx;
+
+	if (current_user_ns() != &init_user_ns)
+		return 0;
 
 	/*
 	if (&disk_to_dev(gp)->kobj.entry == block_class.devices.next)

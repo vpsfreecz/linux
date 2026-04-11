@@ -28,6 +28,7 @@
 #include <asm/page.h>
 #include <linux/memcontrol.h>
 #include <linux/stackdepot.h>
+#include <linux/user_namespace.h>
 #include <trace/events/rcu.h>
 
 #include "../kernel/rcu/rcu.h"
@@ -1126,6 +1127,9 @@ static void cache_show(struct kmem_cache *s, struct seq_file *m)
 static int slab_show(struct seq_file *m, void *p)
 {
 	struct kmem_cache *s = list_entry(p, struct kmem_cache, list);
+
+	if (current_user_ns() != &init_user_ns)
+		return 0;
 
 	if (p == slab_caches.next)
 		print_slabinfo_header(m);
