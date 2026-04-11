@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/sysfs.h>
 #include <linux/memcontrol.h>
+#include <linux/proc_fs.h>
 #include <linux/module.h>
 #include <linux/kobject.h>
 #include <linux/mutex.h>
@@ -22,10 +23,16 @@
 
 #include "sched/sched.h"
 
+struct proc_dir_entry *proc_vpsadminos;
 
 static int __init vpsadminos_init(void)
 {
-	return sysfs_create_mount_point(fs_kobj, "vpsadminos");
+	int ret;
+
+	ret = sysfs_create_mount_point(fs_kobj, "vpsadminos");
+	proc_vpsadminos = proc_mkdir("vpsadminos", NULL);
+
+	return ret;
 }
 fs_initcall(vpsadminos_init);
 
@@ -561,4 +568,21 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 
 		css_put(css);
 	}
+}
+
+u64 fake_cputime_readout_idle(u64 timestamp, struct task_struct *p)
+{
+	u64 user = 0, system = 0, total;
+	int cpus;
+
+	if (!p->nsproxy || !p->nsproxy->cgroup_ns ||
+	    !p->nsproxy->cgroup_ns->loadavg_virt_enabled)
+		return 0;
+
+	fake_cputime_readout(p, timestamp, &user, &system, &cpus);
+	total = timestamp * (u64)cpus;
+	if (user + system >= total)
+		return 0;
+
+	return total - user - system;
 }
