@@ -19,6 +19,7 @@
 #include <linux/kernel.h>
 #include <linux/kernel_read_file.h>
 #include <linux/lsm_hooks.h>
+#include <linux/lsm_namespace.h>
 #include <linux/mman.h>
 #include <linux/mount.h>
 #include <linux/personality.h>
@@ -4222,6 +4223,8 @@ int security_getselfattr(unsigned int attr, struct lsm_ctx __user *uctx,
 		 */
 		if (lctx.id == LSM_ID_UNDEF)
 			return -EINVAL;
+		if (!lsm_ns_visible_lsmid(lctx.id))
+			return -EOPNOTSUPP;
 		single = true;
 	}
 
@@ -4230,6 +4233,8 @@ int security_getselfattr(unsigned int attr, struct lsm_ctx __user *uctx,
 	 * In the single case only get the data from the LSM specified.
 	 */
 	lsm_for_each_hook(scall, getselfattr) {
+		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id))
+			continue;
 		if (single && lctx.id != scall->hl->lsmid->id)
 			continue;
 		entrysize = left;
@@ -4305,6 +4310,20 @@ int security_setselfattr(unsigned int attr, struct lsm_ctx __user *uctx,
 		goto free_out;
 	}
 
+	if (attr == LSM_ATTR_UNSHARE) {
+		if (lctx->ctx_len != 0 || lctx->len != sizeof(*lctx)) {
+			rc = -EINVAL;
+			goto free_out;
+		}
+		rc = lsm_ns_prepare_unshare(lctx->id);
+		goto free_out;
+	}
+
+	if (!lsm_ns_visible_lsmid(lctx->id)) {
+		rc = -EOPNOTSUPP;
+		goto free_out;
+	}
+
 	lsm_for_each_hook(scall, setselfattr)
 		if ((scall->hl->lsmid->id) == lctx->id) {
 			rc = scall->hl->hook.setselfattr(attr, lctx, size, flags);
@@ -4335,8 +4354,12 @@ int security_getprocattr(struct task_struct *p, int lsmid, const char *name,
 	lsm_for_each_hook(scall, getprocattr) {
 		if (lsmid != 0 && lsmid != scall->hl->lsmid->id)
 			continue;
+		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id))
+			continue;
 		return scall->hl->hook.getprocattr(p, name, value);
 	}
+	if (lsmid != 0 && !lsm_ns_visible_lsmid(lsmid))
+		return -EOPNOTSUPP;
 	return LSM_RET_DEFAULT(getprocattr);
 }
 
@@ -4359,8 +4382,12 @@ int security_setprocattr(int lsmid, const char *name, void *value, size_t size)
 	lsm_for_each_hook(scall, setprocattr) {
 		if (lsmid != 0 && lsmid != scall->hl->lsmid->id)
 			continue;
+		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id))
+			continue;
 		return scall->hl->hook.setprocattr(name, value, size);
 	}
+	if (lsmid != 0 && !lsm_ns_visible_lsmid(lsmid))
+		return -EOPNOTSUPP;
 	return LSM_RET_DEFAULT(setprocattr);
 }
 
