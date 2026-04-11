@@ -54,6 +54,7 @@ enum memcg_memory_event {
 	MEMCG_SWAP_HIGH,
 	MEMCG_SWAP_MAX,
 	MEMCG_SWAP_FAIL,
+	MEMCG_SWAP_PROACTIVE,
 	MEMCG_NR_MEMORY_EVENTS,
 };
 
@@ -1062,7 +1063,8 @@ static inline void memcg_memory_event(struct mem_cgroup *memcg,
 				      enum memcg_memory_event event)
 {
 	bool swap_event = event == MEMCG_SWAP_HIGH || event == MEMCG_SWAP_MAX ||
-			  event == MEMCG_SWAP_FAIL;
+			  event == MEMCG_SWAP_FAIL ||
+			  event == MEMCG_SWAP_PROACTIVE;
 
 	atomic_long_inc(&memcg->memory_events_local[event]);
 	if (!swap_event)
