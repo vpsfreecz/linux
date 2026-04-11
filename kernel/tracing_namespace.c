@@ -181,15 +181,15 @@ struct tracing_namespace *copy_tracing_ns(bool new_child,
 		return ERR_PTR(-EINVAL);
 
 	if (old_ns != &init_tracing_ns) {
-		pr_notice("tracing_ns: nested create request reused ns=%u for user=%u pid=%u syslog=%u\n",
+		pr_notice("tracing_ns: reject nested create request ns=%u user=%u pid=%u syslog=%u\n",
 		  old_ns->ns.inum, user_ns->ns.inum, pid_ns->ns.inum, syslog_ns->ns.inum);
-		return get_tracing_ns(old_ns);
+		return ERR_PTR(-EPERM);
 	}
 
 	if (!tracing_ns_can_bind_child(old_ns, user_ns, pid_ns, syslog_ns)) {
-		pr_notice("tracing_ns: skipped child bind on incomplete boundary user=%u pid=%u syslog=%u old=%u\n",
+		pr_notice("tracing_ns: reject create on incomplete boundary user=%u pid=%u syslog=%u old=%u\n",
 		  user_ns->ns.inum, pid_ns->ns.inum, syslog_ns->ns.inum, old_ns->ns.inum);
-		return get_tracing_ns(old_ns);
+		return ERR_PTR(-EINVAL);
 	}
 
 	return clone_tracing_ns(user_ns, pid_ns, syslog_ns, old_ns);
