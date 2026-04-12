@@ -2878,6 +2878,7 @@ static int do_sysinfo(struct sysinfo *info)
 		unsigned long memusage = page_counter_read(&memcg->memory);
 		unsigned long totalram = (u64)READ_ONCE(memcg->memory.max);
 		unsigned long proactive_swap;
+		unsigned long normal_swap_usage = 0;
 
 		memsw = READ_ONCE(memcg->memsw.max);
 		memsw_usage = page_counter_read(&memcg->memsw);
@@ -2887,25 +2888,40 @@ static int do_sysinfo(struct sysinfo *info)
 		info->freeram = info->freehigh = totalram - memusage;
 		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
 			if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
-				info->totalswap = 0;
-				info->freeswap = 0;
+				if (memsw == PAGE_COUNTER_MAX) {
+					normal_swap_usage = (memsw_usage > proactive_swap) ?
+						(memsw_usage - proactive_swap) : 0;
+					info->freeswap = (info->totalswap > normal_swap_usage) ?
+						(info->totalswap - normal_swap_usage) : 0;
+				} else {
+					info->totalswap = 0;
+					info->freeswap = 0;
+				}
 			} else {
 				info->totalswap = memsw - totalram;
-				info->freeswap = info->totalswap - (memsw_usage - memusage);
+				normal_swap_usage = (memsw_usage > memusage + proactive_swap) ?
+					(memsw_usage - memusage - proactive_swap) : 0;
+				info->freeswap = (info->totalswap > normal_swap_usage) ?
+					(info->totalswap - normal_swap_usage) : 0;
 			}
 		} else { // v2
 			if (!memsw) {
 				info->totalswap = 0;
 				info->freeswap = 0;
+			} else if (memsw == PAGE_COUNTER_MAX) {
+				normal_swap_usage = (memsw_usage > proactive_swap) ?
+					(memsw_usage - proactive_swap) : 0;
+				info->freeswap = (info->totalswap > normal_swap_usage) ?
+					(info->totalswap - normal_swap_usage) : 0;
 			} else {
 				info->totalswap = memsw;
-				info->freeswap = info->totalswap - memsw_usage;
+				normal_swap_usage = (memsw_usage > proactive_swap) ?
+					(memsw_usage - proactive_swap) : 0;
+				info->freeswap = (info->totalswap > normal_swap_usage) ?
+					(info->totalswap - normal_swap_usage) : 0;
 			}
 		}
-		if (!info->totalswap && proactive_swap) {
-			info->totalswap = proactive_swap;
-			info->freeswap = 0;
-		}
+		info->totalswap += proactive_swap;
 		info->bufferram = memcg_page_state(memcg, NR_FILE_PAGES);
 		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
 		mem_cgroup_put(memcg);
