@@ -44,6 +44,7 @@ struct cred_security_struct {
 	u32 create_sid; /* fscreate SID */
 	u32 keycreate_sid; /* keycreate SID */
 	u32 sockcreate_sid; /* fscreate SID */
+	struct selinux_state *state; /* SELinux state carried by these creds */
 } __randomize_layout;
 
 struct task_security_struct {
@@ -179,6 +180,18 @@ extern struct lsm_blob_sizes selinux_blob_sizes;
 static inline struct cred_security_struct *selinux_cred(const struct cred *cred)
 {
 	return cred->security + selinux_blob_sizes.lbs_cred;
+}
+
+static inline struct selinux_state *cred_selinux_state(const struct cred *cred)
+{
+	struct selinux_state *state = selinux_cred(cred)->state;
+
+	return state ?: &selinux_state;
+}
+
+static inline struct selinux_state *current_selinux_state(void)
+{
+	return cred_selinux_state(current_cred());
 }
 
 static inline struct task_security_struct *
