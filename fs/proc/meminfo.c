@@ -57,6 +57,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		unsigned long memsw = PAGE_COUNTER_MAX;
 		unsigned long memsw_usage = 0;
 		unsigned long memusage = page_counter_read(&memcg->memory);
+		unsigned long proactive_swap;
+		unsigned long normal_swap_usage = 0;
 
 		for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
 			pages[lru] = memcg_page_state(memcg, NR_LRU_BASE + lru);
@@ -67,6 +69,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 
 		memsw = READ_ONCE(memcg->memsw.max);
 		memsw_usage = page_counter_read(&memcg->memsw);
+		proactive_swap = mem_cgroup_proactive_swap_usage(memcg);
 
 		if (mem_cgroup_kmem_disabled()) {
 			sreclaimable = 0;
@@ -84,22 +87,36 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 				i.totalswap = 0;
 				i.freeswap = 0;
 			} else if (memsw == PAGE_COUNTER_MAX) {
-				i.freeswap = i.totalswap - memsw_usage;
+				normal_swap_usage = (memsw_usage > proactive_swap) ?
+					(memsw_usage - proactive_swap) : 0;
+				i.freeswap = (i.totalswap > normal_swap_usage) ?
+					(i.totalswap - normal_swap_usage) : 0;
 			} else {
-				i.freeswap = i.totalswap - (memsw_usage - memusage);
 				i.totalswap = memsw - totalram;
+				normal_swap_usage = (memsw_usage > memusage + proactive_swap) ?
+					(memsw_usage - memusage - proactive_swap) : 0;
+				i.freeswap = (i.totalswap > normal_swap_usage) ?
+					(i.totalswap - normal_swap_usage) : 0;
 			}
 		} else { // v2
 			if (!memsw) {
 				i.totalswap = 0;
 				i.freeswap = 0;
 			} else if (memsw == PAGE_COUNTER_MAX) {
-				i.freeswap = i.totalswap - memsw_usage;
+				normal_swap_usage = (memsw_usage > proactive_swap) ?
+					(memsw_usage - proactive_swap) : 0;
+				i.freeswap = (i.totalswap > normal_swap_usage) ?
+					(i.totalswap - normal_swap_usage) : 0;
 			} else {
 				i.totalswap = memsw;
-				i.freeswap = i.totalswap - memsw_usage;
+				normal_swap_usage = (memsw_usage > proactive_swap) ?
+					(memsw_usage - proactive_swap) : 0;
+				i.freeswap = (i.totalswap > normal_swap_usage) ?
+					(i.totalswap - normal_swap_usage) : 0;
 			}
 		}
+
+		i.totalswap += proactive_swap;
 
 		available = i.freeram + sreclaimable + cached_inactive;
 		committed = 0;
