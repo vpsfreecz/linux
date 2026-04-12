@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/swap_cgroup.h>
+#include <linux/bitmap.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 
@@ -8,6 +9,7 @@
 static DEFINE_MUTEX(swap_cgroup_mutex);
 struct swap_cgroup_ctrl {
 	struct page **map;
+	unsigned long *proactive_map;
 	unsigned long length;
 	spinlock_t	lock;
 };
@@ -124,6 +126,7 @@ unsigned short swap_cgroup_cmpxchg(swp_entry_t ent,
  * (Of course, old value can be 0.)
  */
 unsigned short swap_cgroup_record(swp_entry_t ent, unsigned short id,
+				  bool system_proactive_swap,
 				  unsigned int nr_ents)
 {
 	struct swap_cgroup_ctrl *ctrl;
@@ -140,6 +143,10 @@ unsigned short swap_cgroup_record(swp_entry_t ent, unsigned short id,
 	for (;;) {
 		VM_BUG_ON(sc->id != old);
 		sc->id = id;
+		if (system_proactive_swap)
+			__set_bit(offset, ctrl->proactive_map);
+		else
+			__clear_bit(offset, ctrl->proactive_map);
 		offset++;
 		if (offset == end)
 			break;
@@ -166,9 +173,23 @@ unsigned short lookup_swap_cgroup_id(swp_entry_t ent)
 	return lookup_swap_cgroup(ent, NULL)->id;
 }
 
+bool lookup_swap_cgroup_proactive(swp_entry_t ent)
+{
+	struct swap_cgroup_ctrl *ctrl;
+
+	if (mem_cgroup_disabled())
+		return false;
+
+	ctrl = &swap_cgroup_ctrl[swp_type(ent)];
+	if (!ctrl->proactive_map)
+		return false;
+	return test_bit(swp_offset(ent), ctrl->proactive_map);
+}
+
 int swap_cgroup_swapon(int type, unsigned long max_pages)
 {
 	void *array;
+	unsigned long *proactive_map;
 	unsigned long length;
 	struct swap_cgroup_ctrl *ctrl;
 
@@ -181,16 +202,25 @@ int swap_cgroup_swapon(int type, unsigned long max_pages)
 	if (!array)
 		goto nomem;
 
+	proactive_map = bitmap_zalloc(max_pages, GFP_KERNEL);
+	if (!proactive_map) {
+		vfree(array);
+		goto nomem;
+	}
+
 	ctrl = &swap_cgroup_ctrl[type];
 	mutex_lock(&swap_cgroup_mutex);
 	ctrl->length = length;
 	ctrl->map = array;
+	ctrl->proactive_map = proactive_map;
 	spin_lock_init(&ctrl->lock);
 	if (swap_cgroup_prepare(type)) {
 		/* memory shortage */
 		ctrl->map = NULL;
+		ctrl->proactive_map = NULL;
 		ctrl->length = 0;
 		mutex_unlock(&swap_cgroup_mutex);
+		bitmap_free(proactive_map);
 		vfree(array);
 		goto nomem;
 	}
@@ -206,6 +236,7 @@ nomem:
 void swap_cgroup_swapoff(int type)
 {
 	struct page **map;
+	unsigned long *proactive_map;
 	unsigned long i, length;
 	struct swap_cgroup_ctrl *ctrl;
 
@@ -215,8 +246,10 @@ void swap_cgroup_swapoff(int type)
 	mutex_lock(&swap_cgroup_mutex);
 	ctrl = &swap_cgroup_ctrl[type];
 	map = ctrl->map;
+	proactive_map = ctrl->proactive_map;
 	length = ctrl->length;
 	ctrl->map = NULL;
+	ctrl->proactive_map = NULL;
 	ctrl->length = 0;
 	mutex_unlock(&swap_cgroup_mutex);
 
@@ -230,4 +263,5 @@ void swap_cgroup_swapoff(int type)
 		}
 		vfree(map);
 	}
+	bitmap_free(proactive_map);
 }

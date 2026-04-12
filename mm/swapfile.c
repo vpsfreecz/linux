@@ -3025,6 +3025,7 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 	unsigned long memsw_usage = 0;
 	unsigned long totalram = (u64)READ_ONCE(memcg->memory.max);
 	unsigned long memusage = page_counter_read(&memcg->memory);
+	unsigned long proactive_usedswap;
 	unsigned long totalswap, usedswap;
 	struct sysinfo i;
 
@@ -3034,27 +3035,40 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 
 	memsw = READ_ONCE(memcg->memsw.max);
 	memsw_usage = page_counter_read(&memcg->memsw);
+	proactive_usedswap = mem_cgroup_proactive_swap_usage(memcg) * PAGE_SIZE;
 	mem_cgroup_put(memcg);
 
 	if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
-		if (!memsw || (memsw == totalram))
-			return 0;
-
-		if (memsw == PAGE_COUNTER_MAX)
-			totalswap = i.totalswap * PAGE_SIZE;
-		else
-			totalswap = (memsw - totalram) * PAGE_SIZE;
-		usedswap = (memsw_usage - memusage) * PAGE_SIZE;
+		if (!memsw || (memsw == totalram)) {
+			totalswap = 0;
+			usedswap = 0;
+		} else {
+			if (memsw == PAGE_COUNTER_MAX)
+				totalswap = i.totalswap * PAGE_SIZE;
+			else
+				totalswap = (memsw - totalram) * PAGE_SIZE;
+			usedswap = (memsw_usage - memusage) * PAGE_SIZE;
+		}
 	} else { // v2
-		if (!memsw)
-			return 0;
-
-		if (memsw == PAGE_COUNTER_MAX)
-			totalswap = i.totalswap * PAGE_SIZE;
-		else
-			totalswap = memsw * PAGE_SIZE;
-		usedswap = memsw_usage * PAGE_SIZE;
+		if (!memsw) {
+			totalswap = 0;
+			usedswap = 0;
+		} else {
+			if (memsw == PAGE_COUNTER_MAX)
+				totalswap = i.totalswap * PAGE_SIZE;
+			else
+				totalswap = memsw * PAGE_SIZE;
+			usedswap = memsw_usage * PAGE_SIZE;
+		}
 	}
+
+	if (!totalswap && proactive_usedswap) {
+		totalswap = proactive_usedswap;
+		usedswap = proactive_usedswap;
+	}
+
+	if (!totalswap)
+		return 0;
 
 	seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
 			"virtual",
