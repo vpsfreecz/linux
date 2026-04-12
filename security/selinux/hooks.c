@@ -205,6 +205,48 @@ static int selinux_lsm_notifier_avc_callback(u32 event)
 	return 0;
 }
 
+static void selinux_state_free(struct work_struct *work)
+{
+	struct selinux_state *state = container_of(work, struct selinux_state,
+						      work);
+	struct selinux_state *parent = state->parent;
+
+	if (state->status_page)
+		__free_page(state->status_page);
+
+	selinux_state_policy_free(state);
+	kfree(state);
+	put_selinux_state(parent);
+}
+
+int selinux_state_create(struct selinux_state *parent,
+			 struct selinux_state **state)
+{
+	struct selinux_state *newstate;
+
+	newstate = kzalloc(sizeof(*newstate), GFP_KERNEL);
+	if (!newstate)
+		return -ENOMEM;
+
+	refcount_set(&newstate->count, 1);
+	INIT_WORK(&newstate->work, selinux_state_free);
+	mutex_init(&newstate->status_lock);
+	mutex_init(&newstate->policy_mutex);
+	newstate->parent = get_selinux_state(parent);
+#ifdef CONFIG_SECURITY_SELINUX_DEVELOP
+	if (parent)
+		WRITE_ONCE(newstate->enforcing, READ_ONCE(parent->enforcing));
+#endif
+
+	*state = newstate;
+	return 0;
+}
+
+void __put_selinux_state(struct selinux_state *state)
+{
+	schedule_work(&state->work);
+}
+
 /*
  * initialise the security for the init task
  */
@@ -216,6 +258,7 @@ static void cred_init_security(void)
 
 	crsec = selinux_cred(unrcu_pointer(current->real_cred));
 	crsec->osid = crsec->sid = SECINITSID_KERNEL;
+	crsec->state = &selinux_state;
 }
 
 /*
@@ -4169,6 +4212,7 @@ static int selinux_cred_prepare(struct cred *new, const struct cred *old,
 	struct cred_security_struct *crsec = selinux_cred(new);
 
 	*crsec = *old_crsec;
+	crsec->state = get_selinux_state(crsec->state);
 	return 0;
 }
 
@@ -4181,6 +4225,14 @@ static void selinux_cred_transfer(struct cred *new, const struct cred *old)
 	struct cred_security_struct *crsec = selinux_cred(new);
 
 	*crsec = *old_crsec;
+	crsec->state = get_selinux_state(crsec->state);
+}
+
+static void selinux_cred_free(struct cred *cred)
+{
+	struct cred_security_struct *crsec = selinux_cred(cred);
+
+	put_selinux_state(crsec->state);
 }
 
 static void selinux_cred_getsecid(const struct cred *c, u32 *secid)
@@ -7383,6 +7435,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_alloc, selinux_task_alloc),
 	LSM_HOOK_INIT(cred_prepare, selinux_cred_prepare),
 	LSM_HOOK_INIT(cred_transfer, selinux_cred_transfer),
+	LSM_HOOK_INIT(cred_free, selinux_cred_free),
 	LSM_HOOK_INIT(cred_getsecid, selinux_cred_getsecid),
 	LSM_HOOK_INIT(cred_getlsmprop, selinux_cred_getlsmprop),
 	LSM_HOOK_INIT(kernel_act_as, selinux_kernel_act_as),
@@ -7585,6 +7638,8 @@ static __init int selinux_init(void)
 	memset(&selinux_state, 0, sizeof(selinux_state));
 	enforcing_set(selinux_enforcing_boot);
 	selinux_avc_init();
+	refcount_set(&selinux_state.count, 1);
+	INIT_WORK(&selinux_state.work, selinux_state_free);
 	mutex_init(&selinux_state.status_lock);
 	mutex_init(&selinux_state.policy_mutex);
 
