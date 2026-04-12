@@ -1023,12 +1023,13 @@ void services_compute_xperms_decision(struct extended_perms_decision *xpermd,
 	}
 }
 
-void security_compute_xperms_decision(u32 ssid,
-				      u32 tsid,
-				      u16 orig_tclass,
-				      u8 driver,
-				      u8 base_perm,
-				      struct extended_perms_decision *xpermd)
+void security_compute_xperms_decision_state(struct selinux_state *state,
+					    u32 ssid,
+					    u32 tsid,
+					    u16 orig_tclass,
+					    u8 driver,
+					    u8 base_perm,
+					    struct extended_perms_decision *xpermd)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -1049,10 +1050,10 @@ void security_compute_xperms_decision(u32 ssid,
 	memset(xpermd->dontaudit->p, 0, sizeof(xpermd->dontaudit->p));
 
 	rcu_read_lock();
-	if (!selinux_initialized())
+	if (!selinux_initialized_state(state))
 		goto allow;
 
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -1120,11 +1121,12 @@ allow:
  * Compute a set of access vector decisions based on the
  * SID pair (@ssid, @tsid) for the permissions in @tclass.
  */
-void security_compute_av(u32 ssid,
-			 u32 tsid,
-			 u16 orig_tclass,
-			 struct av_decision *avd,
-			 struct extended_perms *xperms)
+void security_compute_av_state(struct selinux_state *state,
+			       u32 ssid,
+			       u32 tsid,
+			       u16 orig_tclass,
+			       struct av_decision *avd,
+			       struct extended_perms *xperms)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -1133,10 +1135,10 @@ void security_compute_av(u32 ssid,
 	struct context *scontext = NULL, *tcontext = NULL;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	avd_init(policy, avd);
 	xperms->len = 0;
-	if (!selinux_initialized())
+	if (!selinux_initialized_state(state))
 		goto allow;
 
 	policydb = &policy->policydb;
@@ -1188,10 +1190,11 @@ allow:
 	goto out;
 }
 
-void security_compute_av_user(u32 ssid,
-			      u32 tsid,
-			      u16 tclass,
-			      struct av_decision *avd)
+void security_compute_av_user_state(struct selinux_state *state,
+				    u32 ssid,
+				    u32 tsid,
+				    u16 tclass,
+				    struct av_decision *avd)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -1199,9 +1202,9 @@ void security_compute_av_user(u32 ssid,
 	struct context *scontext = NULL, *tcontext = NULL;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	avd_init(policy, avd);
-	if (!selinux_initialized())
+	if (!selinux_initialized_state(state))
 		goto allow;
 
 	policydb = &policy->policydb;
@@ -1353,9 +1356,10 @@ const char *security_get_initial_sid_context(u32 sid)
 	return initial_sid_to_string[sid];
 }
 
-static int security_sid_to_context_core(u32 sid, char **scontext,
-					u32 *scontext_len, int force,
-					int only_invalid)
+static int security_sid_to_context_core_state(struct selinux_state *state,
+				      u32 sid, char **scontext,
+				      u32 *scontext_len, int force,
+				      int only_invalid)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -1367,7 +1371,7 @@ static int security_sid_to_context_core(u32 sid, char **scontext,
 		*scontext = NULL;
 	*scontext_len  = 0;
 
-	if (!selinux_initialized()) {
+	if (!selinux_initialized_state(state)) {
 		if (sid <= SECINITSID_NUM) {
 			char *scontextp;
 			const char *s;
@@ -1399,7 +1403,7 @@ static int security_sid_to_context_core(u32 sid, char **scontext,
 		return -EINVAL;
 	}
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -1435,17 +1439,20 @@ out_unlock:
  * into a dynamically allocated string of the correct size.  Set @scontext
  * to point to this string and set @scontext_len to the length of the string.
  */
-int security_sid_to_context(u32 sid, char **scontext, u32 *scontext_len)
+int security_sid_to_context_state(struct selinux_state *state,
+				  u32 sid, char **scontext,
+				  u32 *scontext_len)
 {
-	return security_sid_to_context_core(sid, scontext,
-					    scontext_len, 0, 0);
+	return security_sid_to_context_core_state(state, sid, scontext,
+					  scontext_len, 0, 0);
 }
 
-int security_sid_to_context_force(u32 sid,
-				  char **scontext, u32 *scontext_len)
+int security_sid_to_context_force_state(struct selinux_state *state,
+					u32 sid, char **scontext,
+					u32 *scontext_len)
 {
-	return security_sid_to_context_core(sid, scontext,
-					    scontext_len, 1, 0);
+	return security_sid_to_context_core_state(state, sid, scontext,
+					  scontext_len, 1, 0);
 }
 
 /**
@@ -1461,11 +1468,12 @@ int security_sid_to_context_force(u32 sid,
  * this string (or NULL if the context is valid) and set @scontext_len to
  * the length of the string (or 0 if the context is valid).
  */
-int security_sid_to_context_inval(u32 sid,
-				  char **scontext, u32 *scontext_len)
+int security_sid_to_context_inval_state(struct selinux_state *state,
+					u32 sid, char **scontext,
+					u32 *scontext_len)
 {
-	return security_sid_to_context_core(sid, scontext,
-					    scontext_len, 1, 1);
+	return security_sid_to_context_core_state(state, sid, scontext,
+					  scontext_len, 1, 1);
 }
 
 /*
@@ -1549,9 +1557,12 @@ out:
 	return rc;
 }
 
-static int security_context_to_sid_core(const char *scontext, u32 scontext_len,
-					u32 *sid, u32 def_sid, gfp_t gfp_flags,
-					int force)
+static int security_context_to_sid_core_state(struct selinux_state *state,
+				      const char *scontext,
+				      u32 scontext_len,
+				      u32 *sid, u32 def_sid,
+				      gfp_t gfp_flags,
+				      int force)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -1569,7 +1580,7 @@ static int security_context_to_sid_core(const char *scontext, u32 scontext_len,
 	if (!scontext2)
 		return -ENOMEM;
 
-	if (!selinux_initialized()) {
+	if (!selinux_initialized_state(state)) {
 		u32 i;
 
 		for (i = 1; i < SECINITSID_NUM; i++) {
@@ -1594,7 +1605,7 @@ static int security_context_to_sid_core(const char *scontext, u32 scontext_len,
 	}
 retry:
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 	rc = string_to_context_struct(policydb, sidtab, scontext2,
@@ -1636,17 +1647,22 @@ out:
  * Returns -%EINVAL if the context is invalid, -%ENOMEM if insufficient
  * memory is available, or 0 on success.
  */
-int security_context_to_sid(const char *scontext, u32 scontext_len, u32 *sid,
-			    gfp_t gfp)
+int security_context_to_sid_state(struct selinux_state *state,
+				  const char *scontext,
+				  u32 scontext_len,
+				  u32 *sid, gfp_t gfp)
 {
-	return security_context_to_sid_core(scontext, scontext_len,
-					    sid, SECSID_NULL, gfp, 0);
+	return security_context_to_sid_core_state(state, scontext,
+					  scontext_len, sid,
+					  SECSID_NULL, gfp, 0);
 }
 
-int security_context_str_to_sid(const char *scontext, u32 *sid, gfp_t gfp)
+int security_context_str_to_sid_state(struct selinux_state *state,
+				      const char *scontext,
+				      u32 *sid, gfp_t gfp)
 {
-	return security_context_to_sid(scontext, strlen(scontext),
-				       sid, gfp);
+	return security_context_to_sid_state(state, scontext, strlen(scontext),
+				     sid, gfp);
 }
 
 /**
@@ -1668,18 +1684,25 @@ int security_context_str_to_sid(const char *scontext, u32 *sid, gfp_t gfp)
  * Returns -%EINVAL if the context is invalid, -%ENOMEM if insufficient
  * memory is available, or 0 on success.
  */
-int security_context_to_sid_default(const char *scontext, u32 scontext_len,
-				    u32 *sid, u32 def_sid, gfp_t gfp_flags)
+int security_context_to_sid_default_state(struct selinux_state *state,
+					  const char *scontext,
+					  u32 scontext_len,
+					  u32 *sid, u32 def_sid,
+					  gfp_t gfp_flags)
 {
-	return security_context_to_sid_core(scontext, scontext_len,
-					    sid, def_sid, gfp_flags, 1);
+	return security_context_to_sid_core_state(state, scontext,
+					  scontext_len, sid,
+					  def_sid, gfp_flags, 1);
 }
 
-int security_context_to_sid_force(const char *scontext, u32 scontext_len,
-				  u32 *sid)
+int security_context_to_sid_force_state(struct selinux_state *state,
+					const char *scontext,
+					u32 scontext_len,
+					u32 *sid)
 {
-	return security_context_to_sid_core(scontext, scontext_len,
-					    sid, SECSID_NULL, GFP_KERNEL, 1);
+	return security_context_to_sid_core_state(state, scontext,
+					  scontext_len, sid,
+					  SECSID_NULL, GFP_KERNEL, 1);
 }
 
 static int compute_sid_handle_invalid_context(
@@ -3521,31 +3544,31 @@ err:
 	return rc;
 }
 
-int security_get_reject_unknown(void)
+int security_get_reject_unknown_state(struct selinux_state *state)
 {
 	struct selinux_policy *policy;
 	int value;
 
-	if (!selinux_initialized())
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	value = policy->policydb.reject_unknown;
 	rcu_read_unlock();
 	return value;
 }
 
-int security_get_allow_unknown(void)
+int security_get_allow_unknown_state(struct selinux_state *state)
 {
 	struct selinux_policy *policy;
 	int value;
 
-	if (!selinux_initialized())
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	value = policy->policydb.allow_unknown;
 	rcu_read_unlock();
 	return value;
