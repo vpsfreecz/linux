@@ -78,6 +78,7 @@ struct selinux_fs_info {
 	struct dentry *policycap_dir;
 	unsigned long last_ino;
 	struct super_block *sb;
+	struct selinux_state *state;
 };
 
 static int selinux_fs_info_create(struct super_block *sb)
@@ -90,6 +91,7 @@ static int selinux_fs_info_create(struct super_block *sb)
 
 	fsi->last_ino = SEL_INO_NEXT - 1;
 	fsi->sb = sb;
+	fsi->state = get_selinux_state(current_selinux_state());
 	sb->s_fs_info = fsi;
 	return 0;
 }
@@ -100,6 +102,7 @@ static void selinux_fs_info_free(struct super_block *sb)
 	unsigned int i;
 
 	if (fsi) {
+		put_selinux_state(fsi->state);
 		for (i = 0; i < fsi->bool_num; i++)
 			kfree(fsi->bool_pending_names[i]);
 		kfree(fsi->bool_pending_names);
