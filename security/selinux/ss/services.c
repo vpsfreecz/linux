@@ -2194,7 +2194,7 @@ static void security_load_policycaps(struct selinux_policy *policy)
 static int security_preserve_bools(struct selinux_policy *oldpolicy,
 				struct selinux_policy *newpolicy);
 
-static void selinux_policy_free(struct selinux_policy *policy)
+void selinux_policy_free(struct selinux_policy *policy)
 {
 	if (!policy)
 		return;
@@ -2204,6 +2204,18 @@ static void selinux_policy_free(struct selinux_policy *policy)
 	policydb_destroy(&policy->policydb);
 	kfree(policy->sidtab);
 	kfree(policy);
+}
+
+void selinux_state_policy_free(struct selinux_state *state)
+{
+	struct selinux_policy *policy;
+
+	if (!state)
+		return;
+
+	policy = rcu_dereference_protected(state->policy, 1);
+	RCU_INIT_POINTER(state->policy, NULL);
+	selinux_policy_free(policy);
 }
 
 static void selinux_policy_cond_free(struct selinux_policy *policy)

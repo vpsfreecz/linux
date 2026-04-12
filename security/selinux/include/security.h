@@ -90,6 +90,7 @@ extern int selinux_enabled_boot;
 #define POLICYDB_BOUNDS_MAXDEPTH 4
 
 struct selinux_policy;
+struct selinux_state;
 
 struct selinux_state {
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
@@ -103,11 +104,32 @@ struct selinux_state {
 
 	struct selinux_policy __rcu *policy;
 	struct mutex policy_mutex;
+	struct selinux_state *parent;
+	refcount_t count;
+	struct work_struct work;
 } __randomize_layout;
 
 void selinux_avc_init(void);
 
 extern struct selinux_state selinux_state;
+
+int selinux_state_create(struct selinux_state *parent,
+			 struct selinux_state **state);
+void __put_selinux_state(struct selinux_state *state);
+
+static inline struct selinux_state *get_selinux_state(struct selinux_state *state)
+{
+	if (state && state != &selinux_state)
+		refcount_inc(&state->count);
+	return state;
+}
+
+static inline void put_selinux_state(struct selinux_state *state)
+{
+	if (state && state != &selinux_state &&
+	    refcount_dec_and_test(&state->count))
+		__put_selinux_state(state);
+}
 
 static inline bool selinux_initialized(void)
 {
@@ -224,6 +246,9 @@ void selinux_policy_cancel(struct selinux_load_state *load_state);
 int security_read_policy(void **data, size_t *len);
 int security_read_state_kernel(void **data, size_t *len);
 int security_policycap_supported(unsigned int req_cap);
+
+void selinux_policy_free(struct selinux_policy *policy);
+void selinux_state_policy_free(struct selinux_state *state);
 
 #define SEL_VEC_MAX 32
 struct av_decision {
