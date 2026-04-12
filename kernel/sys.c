@@ -2872,9 +2872,11 @@ static int do_sysinfo(struct sysinfo *info)
 		unsigned long memsw_usage = 0;
 		unsigned long memusage = page_counter_read(&memcg->memory);
 		unsigned long totalram = (u64)READ_ONCE(memcg->memory.max);
+		unsigned long proactive_swap;
 
 		memsw = READ_ONCE(memcg->memsw.max);
 		memsw_usage = page_counter_read(&memcg->memsw);
+		proactive_swap = mem_cgroup_proactive_swap_usage(memcg);
 
 		info->totalram = info->totalhigh = totalram;
 		info->freeram = info->freehigh = totalram - memusage;
@@ -2894,6 +2896,10 @@ static int do_sysinfo(struct sysinfo *info)
 				info->totalswap = memsw;
 				info->freeswap = info->totalswap - memsw_usage;
 			}
+		}
+		if (!info->totalswap && proactive_swap) {
+			info->totalswap = proactive_swap;
+			info->freeswap = 0;
 		}
 		info->bufferram = memcg_page_state(memcg, NR_FILE_PAGES);
 		info->sharedram = memcg_page_state(memcg, NR_SHMEM);

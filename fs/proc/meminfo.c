@@ -57,6 +57,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		unsigned long memsw = PAGE_COUNTER_MAX;
 		unsigned long memsw_usage = 0;
 		unsigned long memusage = page_counter_read(&memcg->memory);
+		unsigned long proactive_swap;
 
 		for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
 			pages[lru] = memcg_page_state(memcg, NR_LRU_BASE + lru);
@@ -67,6 +68,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 
 		memsw = READ_ONCE(memcg->memsw.max);
 		memsw_usage = page_counter_read(&memcg->memsw);
+		proactive_swap = mem_cgroup_proactive_swap_usage(memcg);
 
 		if (mem_cgroup_kmem_disabled()) {
 			sreclaimable = 0;
@@ -99,6 +101,11 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 				i.totalswap = memsw;
 				i.freeswap = i.totalswap - memsw_usage;
 			}
+		}
+
+		if (!i.totalswap && proactive_swap) {
+			i.totalswap = proactive_swap;
+			i.freeswap = 0;
 		}
 
 		available = i.freeram + sreclaimable + cached_inactive;
