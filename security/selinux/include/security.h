@@ -91,6 +91,7 @@ extern int selinux_enabled_boot;
 
 struct selinux_policy;
 struct selinux_state;
+struct selinux_avc;
 
 struct selinux_state {
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
@@ -103,6 +104,7 @@ struct selinux_state {
 	struct mutex status_lock;
 
 	struct selinux_policy __rcu *policy;
+	struct selinux_avc *avc;
 	struct mutex policy_mutex;
 	struct selinux_state *parent;
 	refcount_t count;
@@ -137,10 +139,26 @@ static inline bool selinux_initialized(void)
 	return smp_load_acquire(&selinux_state.initialized);
 }
 
+static inline bool selinux_initialized_state(struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	return smp_load_acquire(&state->initialized);
+}
+
 static inline void selinux_mark_initialized(void)
 {
 	/* do a synchronized write to avoid race conditions */
 	smp_store_release(&selinux_state.initialized, true);
+}
+
+static inline void selinux_mark_initialized_state(struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	smp_store_release(&state->initialized, true);
 }
 
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
@@ -149,9 +167,25 @@ static inline bool enforcing_enabled(void)
 	return READ_ONCE(selinux_state.enforcing);
 }
 
+static inline bool enforcing_enabled_state(struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	return READ_ONCE(state->enforcing);
+}
+
 static inline void enforcing_set(bool value)
 {
 	WRITE_ONCE(selinux_state.enforcing, value);
+}
+
+static inline void enforcing_set_state(struct selinux_state *state, bool value)
+{
+	if (!state)
+		state = &selinux_state;
+
+	WRITE_ONCE(state->enforcing, value);
 }
 #else
 static inline bool enforcing_enabled(void)
@@ -159,7 +193,16 @@ static inline bool enforcing_enabled(void)
 	return true;
 }
 
+static inline bool enforcing_enabled_state(struct selinux_state *state)
+{
+	return true;
+}
+
 static inline void enforcing_set(bool value)
+{
+}
+
+static inline void enforcing_set_state(struct selinux_state *state, bool value)
 {
 }
 #endif
@@ -288,16 +331,42 @@ struct extended_perms {
 #define AVD_FLAGS_PERMISSIVE 0x0001
 #define AVD_FLAGS_NEVERAUDIT  0x0002
 
-void security_compute_av(u32 ssid, u32 tsid, u16 tclass,
-			 struct av_decision *avd,
-			 struct extended_perms *xperms);
+void security_compute_av_state(struct selinux_state *state,
+			      u32 ssid, u32 tsid, u16 tclass,
+			      struct av_decision *avd,
+			      struct extended_perms *xperms);
 
-void security_compute_xperms_decision(u32 ssid, u32 tsid, u16 tclass, u8 driver,
-				      u8 base_perm,
-				      struct extended_perms_decision *xpermd);
+static inline void security_compute_av(u32 ssid, u32 tsid, u16 tclass,
+			       struct av_decision *avd,
+			       struct extended_perms *xperms)
+{
+	security_compute_av_state(&selinux_state, ssid, tsid, tclass, avd,
+				  xperms);
+}
 
-void security_compute_av_user(u32 ssid, u32 tsid, u16 tclass,
-			      struct av_decision *avd);
+void security_compute_xperms_decision_state(struct selinux_state *state,
+				    u32 ssid, u32 tsid, u16 tclass,
+				    u8 driver, u8 base_perm,
+				    struct extended_perms_decision *xpermd);
+
+static inline void security_compute_xperms_decision(u32 ssid, u32 tsid,
+				     u16 tclass, u8 driver, u8 base_perm,
+				     struct extended_perms_decision *xpermd)
+{
+	security_compute_xperms_decision_state(&selinux_state, ssid, tsid,
+				       tclass, driver, base_perm, xpermd);
+}
+
+void security_compute_av_user_state(struct selinux_state *state,
+			   u32 ssid, u32 tsid, u16 tclass,
+			   struct av_decision *avd);
+
+static inline void security_compute_av_user(u32 ssid, u32 tsid, u16 tclass,
+			       struct av_decision *avd)
+{
+	security_compute_av_user_state(&selinux_state, ssid, tsid, tclass,
+			       avd);
+}
 
 int security_transition_sid(u32 ssid, u32 tsid, u16 tclass,
 			    const struct qstr *qstr, u32 *out_sid);
@@ -309,22 +378,91 @@ int security_member_sid(u32 ssid, u32 tsid, u16 tclass, u32 *out_sid);
 
 int security_change_sid(u32 ssid, u32 tsid, u16 tclass, u32 *out_sid);
 
-int security_sid_to_context(u32 sid, char **scontext, u32 *scontext_len);
+int security_sid_to_context_state(struct selinux_state *state,
+				  u32 sid, char **scontext,
+				  u32 *scontext_len);
 
-int security_sid_to_context_force(u32 sid, char **scontext, u32 *scontext_len);
+static inline int security_sid_to_context(u32 sid, char **scontext,
+					 u32 *scontext_len)
+{
+	return security_sid_to_context_state(&selinux_state, sid, scontext,
+				     scontext_len);
+}
 
-int security_sid_to_context_inval(u32 sid, char **scontext, u32 *scontext_len);
+int security_sid_to_context_force_state(struct selinux_state *state,
+					u32 sid, char **scontext,
+					u32 *scontext_len);
 
-int security_context_to_sid(const char *scontext, u32 scontext_len,
-			    u32 *out_sid, gfp_t gfp);
+static inline int security_sid_to_context_force(u32 sid, char **scontext,
+				       u32 *scontext_len)
+{
+	return security_sid_to_context_force_state(&selinux_state, sid,
+				   scontext, scontext_len);
+}
 
-int security_context_str_to_sid(const char *scontext, u32 *out_sid, gfp_t gfp);
+int security_sid_to_context_inval_state(struct selinux_state *state,
+					u32 sid, char **scontext,
+					u32 *scontext_len);
 
-int security_context_to_sid_default(const char *scontext, u32 scontext_len,
-				    u32 *out_sid, u32 def_sid, gfp_t gfp_flags);
+static inline int security_sid_to_context_inval(u32 sid, char **scontext,
+				       u32 *scontext_len)
+{
+	return security_sid_to_context_inval_state(&selinux_state, sid,
+				   scontext, scontext_len);
+}
 
-int security_context_to_sid_force(const char *scontext, u32 scontext_len,
-				  u32 *sid);
+int security_context_to_sid_state(struct selinux_state *state,
+				  const char *scontext,
+				  u32 scontext_len,
+				  u32 *out_sid, gfp_t gfp);
+
+static inline int security_context_to_sid(const char *scontext,
+				  u32 scontext_len,
+				  u32 *out_sid, gfp_t gfp)
+{
+	return security_context_to_sid_state(&selinux_state, scontext,
+				     scontext_len, out_sid, gfp);
+}
+
+int security_context_str_to_sid_state(struct selinux_state *state,
+				      const char *scontext,
+				      u32 *out_sid, gfp_t gfp);
+
+static inline int security_context_str_to_sid(const char *scontext,
+				      u32 *out_sid, gfp_t gfp)
+{
+	return security_context_str_to_sid_state(&selinux_state, scontext,
+				 out_sid, gfp);
+}
+
+int security_context_to_sid_default_state(struct selinux_state *state,
+					  const char *scontext,
+					  u32 scontext_len,
+					  u32 *out_sid,
+					  u32 def_sid,
+					  gfp_t gfp_flags);
+
+static inline int security_context_to_sid_default(const char *scontext,
+				  u32 scontext_len,
+				  u32 *out_sid, u32 def_sid,
+				  gfp_t gfp_flags)
+{
+	return security_context_to_sid_default_state(&selinux_state, scontext,
+				     scontext_len, out_sid,
+				     def_sid, gfp_flags);
+}
+
+int security_context_to_sid_force_state(struct selinux_state *state,
+					const char *scontext,
+					u32 scontext_len,
+					u32 *sid);
+
+static inline int security_context_to_sid_force(const char *scontext,
+				u32 scontext_len, u32 *sid)
+{
+	return security_context_to_sid_force_state(&selinux_state, scontext,
+				   scontext_len, sid);
+}
 
 int security_get_user_sids(u32 fromsid, const char *username, u32 **sids, u32 *nel);
 
@@ -355,8 +493,18 @@ int security_get_classes(struct selinux_policy *policy, char ***classes,
 			 u32 *nclasses);
 int security_get_permissions(struct selinux_policy *policy, const char *class,
 			     char ***perms, u32 *nperms);
-int security_get_reject_unknown(void);
-int security_get_allow_unknown(void);
+int security_get_reject_unknown_state(struct selinux_state *state);
+int security_get_allow_unknown_state(struct selinux_state *state);
+
+static inline int security_get_reject_unknown(void)
+{
+	return security_get_reject_unknown_state(&selinux_state);
+}
+
+static inline int security_get_allow_unknown(void)
+{
+	return security_get_allow_unknown_state(&selinux_state);
+}
 
 #define SECURITY_FS_USE_XATTR	 1 /* use xattr */
 #define SECURITY_FS_USE_TRANS	 2 /* use transition SIDs, e.g. devpts/tmpfs */
