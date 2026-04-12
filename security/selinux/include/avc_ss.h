@@ -9,8 +9,14 @@
 #define _SELINUX_AVC_SS_H_
 
 #include <linux/types.h>
+#include "security.h"
 
-int avc_ss_reset(u32 seqno);
+int avc_ss_reset_state(struct selinux_state *state, u32 seqno);
+
+static inline int avc_ss_reset(u32 seqno)
+{
+	return avc_ss_reset_state(&selinux_state, seqno);
+}
 
 /* Class/perm mapping support */
 struct security_class_mapping {
