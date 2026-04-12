@@ -3026,7 +3026,7 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 	unsigned long totalram = (u64)READ_ONCE(memcg->memory.max);
 	unsigned long memusage = page_counter_read(&memcg->memory);
 	unsigned long proactive_usedswap;
-	unsigned long totalswap, usedswap;
+	unsigned long totalswap, usedswap, normal_usedswap;
 	struct sysinfo i;
 
 	si_swapinfo(&i);
@@ -3062,20 +3062,31 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 		}
 	}
 
-	if (!totalswap && proactive_usedswap) {
-		totalswap = proactive_usedswap;
-		usedswap = proactive_usedswap;
-	}
+	normal_usedswap = (usedswap > proactive_usedswap) ?
+		(usedswap - proactive_usedswap) : 0;
+	if (normal_usedswap > totalswap)
+		normal_usedswap = totalswap;
 
-	if (!totalswap)
+	if (!totalswap && !proactive_usedswap)
 		return 0;
 
-	seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
-			"virtual",
-			"virtual\t",
-			totalswap, totalswap < 10000000 ? "\t" : "",
-			usedswap, usedswap < 10000000 ? "\t" : "",
-			-1);
+	if (totalswap) {
+		seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+				"virtual",
+				"virtual\t",
+				totalswap, totalswap < 10000000 ? "\t" : "",
+				normal_usedswap, normal_usedswap < 10000000 ? "\t" : "",
+				-1);
+	}
+
+	if (proactive_usedswap) {
+		seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+				"virtual-system",
+				"virtual\t",
+				proactive_usedswap, proactive_usedswap < 10000000 ? "\t" : "",
+				proactive_usedswap, proactive_usedswap < 10000000 ? "\t" : "",
+				-2);
+	}
 	return 0;
 }
 
