@@ -282,13 +282,30 @@ struct selinux_load_state {
 };
 
 int security_mls_enabled(void);
+int security_mls_enabled_state(struct selinux_state *state);
 int security_load_policy(void *data, size_t len,
 			 struct selinux_load_state *load_state);
+int security_load_policy_state(struct selinux_state *state,
+			       void *data, size_t len,
+			       struct selinux_load_state *load_state);
 void selinux_policy_commit(struct selinux_load_state *load_state);
+void selinux_policy_commit_state(struct selinux_state *state,
+			       struct selinux_load_state *load_state);
 void selinux_policy_cancel(struct selinux_load_state *load_state);
+void selinux_policy_cancel_state(struct selinux_state *state,
+			       struct selinux_load_state *load_state);
 int security_read_policy(void **data, size_t *len);
+int security_read_policy_state(struct selinux_state *state,
+			      void **data, size_t *len);
 int security_read_state_kernel(void **data, size_t *len);
+int security_read_state_kernel_state(struct selinux_state *state,
+				    void **data, size_t *len);
+int security_set_bools_state(struct selinux_state *state,
+			     u32 len, const int *values);
+int security_get_bool_value_state(struct selinux_state *state, u32 index);
 int security_policycap_supported(unsigned int req_cap);
+int security_policycap_supported_state(struct selinux_state *state,
+			       unsigned int req_cap);
 
 void selinux_policy_free(struct selinux_policy *policy);
 void selinux_state_policy_free(struct selinux_state *state);
@@ -368,15 +385,49 @@ static inline void security_compute_av_user(u32 ssid, u32 tsid, u16 tclass,
 			       avd);
 }
 
-int security_transition_sid(u32 ssid, u32 tsid, u16 tclass,
-			    const struct qstr *qstr, u32 *out_sid);
+int security_transition_sid_state(struct selinux_state *state,
+				      u32 ssid, u32 tsid, u16 tclass,
+				      const struct qstr *qstr, u32 *out_sid);
 
-int security_transition_sid_user(u32 ssid, u32 tsid, u16 tclass,
-				 const char *objname, u32 *out_sid);
+static inline int security_transition_sid(u32 ssid, u32 tsid, u16 tclass,
+				     const struct qstr *qstr, u32 *out_sid)
+{
+	return security_transition_sid_state(&selinux_state, ssid, tsid,
+					     tclass, qstr, out_sid);
+}
 
-int security_member_sid(u32 ssid, u32 tsid, u16 tclass, u32 *out_sid);
+int security_transition_sid_user_state(struct selinux_state *state,
+					   u32 ssid, u32 tsid, u16 tclass,
+					   const char *objname, u32 *out_sid);
 
-int security_change_sid(u32 ssid, u32 tsid, u16 tclass, u32 *out_sid);
+static inline int security_transition_sid_user(u32 ssid, u32 tsid, u16 tclass,
+					       const char *objname, u32 *out_sid)
+{
+	return security_transition_sid_user_state(&selinux_state, ssid, tsid,
+						   tclass, objname, out_sid);
+}
+
+int security_member_sid_state(struct selinux_state *state,
+				      u32 ssid, u32 tsid, u16 tclass,
+				      u32 *out_sid);
+
+static inline int security_member_sid(u32 ssid, u32 tsid, u16 tclass,
+				      u32 *out_sid)
+{
+	return security_member_sid_state(&selinux_state, ssid, tsid, tclass,
+					 out_sid);
+}
+
+int security_change_sid_state(struct selinux_state *state,
+				      u32 ssid, u32 tsid, u16 tclass,
+				      u32 *out_sid);
+
+static inline int security_change_sid(u32 ssid, u32 tsid, u16 tclass,
+				      u32 *out_sid)
+{
+	return security_change_sid_state(&selinux_state, ssid, tsid, tclass,
+					 out_sid);
+}
 
 int security_sid_to_context_state(struct selinux_state *state,
 				  u32 sid, char **scontext,
@@ -464,7 +515,16 @@ static inline int security_context_to_sid_force(const char *scontext,
 				   scontext_len, sid);
 }
 
-int security_get_user_sids(u32 fromsid, const char *username, u32 **sids, u32 *nel);
+int security_get_user_sids_state(struct selinux_state *state,
+				 u32 fromsid, const char *username,
+				 u32 **sids, u32 *nel);
+
+static inline int security_get_user_sids(u32 fromsid, const char *username,
+				      u32 **sids, u32 *nel)
+{
+	return security_get_user_sids_state(&selinux_state, fromsid, username,
+					     sids, nel);
+}
 
 int security_port_sid(u8 protocol, u16 port, u32 *out_sid);
 
@@ -476,13 +536,31 @@ int security_netif_sid(const char *name, u32 *if_sid);
 
 int security_node_sid(u16 domain, const void *addr, u32 addrlen, u32 *out_sid);
 
-int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
-				 u16 tclass);
+int security_validate_transition_state(struct selinux_state *state,
+				       u32 oldsid, u32 newsid, u32 tasksid,
+				       u16 tclass);
 
-int security_validate_transition_user(u32 oldsid, u32 newsid, u32 tasksid,
-				      u16 tclass);
+static inline int security_validate_transition(u32 oldsid, u32 newsid,
+					      u32 tasksid, u16 tclass)
+{
+	return security_validate_transition_state(&selinux_state, oldsid,
+						 newsid, tasksid, tclass);
+}
+
+int security_validate_transition_user_state(struct selinux_state *state,
+					    u32 oldsid, u32 newsid,
+					    u32 tasksid, u16 tclass);
+
+static inline int security_validate_transition_user(u32 oldsid, u32 newsid,
+						   u32 tasksid, u16 tclass)
+{
+	return security_validate_transition_user_state(&selinux_state, oldsid,
+						      newsid, tasksid, tclass);
+}
 
 int security_bounded_transition(u32 old_sid, u32 new_sid);
+int security_bounded_transition_state(struct selinux_state *state,
+			      u32 old_sid, u32 new_sid);
 
 int security_sid_mls_copy(u32 sid, u32 mls_sid, u32 *new_sid);
 
@@ -548,6 +626,7 @@ const char *security_get_initial_sid_context(u32 sid);
  * status notifier using mmap interface
  */
 extern struct page *selinux_kernel_status_page(void);
+extern struct page *selinux_kernel_status_page_state(struct selinux_state *state);
 
 #define SELINUX_KERNEL_STATUS_VERSION 1
 struct selinux_kernel_status {
@@ -562,7 +641,11 @@ struct selinux_kernel_status {
 } __packed;
 
 extern void selinux_status_update_setenforce(bool enforcing);
+extern void selinux_status_update_setenforce_state(struct selinux_state *state,
+				   bool enforcing);
 extern void selinux_status_update_policyload(u32 seqno);
+extern void selinux_status_update_policyload_state(struct selinux_state *state,
+				  u32 seqno);
 extern void selinux_complete_init(void);
 extern struct path selinux_null;
 extern void selnl_notify_setenforce(int val);
@@ -572,6 +655,8 @@ extern int selinux_nlmsg_lookup(u16 sclass, u16 nlmsg_type, u32 *perm);
 extern void avtab_cache_init(void);
 extern void ebitmap_cache_init(void);
 extern void hashtab_cache_init(void);
+int security_sidtab_hash_stats_state(struct selinux_state *state,
+				     char *page);
 extern int security_sidtab_hash_stats(char *page);
 
 #endif /* _SELINUX_SECURITY_H_ */

@@ -1030,6 +1030,8 @@ int avc_ss_reset_state(struct selinux_state *state, u32 seqno)
 	int rc = 0, tmprc;
 
 	avc_flush_state(state);
+	if (state && state != &selinux_state)
+		goto update_seqno;
 
 	for (c = avc_callbacks; c; c = c->next) {
 		if (c->events & AVC_CALLBACK_RESET) {
@@ -1041,6 +1043,7 @@ int avc_ss_reset_state(struct selinux_state *state, u32 seqno)
 		}
 	}
 
+update_seqno:
 	avc_latest_notif_update(selinux_state_avc(state), seqno, 0);
 	return rc;
 }
