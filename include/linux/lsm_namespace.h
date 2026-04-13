@@ -10,6 +10,7 @@
 struct proc_ns_operations;
 struct cred;
 struct lsm_ctx;
+struct syslog_namespace;
 struct task_struct;
 struct user_namespace;
 
@@ -47,6 +48,7 @@ int register_lsm_namespace_backend(const struct lsm_namespace_backend *backend);
 int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx);
 void lsm_ns_clear_pending_child_request(struct task_struct *task);
 bool lsm_ns_visible_lsmid(u64 lsmid);
+bool lsm_ns_current_syslog_routes_lsm(u64 lsmid);
 
 static inline struct lsm_namespace *to_lsm_ns(struct ns_common *ns)
 {
@@ -115,6 +117,11 @@ static inline void lsm_ns_clear_pending_child_request(struct task_struct *task)
 static inline bool lsm_ns_visible_lsmid(u64 lsmid)
 {
 	return true;
+}
+
+static inline bool lsm_ns_current_syslog_routes_lsm(u64 lsmid)
+{
+	return false;
 }
 
 static inline struct lsm_namespace *to_lsm_ns(struct ns_common *ns)

@@ -12,6 +12,7 @@
 #include <linux/sched.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
+#include <linux/syslog_namespace.h>
 #include <linux/user_namespace.h>
 
 static DEFINE_MUTEX(lsm_ns_backend_lock);
@@ -142,6 +143,32 @@ void lsm_ns_clear_pending_child_request(struct task_struct *task)
 	task->lsm_ns_for_child_ctx = NULL;
 }
 EXPORT_SYMBOL_GPL(lsm_ns_clear_pending_child_request);
+
+bool lsm_ns_current_syslog_routes_lsm(u64 lsmid)
+{
+	struct lsm_namespace *lsm_ns = current_lsm_ns();
+	struct syslog_namespace *syslog_ns = current_syslog_ns();
+	struct lsm_namespace *owner_lsm_ns;
+
+	if (!lsm_ns || lsm_ns == &init_lsm_ns || lsm_ns->lsmid != lsmid)
+		return false;
+
+	if (!syslog_ns || syslog_ns == &init_syslog_ns || !syslog_ns->user_ns)
+		return false;
+
+	owner_lsm_ns = READ_ONCE(syslog_ns->user_ns->lsm_ns);
+	if (!owner_lsm_ns)
+		owner_lsm_ns = &init_lsm_ns;
+
+	/*
+	 * Route guest-visible denials only when the active syslog namespace is
+	 * owned by a user namespace bound to the same managed LSM namespace as
+	 * the current task. This keeps foreign syslog setns() targets and the
+	 * host log stream out of guest-denial mirroring.
+	 */
+	return owner_lsm_ns == lsm_ns;
+}
+EXPORT_SYMBOL_GPL(lsm_ns_current_syslog_routes_lsm);
 
 int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 {
