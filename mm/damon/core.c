@@ -306,10 +306,11 @@ struct damos_quota_goal *damos_new_quota_goal(
 {
 	struct damos_quota_goal *goal;
 
-	goal = kmalloc(sizeof(*goal), GFP_KERNEL);
+	goal = kzalloc(sizeof(*goal), GFP_KERNEL);
 	if (!goal)
 		return NULL;
 	goal->metric = metric;
+	goal->nid = NUMA_NO_NODE;
 	goal->target_value = target_value;
 	INIT_LIST_HEAD(&goal->list);
 	return goal;
@@ -689,6 +690,7 @@ static void damos_commit_quota_goal(
 		struct damos_quota_goal *dst, struct damos_quota_goal *src)
 {
 	dst->metric = src->metric;
+	dst->nid = src->nid;
 	dst->target_value = src->target_value;
 	if (dst->metric == DAMOS_QUOTA_USER_INPUT)
 		dst->current_value = src->current_value;
@@ -726,6 +728,7 @@ int damos_commit_quota_goals(struct damos_quota *dst, struct damos_quota *src)
 				src_goal->metric, src_goal->target_value);
 		if (!new_goal)
 			return -ENOMEM;
+		damos_commit_quota_goal(new_goal, src_goal);
 		damos_add_quota_goal(dst, new_goal);
 	}
 	return 0;
@@ -1544,13 +1547,35 @@ static inline u64 damos_get_some_mem_psi_total(void)
 
 #endif	/* CONFIG_PSI */
 
-static unsigned long damos_get_free_mem_rate(void)
+static unsigned long damos_get_free_mem_rate(int nid)
 {
+#ifdef CONFIG_NUMA
+	if (nid != NUMA_NO_NODE &&
+	    nid >= 0 && nid < MAX_NUMNODES && node_state(nid, N_MEMORY)) {
+		struct sysinfo i;
+
+		si_meminfo_node(&i, nid);
+		if (!i.totalram)
+			return 0;
+		return i.freeram * 1000 / i.totalram;
+	}
+#endif
+	if (!totalram_pages())
+		return 0;
 	return global_zone_page_state(NR_FREE_PAGES) * 1000 / totalram_pages();
 }
 
-static unsigned long damos_get_free_mem_bytes(void)
+static unsigned long damos_get_free_mem_bytes(int nid)
 {
+#ifdef CONFIG_NUMA
+	if (nid != NUMA_NO_NODE &&
+	    nid >= 0 && nid < MAX_NUMNODES && node_state(nid, N_MEMORY)) {
+		struct sysinfo i;
+
+		si_meminfo_node(&i, nid);
+		return i.freeram * PAGE_SIZE;
+	}
+#endif
 	return global_zone_page_state(NR_FREE_PAGES) * PAGE_SIZE;
 }
 
@@ -1568,10 +1593,10 @@ static void damos_set_quota_goal_current_value(struct damos_quota_goal *goal)
 		goal->last_psi_total = now_psi_total;
 		break;
 	case DAMOS_QUOTA_FREE_MEM_RATE:
-		goal->current_value = damos_get_free_mem_rate();
+		goal->current_value = damos_get_free_mem_rate(goal->nid);
 		break;
 	case DAMOS_QUOTA_FREE_MEM_BYTES:
-		goal->current_value = damos_get_free_mem_bytes();
+		goal->current_value = damos_get_free_mem_bytes(goal->nid);
 		break;
 	default:
 		break;
@@ -1922,11 +1947,12 @@ static bool kdamond_need_stop(struct damon_ctx *ctx)
 }
 
 static int damos_get_wmark_metric_value(enum damos_wmark_metric metric,
+					int metric_nid,
 					unsigned long *metric_value)
 {
 	switch (metric) {
 	case DAMOS_WMARK_FREE_MEM_RATE:
-		*metric_value = damos_get_free_mem_rate();
+		*metric_value = damos_get_free_mem_rate(metric_nid);
 		return 0;
 	default:
 		break;
@@ -1942,7 +1968,8 @@ static unsigned long damos_wmark_wait_us(struct damos *scheme)
 {
 	unsigned long metric;
 
-	if (damos_get_wmark_metric_value(scheme->wmarks.metric, &metric))
+	if (damos_get_wmark_metric_value(scheme->wmarks.metric,
+				scheme->wmarks.metric_nid, &metric))
 		return 0;
 
 	/* higher than high watermark or lower than low watermark */
@@ -2181,6 +2208,92 @@ static bool damon_find_biggest_system_ram(unsigned long *start,
 	return true;
 }
 
+struct damon_system_ram_ranges {
+	struct damon_addr_range *ranges;
+	unsigned int nr_ranges;
+	unsigned int alloc_ranges;
+	unsigned long start;
+	unsigned long end;
+	int nid;
+};
+
+static int damon_append_system_ram_range(
+		struct damon_system_ram_ranges *a,
+		unsigned long start, unsigned long end)
+{
+	struct damon_addr_range *ranges;
+	unsigned int alloc_ranges;
+
+	if (start >= end)
+		return 0;
+
+	if (a->nr_ranges &&
+	    a->ranges[a->nr_ranges - 1].end == start) {
+		a->ranges[a->nr_ranges - 1].end = end;
+		return 0;
+	}
+
+	if (a->nr_ranges < a->alloc_ranges)
+		goto add_range;
+
+	alloc_ranges = a->alloc_ranges ? a->alloc_ranges * 2 : 16;
+	ranges = krealloc_array(a->ranges, alloc_ranges,
+			sizeof(*ranges), GFP_KERNEL | __GFP_NOWARN);
+	if (!ranges)
+		return -ENOMEM;
+	a->ranges = ranges;
+	a->alloc_ranges = alloc_ranges;
+
+add_range:
+	a->ranges[a->nr_ranges++] = (struct damon_addr_range) {
+		.start = start,
+		.end = end,
+	};
+	return 0;
+}
+
+#ifdef CONFIG_NUMA
+static int damon_add_system_ram_resource_node_ranges(
+		struct damon_system_ram_ranges *a,
+		unsigned long start, unsigned long end)
+{
+	unsigned long pfn = PHYS_PFN(start);
+	unsigned long end_pfn = PHYS_PFN(end);
+
+	while (pfn < end_pfn) {
+		unsigned long next_pfn = min(end_pfn, SECTION_ALIGN_UP(pfn + 1));
+
+		if (pfn_to_nid(pfn) == a->nid) {
+			int err = damon_append_system_ram_range(a,
+					max(start, PFN_PHYS(pfn)),
+					min(end, PFN_PHYS(next_pfn)));
+
+			if (err)
+				return err;
+		}
+		pfn = next_pfn;
+	}
+	return 0;
+}
+#endif
+
+static int damon_add_system_ram_resource(struct resource *res, void *arg)
+{
+	struct damon_system_ram_ranges *a = arg;
+	unsigned long start = max_t(unsigned long, res->start, a->start);
+	unsigned long res_end = res->end == ULONG_MAX ? ULONG_MAX : res->end + 1;
+	unsigned long end = min_t(unsigned long, res_end, a->end);
+
+	if (start >= end)
+		return 0;
+
+#ifdef CONFIG_NUMA
+	if (a->nid != NUMA_NO_NODE)
+		return damon_add_system_ram_resource_node_ranges(a, start, end);
+#endif
+	return damon_append_system_ram_range(a, start, end);
+}
+
 /**
  * damon_set_region_biggest_system_ram_default() - Set the region of the given
  * monitoring target as requested, or biggest 'System RAM'.
@@ -2211,6 +2324,37 @@ int damon_set_region_biggest_system_ram_default(struct damon_target *t,
 	addr_range.start = *start;
 	addr_range.end = *end;
 	return damon_set_regions(t, &addr_range, 1);
+}
+
+int damon_set_regions_system_ram(struct damon_target *t,
+		unsigned long start, unsigned long end, int nid)
+{
+	struct damon_system_ram_ranges arg = {
+		.start = start,
+		.end = end,
+		.nid = nid,
+	};
+	unsigned long walk_end;
+	int err;
+
+	if (!start && !end)
+		arg.end = ULONG_MAX;
+	else if (!end || start >= end)
+		return -EINVAL;
+
+	walk_end = arg.end == ULONG_MAX ? ULONG_MAX : arg.end - 1;
+	err = walk_system_ram_res(arg.start, walk_end, &arg,
+			damon_add_system_ram_resource);
+	if (err)
+		goto out;
+	if (!arg.nr_ranges) {
+		err = -ENOENT;
+		goto out;
+	}
+	err = damon_set_regions(t, arg.ranges, arg.nr_ranges);
+out:
+	kfree(arg.ranges);
+	return err;
 }
 
 /*
