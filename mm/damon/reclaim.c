@@ -10,6 +10,7 @@
 #include <linux/damon.h>
 #include <linux/kstrtox.h>
 #include <linux/module.h>
+#include <linux/string.h>
 
 #include "modules-common.h"
 
@@ -196,9 +197,9 @@ enum damon_reclaim_scope {
 
 static int damon_reclaim_get_scope(void)
 {
-	if (!strcmp(reclaim_scope, "global"))
+	if (sysfs_streq(reclaim_scope, "global"))
 		return DAMON_RECLAIM_SCOPE_GLOBAL;
-	if (!strcmp(reclaim_scope, "per-node"))
+	if (sysfs_streq(reclaim_scope, "per-node"))
 		return DAMON_RECLAIM_SCOPE_PER_NODE;
 	return -EINVAL;
 }
@@ -330,26 +331,34 @@ static int damon_reclaim_apply_parameters(void)
 	int err;
 
 	err = damon_reclaim_new_ctx(&param_ctx);
-	if (err)
+	if (err) {
+		pr_err("failed to allocate paddr context: %d\n", err);
 		return err;
+	}
 
 	if (!damon_reclaim_mon_attrs.aggr_interval) {
+		pr_err("invalid aggr_interval: 0\n");
 		err = -EINVAL;
 		goto out;
 	}
 	if (quota_free_mem_rate > 1000) {
+		pr_err("invalid quota_free_mem_rate: %lu\n",
+				quota_free_mem_rate);
 		err = -EINVAL;
 		goto out;
 	}
 	scope = damon_reclaim_get_scope();
 	if (scope < 0) {
+		pr_err("invalid scope: %s\n", reclaim_scope);
 		err = scope;
 		goto out;
 	}
 
 	err = damon_set_attrs(param_ctx, &damon_reclaim_mon_attrs);
-	if (err)
+	if (err) {
+		pr_err("failed to set monitoring attrs: %d\n", err);
 		goto out;
+	}
 
 	if (scope == DAMON_RECLAIM_SCOPE_PER_NODE) {
 		int nid, nr_targets = 0;
@@ -375,6 +384,8 @@ static int damon_reclaim_apply_parameters(void)
 				continue;
 			}
 			if (err) {
+				pr_err("failed to set System RAM regions for nid %d: %d\n",
+						nid, err);
 				damon_free_target(param_target);
 				goto out;
 			}
@@ -382,11 +393,15 @@ static int damon_reclaim_apply_parameters(void)
 
 			scheme = damon_reclaim_new_scheme(nid, nr_targets);
 			if (!scheme) {
+				pr_err("failed to allocate reclaim scheme for nid %d\n",
+						nid);
 				err = -ENOMEM;
 				goto out;
 			}
 			err = damon_reclaim_add_quota_goals(scheme, nid);
 			if (err) {
+				pr_err("failed to add quota goals for nid %d: %d\n",
+						nid, err);
 				damon_destroy_scheme(scheme);
 				goto out;
 			}
@@ -394,12 +409,14 @@ static int damon_reclaim_apply_parameters(void)
 			nr_targets++;
 		}
 		if (!nr_schemes) {
+			pr_err("per-node scope found no System RAM targets\n");
 			err = -EINVAL;
 			goto out;
 		}
 	} else {
 		param_target = damon_new_target();
 		if (!param_target) {
+			pr_err("failed to allocate reclaim target\n");
 			err = -ENOMEM;
 			goto out;
 		}
@@ -407,21 +424,26 @@ static int damon_reclaim_apply_parameters(void)
 
 		err = damon_set_region_biggest_system_ram_default(param_target,
 				&monitor_region_start, &monitor_region_end);
-		if (err)
+		if (err) {
+			pr_err("failed to set biggest System RAM region: %d\n", err);
 			goto out;
+		}
 
 		scheme = damon_reclaim_new_scheme(NUMA_NO_NODE, -1);
 		if (!scheme) {
+			pr_err("failed to allocate reclaim scheme\n");
 			err = -ENOMEM;
 			goto out;
 		}
 		err = damon_reclaim_add_quota_goals(scheme, NUMA_NO_NODE);
 		if (err) {
+			pr_err("failed to add quota goals: %d\n", err);
 			damon_destroy_scheme(scheme);
 			goto out;
 		}
 		schemes = kcalloc(1, sizeof(*schemes), GFP_KERNEL);
 		if (!schemes) {
+			pr_err("failed to allocate scheme array\n");
 			damon_destroy_scheme(scheme);
 			err = -ENOMEM;
 			goto out;
@@ -431,6 +453,9 @@ static int damon_reclaim_apply_parameters(void)
 
 	damon_set_schemes(param_ctx, schemes, nr_schemes);
 	err = damon_commit_ctx(ctx, param_ctx);
+	if (err)
+		pr_err("failed to commit reclaim context for scope %s: %d\n",
+				reclaim_scope, err);
 out:
 	kfree(schemes);
 	damon_destroy_ctx(param_ctx);
@@ -449,12 +474,17 @@ static int damon_reclaim_turn(bool on)
 	}
 
 	err = damon_reclaim_apply_parameters();
-	if (err)
+	if (err) {
+		pr_err("failed to apply parameters while enabling reclaim: %d\n",
+				err);
 		return err;
+	}
 
 	err = damon_start(&ctx, 1, true);
-	if (err)
+	if (err) {
+		pr_err("failed to start kdamond: %d\n", err);
 		return err;
+	}
 	kdamond_pid = ctx->kdamond->pid;
 	return 0;
 }
