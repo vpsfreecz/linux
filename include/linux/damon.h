@@ -152,6 +152,8 @@ enum damos_quota_goal_metric {
 /**
  * struct damos_quota_goal - DAMOS scheme quota auto-tuning goal.
  * @metric:		Metric to be used for representing the goal.
+ * @nid:		NUMA node to get the metric from, if supported.
+ *			Use %NUMA_NO_NODE for system-wide metrics.
  * @target_value:	Target value of @metric to achieve with the tuning.
  * @current_value:	Current value of @metric.
  * @last_psi_total:	Last measured total PSI
@@ -168,6 +170,7 @@ enum damos_quota_goal_metric {
  */
 struct damos_quota_goal {
 	enum damos_quota_goal_metric metric;
+	int nid;
 	unsigned long target_value;
 	unsigned long current_value;
 	/* metric-dependent fields */
@@ -259,6 +262,8 @@ enum damos_wmark_metric {
 /**
  * struct damos_watermarks - Controls when a given scheme should be activated.
  * @metric:	Metric for the watermarks.
+ * @metric_nid:	NUMA node to get the metric from, if supported.
+ *		Use %NUMA_NO_NODE for system-wide metrics.
  * @interval:	Watermarks check time interval in microseconds.
  * @high:	High watermark.
  * @mid:	Middle watermark.
@@ -275,6 +280,7 @@ enum damos_wmark_metric {
  */
 struct damos_watermarks {
 	enum damos_wmark_metric metric;
+	int metric_nid;
 	unsigned long interval;
 	unsigned long high;
 	unsigned long mid;
@@ -787,6 +793,8 @@ int damon_kdamond_pid(struct damon_ctx *ctx);
 
 int damon_set_region_biggest_system_ram_default(struct damon_target *t,
 				unsigned long *start, unsigned long *end);
+int damon_set_regions_system_ram(struct damon_target *t,
+		unsigned long start, unsigned long end, int nid);
 
 #endif	/* CONFIG_DAMON */
 
