@@ -236,19 +236,31 @@ static void map_decision(struct selinux_map *map,
 	}
 }
 
-int security_mls_enabled(void)
+int security_mls_enabled_state(struct selinux_state *state)
 {
 	int mls_enabled;
 	struct selinux_policy *policy;
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
+	if (!policy) {
+		rcu_read_unlock();
+		return 0;
+	}
 	mls_enabled = policy->policydb.mls_enabled;
 	rcu_read_unlock();
 	return mls_enabled;
+}
+
+int security_mls_enabled(void)
+{
+	return security_mls_enabled_state(&selinux_state);
 }
 
 /*
@@ -722,7 +734,8 @@ static void context_struct_compute_av(struct policydb *policydb,
 				 tclass, avd);
 }
 
-static int security_validtrans_handle_fail(struct selinux_policy *policy,
+static int security_validtrans_handle_fail(struct selinux_state *state,
+					struct selinux_policy *policy,
 					struct sidtab_entry *oentry,
 					struct sidtab_entry *nentry,
 					struct sidtab_entry *tentry,
@@ -748,13 +761,15 @@ out:
 	kfree(n);
 	kfree(t);
 
-	if (!enforcing_enabled())
+	if (!enforcing_enabled_state(state))
 		return 0;
 	return -EPERM;
 }
 
-static int security_compute_validatetrans(u32 oldsid, u32 newsid, u32 tasksid,
-					  u16 orig_tclass, bool user)
+static int security_compute_validatetrans_state(struct selinux_state *state,
+					 u32 oldsid, u32 newsid,
+					 u32 tasksid, u16 orig_tclass,
+					 bool user)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -768,12 +783,15 @@ static int security_compute_validatetrans(u32 oldsid, u32 newsid, u32 tasksid,
 	int rc = 0;
 
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
 
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -820,7 +838,7 @@ static int security_compute_validatetrans(u32 oldsid, u32 newsid, u32 tasksid,
 			if (user)
 				rc = -EPERM;
 			else
-				rc = security_validtrans_handle_fail(policy,
+				rc = security_validtrans_handle_fail(state, policy,
 								oentry,
 								nentry,
 								tentry,
@@ -835,18 +853,21 @@ out:
 	return rc;
 }
 
-int security_validate_transition_user(u32 oldsid, u32 newsid, u32 tasksid,
-				      u16 tclass)
+int security_validate_transition_user_state(struct selinux_state *state,
+				    u32 oldsid, u32 newsid,
+				    u32 tasksid, u16 tclass)
 {
-	return security_compute_validatetrans(oldsid, newsid, tasksid,
-					      tclass, true);
+	return security_compute_validatetrans_state(state, oldsid, newsid,
+					     tasksid, tclass, true);
 }
 
-int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
-				 u16 orig_tclass)
+int security_validate_transition_state(struct selinux_state *state,
+			       u32 oldsid, u32 newsid, u32 tasksid,
+			       u16 orig_tclass)
 {
-	return security_compute_validatetrans(oldsid, newsid, tasksid,
-					      orig_tclass, false);
+	return security_compute_validatetrans_state(state, oldsid, newsid,
+					     tasksid, orig_tclass,
+					     false);
 }
 
 /*
@@ -858,7 +879,8 @@ int security_validate_transition(u32 oldsid, u32 newsid, u32 tasksid,
  * @oldsid : current security identifier
  * @newsid : destinated security identifier
  */
-int security_bounded_transition(u32 old_sid, u32 new_sid)
+int security_bounded_transition_state(struct selinux_state *state,
+			      u32 old_sid, u32 new_sid)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -868,11 +890,14 @@ int security_bounded_transition(u32 old_sid, u32 new_sid)
 	u32 index;
 	int rc;
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -938,6 +963,12 @@ out:
 	rcu_read_unlock();
 
 	return rc;
+}
+
+int security_bounded_transition(u32 old_sid, u32 new_sid)
+{
+	return security_bounded_transition_state(&selinux_state,
+					 old_sid, new_sid);
 }
 
 static void avd_init(struct selinux_policy *policy, struct av_decision *avd)
@@ -1330,23 +1361,31 @@ static int sidtab_entry_to_string(struct policydb *p,
 
 #include "initial_sid_to_string.h"
 
-int security_sidtab_hash_stats(char *page)
+int security_sidtab_hash_stats_state(struct selinux_state *state, char *page)
 {
 	struct selinux_policy *policy;
 	int rc;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		pr_err("SELinux: %s:  called before initial load_policy\n",
 		       __func__);
 		return -EINVAL;
 	}
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	rc = sidtab_hash_stats(policy->sidtab, page);
 	rcu_read_unlock();
 
 	return rc;
+}
+
+int security_sidtab_hash_stats(char *page)
+{
+	return security_sidtab_hash_stats_state(&selinux_state, page);
 }
 
 const char *security_get_initial_sid_context(u32 sid)
@@ -1705,7 +1744,7 @@ int security_context_to_sid_force_state(struct selinux_state *state,
 					  SECSID_NULL, GFP_KERNEL, 1);
 }
 
-static int compute_sid_handle_invalid_context(
+static int compute_sid_handle_invalid_context(struct selinux_state *state,
 	struct selinux_policy *policy,
 	struct sidtab_entry *sentry,
 	struct sidtab_entry *tentry,
@@ -1738,7 +1777,7 @@ out:
 	kfree(s);
 	kfree(t);
 	kfree(n);
-	if (!enforcing_enabled())
+	if (!enforcing_enabled_state(state))
 		return 0;
 	return -EACCES;
 }
@@ -1773,13 +1812,14 @@ static void filename_compute_type(struct policydb *policydb,
 	}
 }
 
-static int security_compute_sid(u32 ssid,
-				u32 tsid,
-				u16 orig_tclass,
-				u16 specified,
-				const char *objname,
-				u32 *out_sid,
-				bool kern)
+static int security_compute_sid_state(struct selinux_state *state,
+			      u32 ssid,
+			      u32 tsid,
+			      u16 orig_tclass,
+			      u16 specified,
+			      const char *objname,
+			      u32 *out_sid,
+			      bool kern)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -1793,7 +1833,10 @@ static int security_compute_sid(u32 ssid,
 	int rc = 0;
 	bool sock;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		switch (orig_tclass) {
 		case SECCLASS_PROCESS: /* kernel value */
 			*out_sid = ssid;
@@ -1811,7 +1854,7 @@ retry:
 
 	rcu_read_lock();
 
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 
 	if (kern) {
 		tclass = unmap_class(&policy->map, orig_tclass);
@@ -1945,7 +1988,7 @@ retry:
 
 	/* Check the validity of the context. */
 	if (!policydb_context_isvalid(policydb, &newcontext)) {
-		rc = compute_sid_handle_invalid_context(policy, sentry,
+		rc = compute_sid_handle_invalid_context(state, policy, sentry,
 							tentry, tclass,
 							&newcontext);
 		if (rc)
@@ -1985,20 +2028,23 @@ out:
  * if insufficient memory is available, or %0 if the new SID was
  * computed successfully.
  */
-int security_transition_sid(u32 ssid, u32 tsid, u16 tclass,
-			    const struct qstr *qstr, u32 *out_sid)
+int security_transition_sid_state(struct selinux_state *state,
+			      u32 ssid, u32 tsid, u16 tclass,
+			      const struct qstr *qstr, u32 *out_sid)
 {
-	return security_compute_sid(ssid, tsid, tclass,
-				    AVTAB_TRANSITION,
-				    qstr ? qstr->name : NULL, out_sid, true);
+	return security_compute_sid_state(state, ssid, tsid, tclass,
+				      AVTAB_TRANSITION,
+				      qstr ? qstr->name : NULL,
+				      out_sid, true);
 }
 
-int security_transition_sid_user(u32 ssid, u32 tsid, u16 tclass,
-				 const char *objname, u32 *out_sid)
+int security_transition_sid_user_state(struct selinux_state *state,
+				   u32 ssid, u32 tsid, u16 tclass,
+				   const char *objname, u32 *out_sid)
 {
-	return security_compute_sid(ssid, tsid, tclass,
-				    AVTAB_TRANSITION,
-				    objname, out_sid, false);
+	return security_compute_sid_state(state, ssid, tsid, tclass,
+				      AVTAB_TRANSITION,
+				      objname, out_sid, false);
 }
 
 /**
@@ -2014,14 +2060,15 @@ int security_transition_sid_user(u32 ssid, u32 tsid, u16 tclass,
  * if insufficient memory is available, or %0 if the SID was
  * computed successfully.
  */
-int security_member_sid(u32 ssid,
-			u32 tsid,
-			u16 tclass,
-			u32 *out_sid)
+int security_member_sid_state(struct selinux_state *state,
+			      u32 ssid,
+			      u32 tsid,
+			      u16 tclass,
+			      u32 *out_sid)
 {
-	return security_compute_sid(ssid, tsid, tclass,
-				    AVTAB_MEMBER, NULL,
-				    out_sid, false);
+	return security_compute_sid_state(state, ssid, tsid, tclass,
+				      AVTAB_MEMBER, NULL,
+				      out_sid, false);
 }
 
 /**
@@ -2037,13 +2084,15 @@ int security_member_sid(u32 ssid,
  * if insufficient memory is available, or %0 if the SID was
  * computed successfully.
  */
-int security_change_sid(u32 ssid,
-			u32 tsid,
-			u16 tclass,
-			u32 *out_sid)
+int security_change_sid_state(struct selinux_state *state,
+			      u32 ssid,
+			      u32 tsid,
+			      u16 tclass,
+			      u32 *out_sid)
 {
-	return security_compute_sid(ssid, tsid, tclass, AVTAB_CHANGE, NULL,
-				    out_sid, false);
+	return security_compute_sid_state(state, ssid, tsid, tclass,
+				      AVTAB_CHANGE, NULL,
+				      out_sid, false);
 }
 
 static inline int convert_context_handle_invalid_context(
@@ -2247,10 +2296,13 @@ static void selinux_policy_cond_free(struct selinux_policy *policy)
 	kfree(policy);
 }
 
-void selinux_policy_cancel(struct selinux_load_state *load_state)
+void selinux_policy_cancel_state(struct selinux_state *state,
+				 struct selinux_load_state *load_state)
 {
-	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *oldpolicy;
+
+	if (!state)
+		state = &selinux_state;
 
 	oldpolicy = rcu_dereference_protected(state->policy,
 					lockdep_is_held(&state->policy_mutex));
@@ -2260,23 +2312,38 @@ void selinux_policy_cancel(struct selinux_load_state *load_state)
 	kfree(load_state->convert_data);
 }
 
-static void selinux_notify_policy_change(u32 seqno)
+void selinux_policy_cancel(struct selinux_load_state *load_state)
 {
+	selinux_policy_cancel_state(&selinux_state, load_state);
+}
+
+static void selinux_notify_policy_change_state(struct selinux_state *state,
+				       u32 seqno)
+{
+	if (!state)
+		state = &selinux_state;
+
+	avc_ss_reset_state(state, seqno);
+	selinux_status_update_policyload_state(state, seqno);
+	if (state != &selinux_state)
+		return;
+
 	/* Flush external caches and notify userspace of policy load */
-	avc_ss_reset(seqno);
 	selnl_notify_policyload(seqno);
-	selinux_status_update_policyload(seqno);
 	selinux_netlbl_cache_invalidate();
 	selinux_xfrm_notify_policyload();
 	selinux_ima_measure_state_locked();
 }
 
-void selinux_policy_commit(struct selinux_load_state *load_state)
+void selinux_policy_commit_state(struct selinux_state *state,
+				 struct selinux_load_state *load_state)
 {
-	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *oldpolicy, *newpolicy = load_state->policy;
 	unsigned long flags;
 	u32 seqno;
+
+	if (!state)
+		state = &selinux_state;
 
 	oldpolicy = rcu_dereference_protected(state->policy,
 					lockdep_is_held(&state->policy_mutex));
@@ -2308,14 +2375,15 @@ void selinux_policy_commit(struct selinux_load_state *load_state)
 	/* Load the policycaps from the new policy */
 	security_load_policycaps(newpolicy);
 
-	if (!selinux_initialized()) {
+	if (!selinux_initialized_state(state)) {
 		/*
 		 * After first policy load, the security server is
 		 * marked as initialized and ready to handle requests and
 		 * any objects created prior to policy load are then labeled.
 		 */
-		selinux_mark_initialized();
-		selinux_complete_init();
+		selinux_mark_initialized_state(state);
+		if (state == &selinux_state)
+			selinux_complete_init();
 	}
 
 	/* Free the old policy */
@@ -2324,7 +2392,12 @@ void selinux_policy_commit(struct selinux_load_state *load_state)
 	kfree(load_state->convert_data);
 
 	/* Notify others of the policy change */
-	selinux_notify_policy_change(seqno);
+	selinux_notify_policy_change_state(state, seqno);
+}
+
+void selinux_policy_commit(struct selinux_load_state *load_state)
+{
+	selinux_policy_commit_state(&selinux_state, load_state);
 }
 
 /**
@@ -2338,14 +2411,17 @@ void selinux_policy_commit(struct selinux_load_state *load_state)
  * This function will flush the access vector cache after
  * loading the new policy.
  */
-int security_load_policy(void *data, size_t len,
-			 struct selinux_load_state *load_state)
+int security_load_policy_state(struct selinux_state *state,
+			       void *data, size_t len,
+			       struct selinux_load_state *load_state)
 {
-	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *newpolicy, *oldpolicy;
 	struct selinux_policy_convert_data *convert_data;
 	int rc = 0;
 	struct policy_file file = { data, len }, *fp = &file;
+
+	if (!state)
+		state = &selinux_state;
 
 	newpolicy = kzalloc(sizeof(*newpolicy), GFP_KERNEL);
 	if (!newpolicy)
@@ -2373,7 +2449,7 @@ int security_load_policy(void *data, size_t len,
 		goto err_mapping;
 	}
 
-	if (!selinux_initialized()) {
+	if (!selinux_initialized_state(state)) {
 		/* First policy load, so no need to preserve state from old policy */
 		load_state->policy = newpolicy;
 		load_state->convert_data = NULL;
@@ -2435,6 +2511,12 @@ err_policy:
 	return rc;
 }
 
+int security_load_policy(void *data, size_t len,
+			 struct selinux_load_state *load_state)
+{
+	return security_load_policy_state(&selinux_state, data, len, load_state);
+}
+
 /**
  * ocontext_to_sid - Helper to safely get sid for an ocontext
  * @sidtab: SID table
@@ -2486,7 +2568,10 @@ int security_port_sid(u8 protocol, u16 port, u32 *out_sid)
 	struct ocontext *c;
 	int rc;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		*out_sid = SECINITSID_PORT;
 		return 0;
 	}
@@ -2494,7 +2579,7 @@ int security_port_sid(u8 protocol, u16 port, u32 *out_sid)
 retry:
 	rc = 0;
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -2538,7 +2623,10 @@ int security_ib_pkey_sid(u64 subnet_prefix, u16 pkey_num, u32 *out_sid)
 	struct ocontext *c;
 	int rc;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		*out_sid = SECINITSID_UNLABELED;
 		return 0;
 	}
@@ -2546,7 +2634,7 @@ int security_ib_pkey_sid(u64 subnet_prefix, u16 pkey_num, u32 *out_sid)
 retry:
 	rc = 0;
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -2590,7 +2678,10 @@ int security_ib_endport_sid(const char *dev_name, u8 port_num, u32 *out_sid)
 	struct ocontext *c;
 	int rc;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		*out_sid = SECINITSID_UNLABELED;
 		return 0;
 	}
@@ -2598,7 +2689,7 @@ int security_ib_endport_sid(const char *dev_name, u8 port_num, u32 *out_sid)
 retry:
 	rc = 0;
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -2643,7 +2734,10 @@ int security_netif_sid(const char *name, u32 *if_sid)
 	struct ocontext *c;
 	bool wildcard_support;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		*if_sid = SECINITSID_NETIF;
 		return 0;
 	}
@@ -2651,7 +2745,7 @@ int security_netif_sid(const char *name, u32 *if_sid)
 retry:
 	rc = 0;
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 	wildcard_support = ebitmap_get_bit(&policydb->policycaps, POLICYDB_CAP_NETIF_WILDCARD);
@@ -2714,14 +2808,17 @@ int security_node_sid(u16 domain,
 	int rc;
 	struct ocontext *c;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		*out_sid = SECINITSID_NODE;
 		return 0;
 	}
 
 retry:
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -2797,10 +2894,11 @@ out:
  * number of elements in the array.
  */
 
-int security_get_user_sids(u32 fromsid,
-			   const char *username,
-			   u32 **sids,
-			   u32 *nel)
+int security_get_user_sids_state(struct selinux_state *state,
+				u32 fromsid,
+				const char *username,
+				u32 **sids,
+				u32 *nel)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -2816,7 +2914,10 @@ int security_get_user_sids(u32 fromsid,
 	*sids = NULL;
 	*nel = 0;
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	mysids = kcalloc(maxnel, sizeof(*mysids), GFP_KERNEL);
@@ -2826,7 +2927,7 @@ int security_get_user_sids(u32 fromsid,
 retry:
 	mynel = 0;
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -2892,7 +2993,7 @@ out_unlock:
 	}
 	for (i = 0, j = 0; i < mynel; i++) {
 		struct av_decision dummy_avd;
-		rc = avc_has_perm_noaudit(fromsid, mysids[i],
+		rc = avc_has_perm_noaudit_state(state, fromsid, mysids[i],
 					  SECCLASS_PROCESS, /* kernel value */
 					  PROCESS__TRANSITION, AVC_STRICT,
 					  &dummy_avd);
@@ -2990,14 +3091,17 @@ int security_genfs_sid(const char *fstype,
 	struct selinux_policy *policy;
 	int retval;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		*sid = SECINITSID_UNLABELED;
 		return 0;
 	}
 
 	do {
 		rcu_read_lock();
-		policy = rcu_dereference(selinux_state.policy);
+		policy = rcu_dereference(state->policy);
 		retval = __security_genfs_sid(policy, fstype, path,
 					      orig_sclass, sid);
 		rcu_read_unlock();
@@ -3029,7 +3133,10 @@ int security_fs_use(struct super_block *sb)
 	struct superblock_security_struct *sbsec = selinux_superblock(sb);
 	const char *fstype = sb->s_type->name;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		sbsec->behavior = SECURITY_FS_USE_NONE;
 		sbsec->sid = SECINITSID_UNLABELED;
 		return 0;
@@ -3037,7 +3144,7 @@ int security_fs_use(struct super_block *sb)
 
 retry:
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -3130,14 +3237,17 @@ err:
 }
 
 
-int security_set_bools(u32 len, const int *values)
+int security_set_bools_state(struct selinux_state *state,
+			     u32 len, const int *values)
 {
-	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *newpolicy, *oldpolicy;
 	int rc;
 	u32 i, seqno = 0;
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return -EINVAL;
 
 	oldpolicy = rcu_dereference_protected(state->policy,
@@ -3198,22 +3308,30 @@ int security_set_bools(u32 len, const int *values)
 	selinux_policy_cond_free(oldpolicy);
 
 	/* Notify others of the policy change */
-	selinux_notify_policy_change(seqno);
+	selinux_notify_policy_change_state(state, seqno);
 	return 0;
 }
 
-int security_get_bool_value(u32 index)
+int security_set_bools(u32 len, const int *values)
+{
+	return security_set_bools_state(&selinux_state, len, values);
+}
+
+int security_get_bool_value_state(struct selinux_state *state, u32 index)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	int rc;
 	u32 len;
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 
 	rc = -EFAULT;
@@ -3225,6 +3343,11 @@ int security_get_bool_value(u32 index)
 out:
 	rcu_read_unlock();
 	return rc;
+}
+
+int security_get_bool_value(u32 index)
+{
+	return security_get_bool_value_state(&selinux_state, index);
 }
 
 static int security_preserve_bools(struct selinux_policy *oldpolicy,
@@ -3272,7 +3395,10 @@ int security_sid_mls_copy(u32 sid, u32 mls_sid, u32 *new_sid)
 	u32 len;
 	int rc;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		*new_sid = sid;
 		return 0;
 	}
@@ -3282,7 +3408,7 @@ retry:
 	context_init(&newcon);
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -3397,11 +3523,14 @@ int security_net_peersid_resolve(u32 nlbl_sid, u32 nlbl_type,
 		return 0;
 	}
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -3584,20 +3713,29 @@ int security_get_allow_unknown_state(struct selinux_state *state)
  * supported, false (0) if it isn't supported.
  *
  */
-int security_policycap_supported(unsigned int req_cap)
+int security_policycap_supported_state(struct selinux_state *state,
+			       unsigned int req_cap)
 {
 	struct selinux_policy *policy;
 	int rc;
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	rc = ebitmap_get_bit(&policy->policydb.policycaps, req_cap);
 	rcu_read_unlock();
 
 	return rc;
+}
+
+int security_policycap_supported(unsigned int req_cap)
+{
+	return security_policycap_supported_state(&selinux_state, req_cap);
 }
 
 struct selinux_audit_rule {
@@ -3755,7 +3893,10 @@ int selinux_audit_rule_match(struct lsm_prop *prop, u32 field, u32 op, void *vru
 		return -ENOENT;
 	}
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
@@ -3931,7 +4072,10 @@ int security_netlbl_secattr_to_sid(struct netlbl_lsm_secattr *secattr,
 	struct context *ctx;
 	struct context ctx_new;
 
-	if (!selinux_initialized()) {
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state)) {
 		*sid = SECSID_NULL;
 		return 0;
 	}
@@ -3939,7 +4083,7 @@ int security_netlbl_secattr_to_sid(struct netlbl_lsm_secattr *secattr,
 retry:
 	rc = 0;
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
 
@@ -4004,11 +4148,14 @@ int security_netlbl_sid_to_secattr(u32 sid, struct netlbl_lsm_secattr *secattr)
 	int rc;
 	struct context *ctx;
 
-	if (!selinux_initialized())
+	if (!state)
+		state = &selinux_state;
+
+	if (!selinux_initialized_state(state))
 		return 0;
 
 	rcu_read_lock();
-	policy = rcu_dereference(selinux_state.policy);
+	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 
 	rc = -ENOENT;
@@ -4062,10 +4209,13 @@ static int __security_read_policy(struct selinux_policy *policy,
  * @len: length of data in bytes
  *
  */
-int security_read_policy(void **data, size_t *len)
+int security_read_policy_state(struct selinux_state *state,
+			      void **data, size_t *len)
 {
-	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
+
+	if (!state)
+		state = &selinux_state;
 
 	policy = rcu_dereference_protected(
 			state->policy, lockdep_is_held(&state->policy_mutex));
@@ -4080,6 +4230,11 @@ int security_read_policy(void **data, size_t *len)
 	return __security_read_policy(policy, *data, len);
 }
 
+int security_read_policy(void **data, size_t *len)
+{
+	return security_read_policy_state(&selinux_state, data, len);
+}
+
 /**
  * security_read_state_kernel - read the policy.
  * @data: binary policy data
@@ -4091,11 +4246,14 @@ int security_read_policy(void **data, size_t *len)
  *
  * This function must be called with policy_mutex held.
  */
-int security_read_state_kernel(void **data, size_t *len)
+int security_read_state_kernel_state(struct selinux_state *state,
+				    void **data, size_t *len)
 {
 	int err;
-	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
+
+	if (!state)
+		state = &selinux_state;
 
 	policy = rcu_dereference_protected(
 			state->policy, lockdep_is_held(&state->policy_mutex));
@@ -4114,4 +4272,9 @@ int security_read_state_kernel(void **data, size_t *len)
 		*len = 0;
 	}
 	return err;
+}
+
+int security_read_state_kernel(void **data, size_t *len)
+{
+	return security_read_state_kernel_state(&selinux_state, data, len);
 }
