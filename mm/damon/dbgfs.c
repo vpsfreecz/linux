@@ -249,7 +249,9 @@ static struct damos **str_to_schemes(const char *str, ssize_t len,
 	while (pos < len && *nr_schemes < max_nr_schemes) {
 		struct damos_access_pattern pattern = {};
 		struct damos_quota quota = {};
-		struct damos_watermarks wmarks;
+		struct damos_watermarks wmarks = {
+			.metric_nid = NUMA_NO_NODE,
+		};
 
 		ret = sscanf(&str[pos],
 				"%lu %lu %u %u %u %u %u %lu %lu %lu %u %u %u %u %lu %lu %lu %lu%n",
