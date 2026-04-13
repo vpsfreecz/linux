@@ -76,10 +76,26 @@ by default.  Once this parameter is set as ``Y``, DAMON_RECLAIM reads values
 of parametrs except ``enabled`` again.  Once the re-reading is done, this
 parameter is set as ``N``.  If invalid parameters are found while the
 re-reading, DAMON_RECLAIM will be disabled.
-
 Once ``Y`` is written to this parameter, the user must not write to any
 parameters until reading ``commit_inputs`` again returns ``N``.  If users
 violate this rule, the kernel may exhibit undefined behavior.
+
+scope
+-----
+
+Reclaim scope.
+
+``global`` uses one DAMON_RECLAIM scheme for the configured global target
+region.  ``per-node`` applies the same scheme independently on each NUMA node
+that has matching System RAM.
+
+When ``per-node`` is used, free-memory watermarks and free-memory quota goals
+(``wmarks_*``, ``quota_free_mem_rate``, and ``quota_free_mem_bytes``) are
+evaluated against each target node's local free memory rather than global free
+memory.  The policy knobs themselves stay shared across nodes; there are no
+per-node overrides.
+
+
 
 min_age
 -------
