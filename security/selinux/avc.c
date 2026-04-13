@@ -26,6 +26,9 @@
 #include <linux/ip.h>
 #include <linux/audit.h>
 #include <linux/ipv6.h>
+#include <linux/lsm_namespace.h>
+#include <linux/printk.h>
+#include <linux/syslog_namespace.h>
 #include <net/ipv6.h>
 #include "avc.h"
 #include "avc_ss.h"
@@ -810,6 +813,104 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
 	}
 }
 
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+static bool avc_guest_syslog_mirror_needed(const struct selinux_state *state)
+{
+	if (!state || state == &selinux_state)
+		return false;
+
+	/*
+	 * Mirror only denials audited in the current guest-managed state. Host
+	 * state denials and foreign-state object checks remain host-only.
+	 */
+	return state == current_selinux_state() &&
+		lsm_ns_current_syslog_routes_lsm(LSM_ID_SELINUX);
+}
+
+static void avc_guest_syslog_mirror(struct selinux_audit_data *sad)
+{
+	struct syslog_namespace *syslog_ns;
+	const char *const *perms;
+	const char *tclass;
+	const char *sctx;
+	const char *tctx;
+	char perms_buf[192];
+	char ssid_buf[32];
+	char tsid_buf[32];
+	char comm[sizeof(current->comm)];
+	char msg[512];
+	char *scontext = NULL;
+	char *tcontext = NULL;
+	u32 scontext_len = 0;
+	u32 tcontext_len = 0;
+	u32 av = sad->audited;
+	u32 i;
+	u32 perm;
+	int len = 0;
+	int msg_len;
+
+	if (!sad->denied || !avc_guest_syslog_mirror_needed(sad->state))
+		return;
+
+	if (WARN_ON(!sad->tclass || sad->tclass >= ARRAY_SIZE(secclass_map)))
+		return;
+
+	syslog_ns = current_syslog_ns();
+	perms = secclass_map[sad->tclass - 1].perms;
+	tclass = secclass_map[sad->tclass - 1].name;
+
+	for (i = 0, perm = 1; i < sizeof(av) * 8 && len < sizeof(perms_buf);
+	     i++, perm <<= 1) {
+		if (!(perm & av) || !perms[i])
+			continue;
+
+		len += scnprintf(perms_buf + len, sizeof(perms_buf) - len,
+				 "%s%s", len ? " " : "", perms[i]);
+		av &= ~perm;
+	}
+
+	if (av)
+		len += scnprintf(perms_buf + len, sizeof(perms_buf) - len,
+				 "%s0x%x", len ? " " : "", av);
+
+	if (!len)
+		scnprintf(perms_buf, sizeof(perms_buf), "null");
+
+	if (security_sid_to_context_state(sad->state, sad->ssid,
+					  &scontext, &scontext_len))
+		scnprintf(ssid_buf, sizeof(ssid_buf), "sid:%u", sad->ssid);
+
+	if (security_sid_to_context_state(sad->state, sad->tsid,
+					  &tcontext, &tcontext_len))
+		scnprintf(tsid_buf, sizeof(tsid_buf), "sid:%u", sad->tsid);
+
+	sctx = scontext ?: ssid_buf;
+	tctx = tcontext ?: tsid_buf;
+	get_task_comm(comm, current);
+	msg_len = scnprintf(msg, sizeof(msg),
+			    "SELinux: avc: denied { %s }",
+			    perms_buf);
+	msg_len += scnprintf(msg + msg_len, sizeof(msg) - msg_len,
+			     " pid=%d comm=%s",
+			     task_tgid_nr(current), comm);
+	msg_len += scnprintf(msg + msg_len, sizeof(msg) - msg_len,
+			     " scontext=%s tcontext=%s",
+			     sctx, tctx);
+	msg_len += scnprintf(msg + msg_len, sizeof(msg) - msg_len,
+			     " tclass=%s permissive=%u",
+			     tclass, sad->result ? 0 : 1);
+
+	ns_printk(syslog_ns, KERN_WARNING "%s\n", msg);
+
+	kfree(tcontext);
+	kfree(scontext);
+}
+#else
+static inline void avc_guest_syslog_mirror(struct selinux_audit_data *sad)
+{
+}
+#endif
+
 /*
  * This is the slow part of avc audit with big stack footprint.
  * Note that it is non-blocking and can be called from under
@@ -844,6 +945,7 @@ noinline int slow_avc_audit_state(struct selinux_state *state,
 	a->selinux_audit_data = &sad;
 
 	common_lsm_audit(a, avc_audit_pre_callback, avc_audit_post_callback);
+	avc_guest_syslog_mirror(&sad);
 	return 0;
 }
 
