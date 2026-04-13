@@ -29,6 +29,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/lsm_hooks.h>
+#include <linux/lsm_namespace.h>
 #include <linux/xattr.h>
 #include <linux/capability.h>
 #include <linux/unistd.h>
@@ -108,6 +109,12 @@
 #define SELINUX_INODE_INIT_XATTRS 1
 
 struct selinux_state selinux_state;
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+struct selinux_lsmns_backend_data {
+	struct selinux_state *state;
+};
+#endif
 
 /* SECMARK reference count */
 static atomic_t selinux_secmark_refcount = ATOMIC_INIT(0);
@@ -252,6 +259,145 @@ void __put_selinux_state(struct selinux_state *state)
 {
 	schedule_work(&state->work);
 }
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+static int selinux_cred_install_state(struct cred *cred,
+			      struct selinux_state *state)
+{
+	struct cred_security_struct *crsec;
+	struct selinux_state *old_state;
+
+	if (!cred || !state)
+		return -EINVAL;
+
+	crsec = selinux_cred(cred);
+	old_state = crsec->state;
+	crsec->state = get_selinux_state(state);
+	put_selinux_state(old_state);
+	return 0;
+}
+
+static int selinux_task_install_state(struct task_struct *task,
+				      struct cred *new_cred,
+				      struct selinux_state *state)
+{
+	struct task_security_struct *tsec;
+	int error;
+
+	if (!task || !state)
+		return -EINVAL;
+
+	if (!new_cred)
+		return -EINVAL;
+
+	error = selinux_cred_install_state(new_cred, state);
+	if (error)
+		return error;
+
+	tsec = selinux_task(task);
+	memset(&tsec->avdcache, 0, sizeof(tsec->avdcache));
+	return 0;
+}
+
+static int selinux_lsmns_clone_parent_policy(struct selinux_state *child,
+					     struct selinux_state *parent)
+{
+	struct selinux_load_state load_state;
+	void *data = NULL;
+	size_t len = 0;
+	int error;
+
+	if (!child)
+		return -EINVAL;
+
+	if (!parent)
+		parent = &selinux_state;
+
+	mutex_lock(&parent->policy_mutex);
+	if (!selinux_initialized_state(parent)) {
+		error = -EOPNOTSUPP;
+		goto out_unlock_parent;
+	}
+
+	error = security_read_state_kernel_state(parent, &data, &len);
+out_unlock_parent:
+	mutex_unlock(&parent->policy_mutex);
+	if (error)
+		return error;
+
+	memset(&load_state, 0, sizeof(load_state));
+	mutex_lock(&child->policy_mutex);
+	error = security_load_policy_state(child, data, len, &load_state);
+	if (!error)
+		selinux_policy_commit_state(child, &load_state);
+	mutex_unlock(&child->policy_mutex);
+	vfree(data);
+	return error;
+}
+
+static int selinux_lsmns_backend_create(struct lsm_namespace *ns,
+					struct task_struct *task,
+					struct cred *new_cred,
+					const struct lsm_ctx *ctx)
+{
+	struct selinux_lsmns_backend_data *backend;
+	struct selinux_state *state = NULL;
+	int error;
+
+	if (!ns || ns->lsmid != LSM_ID_SELINUX)
+		return -EINVAL;
+
+	if (!selinux_enabled_boot)
+		return -EOPNOTSUPP;
+
+	if (ns->backend_data)
+		return -EBUSY;
+
+	backend = kzalloc(sizeof(*backend), GFP_KERNEL);
+	if (!backend)
+		return -ENOMEM;
+
+	error = selinux_state_create(current_selinux_state(), &state);
+	if (error)
+		goto fail_backend;
+
+	error = selinux_lsmns_clone_parent_policy(state, current_selinux_state());
+	if (error)
+		goto fail_state;
+
+	error = selinux_task_install_state(task, new_cred, state);
+	if (error)
+		goto fail_state;
+
+	backend->state = state;
+	ns->backend_data = backend;
+	return 0;
+
+fail_state:
+	put_selinux_state(state);
+fail_backend:
+	kfree(backend);
+	return error;
+}
+
+static void selinux_lsmns_backend_destroy(struct lsm_namespace *ns)
+{
+	struct selinux_lsmns_backend_data *backend = ns->backend_data;
+
+	if (!backend)
+		return;
+
+	ns->backend_data = NULL;
+	put_selinux_state(backend->state);
+	kfree(backend);
+}
+
+static const struct lsm_namespace_backend selinux_lsmns_backend = {
+	.lsmid = LSM_ID_SELINUX,
+	.create = selinux_lsmns_backend_create,
+	.destroy = selinux_lsmns_backend_destroy,
+};
+#endif
 
 /*
  * initialise the security for the init task
@@ -1731,7 +1877,8 @@ static int inode_has_perm(const struct cred *cred,
 	sid = cred_sid(cred);
 	isec = selinux_inode(inode);
 
-	return avc_has_perm(sid, isec->sid, isec->sclass, perms, adp);
+	return avc_has_perm_state(cred_selinux_state(cred), sid, isec->sid,
+				 isec->sclass, perms, adp);
 }
 
 /* Same as inode_has_perm, but pass explicit audit data containing
@@ -1810,10 +1957,8 @@ static int file_has_perm(const struct cred *cred,
 	ad.u.file = file;
 
 	if (sid != fsec->sid) {
-		rc = avc_has_perm(sid, fsec->sid,
-				  SECCLASS_FD,
-				  FD__USE,
-				  &ad);
+		rc = avc_has_perm_state(cred_selinux_state(cred), sid, fsec->sid,
+				  SECCLASS_FD, FD__USE, &ad);
 		if (rc)
 			goto out;
 	}
@@ -3138,9 +3283,10 @@ static int selinux_inode_follow_link(struct dentry *dentry, struct inode *inode,
 	return avc_has_perm(sid, isec->sid, isec->sclass, FILE__READ, &ad);
 }
 
-static noinline int audit_inode_permission(struct inode *inode,
-					   u32 perms, u32 audited, u32 denied,
-					   int result)
+static noinline int audit_inode_permission(struct selinux_state *state,
+				   struct inode *inode,
+				   u32 perms, u32 audited, u32 denied,
+				   int result)
 {
 	struct common_audit_data ad;
 	struct inode_security_struct *isec = selinux_inode(inode);
@@ -3148,8 +3294,9 @@ static noinline int audit_inode_permission(struct inode *inode,
 	ad.type = LSM_AUDIT_DATA_INODE;
 	ad.u.inode = inode;
 
-	return slow_avc_audit(current_sid(), isec->sid, isec->sclass, perms,
-			    audited, denied, result, &ad);
+	return slow_avc_audit_state(state, current_sid(), isec->sid,
+				    isec->sclass, perms, audited,
+				    denied, result, &ad);
 }
 
 /**
@@ -3159,11 +3306,12 @@ static noinline int audit_inode_permission(struct inode *inode,
  * Clear the task's AVD cache in @tsec and reset it to the current policy's
  * and task's info.
  */
-static inline void task_avdcache_reset(struct task_security_struct *tsec)
+static inline void task_avdcache_reset(struct task_security_struct *tsec,
+				      struct selinux_state *state)
 {
 	memset(&tsec->avdcache.dir, 0, sizeof(tsec->avdcache.dir));
 	tsec->avdcache.sid = current_sid();
-	tsec->avdcache.seqno = avc_policy_seqno();
+	tsec->avdcache.seqno = avc_policy_seqno_state(state);
 	tsec->avdcache.dir_spot = TSEC_AVDC_DIR_SIZE - 1;
 }
 
@@ -3177,6 +3325,7 @@ static inline void task_avdcache_reset(struct task_security_struct *tsec)
  * caller via @avdc.  Returns 0 if a match is found, negative values otherwise.
  */
 static inline int task_avdcache_search(struct task_security_struct *tsec,
+				       struct selinux_state *state,
 				       struct inode_security_struct *isec,
 				       struct avdc_entry **avdc)
 {
@@ -3187,8 +3336,8 @@ static inline int task_avdcache_search(struct task_security_struct *tsec,
 		return -ENOENT;
 
 	if (unlikely(current_sid() != tsec->avdcache.sid ||
-		     tsec->avdcache.seqno != avc_policy_seqno())) {
-		task_avdcache_reset(tsec);
+		     tsec->avdcache.seqno != avc_policy_seqno_state(state))) {
+		task_avdcache_reset(tsec, state);
 		return -ENOENT;
 	}
 
@@ -3251,6 +3400,7 @@ static int selinux_inode_permission(struct inode *inode, int requested)
 	int mask;
 	u32 perms;
 	u32 sid = current_sid();
+	struct selinux_state *state = current_selinux_state();
 	struct task_security_struct *tsec;
 	struct inode_security_struct *isec;
 	struct avdc_entry *avdc;
@@ -3264,7 +3414,9 @@ static int selinux_inode_permission(struct inode *inode, int requested)
 		return 0;
 
 	tsec = selinux_task(current);
-	if (task_avdcache_permnoaudit(tsec, sid))
+	if (tsec->avdcache.permissive_neveraudit &&
+	    sid == tsec->avdcache.sid &&
+	    tsec->avdcache.seqno == avc_policy_seqno_state(state))
 		return 0;
 
 	isec = inode_security_rcu(inode, requested & MAY_NOT_BLOCK);
@@ -3272,20 +3424,21 @@ static int selinux_inode_permission(struct inode *inode, int requested)
 		return PTR_ERR(isec);
 	perms = file_mask_to_av(inode->i_mode, mask);
 
-	rc = task_avdcache_search(tsec, isec, &avdc);
+	rc = task_avdcache_search(tsec, state, isec, &avdc);
 	if (likely(!rc)) {
 		/* Cache hit. */
 		audited = perms & avdc->audited;
 		denied = perms & ~avdc->allowed;
-		if (unlikely(denied && enforcing_enabled() &&
+		if (unlikely(denied && enforcing_enabled_state(state) &&
 			     !avdc->permissive))
 			rc = -EACCES;
 	} else {
 		struct av_decision avd;
 
 		/* Cache miss. */
-		rc = avc_has_perm_noaudit(sid, isec->sid, isec->sclass,
-					  perms, 0, &avd);
+		rc = avc_has_perm_noaudit_state(state, sid, isec->sid,
+						 isec->sclass, perms,
+						 0, &avd);
 		audited = avc_audit_required(perms, &avd, rc,
 			(requested & MAY_ACCESS) ? FILE__AUDIT_ACCESS : 0,
 			&denied);
@@ -3295,7 +3448,7 @@ static int selinux_inode_permission(struct inode *inode, int requested)
 	if (likely(!audited))
 		return rc;
 
-	rc2 = audit_inode_permission(inode, perms, audited, denied, rc);
+	rc2 = audit_inode_permission(state, inode, perms, audited, denied, rc);
 	if (rc2)
 		return rc2;
 
@@ -3334,10 +3487,13 @@ static int selinux_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 static int selinux_inode_getattr(const struct path *path)
 {
 	struct task_security_struct *tsec;
+	struct selinux_state *state = current_selinux_state();
 
 	tsec = selinux_task(current);
 
-	if (task_avdcache_permnoaudit(tsec, current_sid()))
+	if (tsec->avdcache.permissive_neveraudit &&
+	    current_sid() == tsec->avdcache.sid &&
+	    tsec->avdcache.seqno == avc_policy_seqno_state(state))
 		return 0;
 
 	return path_has_perm(current_cred(), path, FILE__GETATTR);
@@ -3834,7 +3990,8 @@ static int selinux_file_permission(struct file *file, int mask)
 
 	isec = inode_security(inode);
 	if (sid == fsec->sid && fsec->isid == isec->sid &&
-	    fsec->pseqno == avc_policy_seqno())
+	    fsec->pseqno ==
+		    avc_policy_seqno_state(cred_selinux_state(file->f_cred)))
 		/* No change since file_open check. */
 		return 0;
 
@@ -4183,7 +4340,8 @@ static int selinux_file_open(struct file *file)
 	 * struct as its SID.
 	 */
 	fsec->isid = isec->sid;
-	fsec->pseqno = avc_policy_seqno();
+	fsec->pseqno =
+		avc_policy_seqno_state(cred_selinux_state(file->f_cred));
 	/*
 	 * Since the inode label or policy seqno may have changed
 	 * between the selinux_inode_permission check and the saving
@@ -6589,14 +6747,16 @@ static int selinux_lsm_getattr(unsigned int attr, struct task_struct *p,
 			       char **value)
 {
 	const struct cred_security_struct *crsec;
+	struct selinux_state *state;
 	int error;
 	u32 sid;
 	u32 len;
 
 	rcu_read_lock();
 	crsec = selinux_cred(__task_cred(p));
+	state = crsec->state ?: &selinux_state;
 	if (p != current) {
-		error = avc_has_perm(current_sid(), crsec->sid,
+		error = avc_has_perm_state(state, current_sid(), crsec->sid,
 				     SECCLASS_PROCESS, PROCESS__GETATTR, NULL);
 		if (error)
 			goto err_unlock;
@@ -6631,7 +6791,7 @@ static int selinux_lsm_getattr(unsigned int attr, struct task_struct *p,
 		return 0;
 	}
 
-	error = security_sid_to_context(sid, value, &len);
+	error = security_sid_to_context_state(state, sid, value, &len);
 	if (error)
 		return error;
 	return len;
@@ -6645,6 +6805,7 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 {
 	struct cred_security_struct *crsec;
 	struct cred *new;
+	struct selinux_state *state = current_selinux_state();
 	u32 mysid = current_sid(), sid = 0, ptsid;
 	int error;
 	char *str = value;
@@ -6654,24 +6815,24 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 	 */
 	switch (attr) {
 	case LSM_ATTR_EXEC:
-		error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS,
-				     PROCESS__SETEXEC, NULL);
+		error = avc_has_perm_state(state, mysid, mysid,
+				     SECCLASS_PROCESS, PROCESS__SETEXEC, NULL);
 		break;
 	case LSM_ATTR_FSCREATE:
-		error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS,
-				     PROCESS__SETFSCREATE, NULL);
+		error = avc_has_perm_state(state, mysid, mysid,
+				     SECCLASS_PROCESS, PROCESS__SETFSCREATE, NULL);
 		break;
 	case LSM_ATTR_KEYCREATE:
-		error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS,
-				     PROCESS__SETKEYCREATE, NULL);
+		error = avc_has_perm_state(state, mysid, mysid,
+				     SECCLASS_PROCESS, PROCESS__SETKEYCREATE, NULL);
 		break;
 	case LSM_ATTR_SOCKCREATE:
-		error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS,
-				     PROCESS__SETSOCKCREATE, NULL);
+		error = avc_has_perm_state(state, mysid, mysid,
+				     SECCLASS_PROCESS, PROCESS__SETSOCKCREATE, NULL);
 		break;
 	case LSM_ATTR_CURRENT:
-		error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS,
-				     PROCESS__SETCURRENT, NULL);
+		error = avc_has_perm_state(state, mysid, mysid,
+				     SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
 		break;
 	default:
 		error = -EOPNOTSUPP;
@@ -6686,7 +6847,7 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 			str[size-1] = 0;
 			size--;
 		}
-		error = security_context_to_sid(value, size,
+		error = security_context_to_sid_state(state, value, size,
 						&sid, GFP_KERNEL);
 		if (error == -EINVAL && attr == LSM_ATTR_FSCREATE) {
 			if (!has_cap_mac_admin(true)) {
@@ -6712,8 +6873,8 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 
 				return error;
 			}
-			error = security_context_to_sid_force(value, size,
-							&sid);
+			error = security_context_to_sid_force_state(state, value,
+							     size, &sid);
 		}
 		if (error)
 			return error;
@@ -6736,7 +6897,7 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 		crsec->create_sid = sid;
 	} else if (attr == LSM_ATTR_KEYCREATE) {
 		if (sid) {
-			error = avc_has_perm(mysid, sid,
+			error = avc_has_perm_state(state, mysid, sid,
 					     SECCLASS_KEY, KEY__CREATE, NULL);
 			if (error)
 				goto abort_change;
@@ -6750,14 +6911,15 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 			goto abort_change;
 
 		if (!current_is_single_threaded()) {
-			error = security_bounded_transition(crsec->sid, sid);
+			error = security_bounded_transition_state(state,
+						       crsec->sid, sid);
 			if (error)
 				goto abort_change;
 		}
 
 		/* Check permissions for the transition. */
-		error = avc_has_perm(crsec->sid, sid, SECCLASS_PROCESS,
-				     PROCESS__DYNTRANSITION, NULL);
+		error = avc_has_perm_state(state, crsec->sid, sid,
+				     SECCLASS_PROCESS, PROCESS__DYNTRANSITION, NULL);
 		if (error)
 			goto abort_change;
 
@@ -6765,8 +6927,9 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 		   Otherwise, leave SID unchanged and fail. */
 		ptsid = ptrace_parent_sid();
 		if (ptsid != 0) {
-			error = avc_has_perm(ptsid, sid, SECCLASS_PROCESS,
-					     PROCESS__PTRACE, NULL);
+			error = avc_has_perm_state(state, ptsid, sid,
+					     SECCLASS_PROCESS, PROCESS__PTRACE,
+					     NULL);
 			if (error)
 				goto abort_change;
 		}
@@ -7639,6 +7802,8 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 
 static __init int selinux_init(void)
 {
+	int error;
+
 	pr_info("SELinux:  Initializing.\n");
 
 	memset(&selinux_state, 0, sizeof(selinux_state));
@@ -7671,6 +7836,14 @@ static __init int selinux_init(void)
 
 	security_add_hooks(selinux_hooks, ARRAY_SIZE(selinux_hooks),
 			   &selinux_lsmid);
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	error = register_lsm_namespace_backend(&selinux_lsmns_backend);
+	if (error && error != -EEXIST) {
+		pr_err("SELinux: Unable to register LSM namespace backend\n");
+		return error;
+	}
+#endif
 
 	if (avc_add_callback(selinux_netcache_avc_callback, AVC_CALLBACK_RESET))
 		panic("SELinux: Unable to register AVC netcache callback\n");
