@@ -2073,6 +2073,7 @@ static struct damos *damon_sysfs_mk_scheme(
 	};
 	struct damos_watermarks wmarks = {
 		.metric = sysfs_wmarks->metric,
+		.metric_nid = NUMA_NO_NODE,
 		.interval = sysfs_wmarks->interval_us,
 		.high = sysfs_wmarks->high,
 		.mid = sysfs_wmarks->mid,
