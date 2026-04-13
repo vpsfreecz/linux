@@ -77,6 +77,7 @@ DEFINE_DAMON_MODULES_DAMOS_TIME_QUOTA(damon_lru_sort_quota);
 
 static struct damos_watermarks damon_lru_sort_wmarks = {
 	.metric = DAMOS_WMARK_FREE_MEM_RATE,
+	.metric_nid = NUMA_NO_NODE,
 	.interval = 5000000,	/* 5 seconds */
 	.high = 200,		/* 20 percent */
 	.mid = 150,		/* 15 percent */

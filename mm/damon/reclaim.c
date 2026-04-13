@@ -42,6 +42,16 @@ static bool commit_inputs __read_mostly;
 module_param(commit_inputs, bool, 0600);
 
 /*
+ * Reclaim scope.
+ *
+ * "global" applies a single scheme across the configured global target region.
+ * "per-node" applies identical schemes independently on each NUMA node that
+ * has matching System RAM.
+ */
+static char reclaim_scope[16] __read_mostly = "global";
+module_param_string(scope, reclaim_scope, sizeof(reclaim_scope), 0600);
+
+/*
  * Time threshold for cold memory regions identification in microseconds.
  *
  * If a memory region is not accessed for this or longer time, DAMON_RECLAIM
@@ -120,6 +130,7 @@ module_param(quota_autotune_feedback, ulong, 0600);
 
 static struct damos_watermarks damon_reclaim_wmarks = {
 	.metric = DAMOS_WMARK_FREE_MEM_RATE,
+	.metric_nid = NUMA_NO_NODE,
 	.interval = 5000000,	/* 5 seconds */
 	.high = 500,		/* 50 percent */
 	.mid = 400,		/* 40 percent */
@@ -168,9 +179,41 @@ DEFINE_DAMON_MODULES_DAMOS_STATS_PARAMS(damon_reclaim_stat,
 		reclaim_tried_regions, reclaimed_regions, quota_exceeds);
 
 static struct damon_ctx *ctx;
-static struct damon_target *target;
 
-static struct damos *damon_reclaim_new_scheme(void)
+enum damon_reclaim_scope {
+	DAMON_RECLAIM_SCOPE_GLOBAL,
+	DAMON_RECLAIM_SCOPE_PER_NODE,
+};
+
+static int damon_reclaim_get_scope(void)
+{
+	if (!strcmp(reclaim_scope, "global"))
+		return DAMON_RECLAIM_SCOPE_GLOBAL;
+	if (!strcmp(reclaim_scope, "per-node"))
+		return DAMON_RECLAIM_SCOPE_PER_NODE;
+	return -EINVAL;
+}
+
+static int damon_reclaim_new_ctx(struct damon_ctx **new_ctx)
+{
+	struct damon_ctx *ctx;
+	int err;
+
+	ctx = damon_new_ctx();
+	if (!ctx)
+		return -ENOMEM;
+
+	err = damon_select_ops(ctx, DAMON_OPS_PADDR);
+	if (err) {
+		damon_destroy_ctx(ctx);
+		return err;
+	}
+
+	*new_ctx = ctx;
+	return 0;
+}
+
+static struct damos *damon_reclaim_new_scheme(int metric_nid, int target_idx)
 {
 	struct damos_access_pattern pattern = {
 		/* Find regions having PAGE_SIZE or larger size */
@@ -184,30 +227,100 @@ static struct damos *damon_reclaim_new_scheme(void)
 			damon_reclaim_mon_attrs.aggr_interval,
 		.max_age_region = UINT_MAX,
 	};
+	struct damos_quota quota = damon_reclaim_quota;
+	struct damos_watermarks wmarks = damon_reclaim_wmarks;
+	struct damos *scheme;
+	struct damos_filter *filter;
 
-	return damon_new_scheme(
+	wmarks.metric_nid = metric_nid;
+
+	scheme = damon_new_scheme(
 			&pattern,
 			/* page out those, as soon as found */
 			DAMOS_PAGEOUT,
 			/* for each aggregation interval */
 			0,
 			/* under the quota. */
-			&damon_reclaim_quota,
+			&quota,
 			/* (De)activate this according to the watermarks. */
-			&damon_reclaim_wmarks,
+			&wmarks,
 			NUMA_NO_NODE);
+	if (!scheme)
+		return NULL;
+
+	if (target_idx >= 0) {
+		filter = damos_new_filter(DAMOS_FILTER_TYPE_TARGET, false);
+		if (!filter)
+			goto out;
+		filter->target_idx = target_idx;
+		damos_add_filter(scheme, filter);
+	}
+
+	if (skip_anon) {
+		filter = damos_new_filter(DAMOS_FILTER_TYPE_ANON, true);
+		if (!filter)
+			goto out;
+		damos_add_filter(scheme, filter);
+	}
+
+	return scheme;
+out:
+	damon_destroy_scheme(scheme);
+	return NULL;
+}
+
+static int damon_reclaim_add_quota_goals(struct damos *scheme, int metric_nid)
+{
+	struct damos_quota_goal *goal;
+
+	if (quota_mem_pressure_us) {
+		goal = damos_new_quota_goal(DAMOS_QUOTA_SOME_MEM_PSI_US,
+				quota_mem_pressure_us);
+		if (!goal)
+			return -ENOMEM;
+		damos_add_quota_goal(&scheme->quota, goal);
+	}
+
+	if (quota_free_mem_rate) {
+		goal = damos_new_quota_goal(DAMOS_QUOTA_FREE_MEM_RATE,
+				quota_free_mem_rate);
+		if (!goal)
+			return -ENOMEM;
+		goal->nid = metric_nid;
+		damos_add_quota_goal(&scheme->quota, goal);
+	}
+
+	if (quota_free_mem_bytes) {
+		goal = damos_new_quota_goal(DAMOS_QUOTA_FREE_MEM_BYTES,
+				quota_free_mem_bytes);
+		if (!goal)
+			return -ENOMEM;
+		goal->nid = metric_nid;
+		damos_add_quota_goal(&scheme->quota, goal);
+	}
+
+	if (quota_autotune_feedback) {
+		goal = damos_new_quota_goal(DAMOS_QUOTA_USER_INPUT, 10000);
+		if (!goal)
+			return -ENOMEM;
+		goal->current_value = quota_autotune_feedback;
+		damos_add_quota_goal(&scheme->quota, goal);
+	}
+
+	return 0;
 }
 
 static int damon_reclaim_apply_parameters(void)
 {
 	struct damon_ctx *param_ctx;
+	struct damos **schemes = NULL;
 	struct damon_target *param_target;
 	struct damos *scheme;
-	struct damos_quota_goal *goal;
-	struct damos_filter *filter;
+	int scope;
+	int nr_schemes = 0;
 	int err;
 
-	err = damon_modules_new_paddr_ctx_target(&param_ctx, &param_target);
+	err = damon_reclaim_new_ctx(&param_ctx);
 	if (err)
 		return err;
 
@@ -219,63 +332,98 @@ static int damon_reclaim_apply_parameters(void)
 		err = -EINVAL;
 		goto out;
 	}
+	scope = damon_reclaim_get_scope();
+	if (scope < 0) {
+		err = scope;
+		goto out;
+	}
 
-	err = damon_set_attrs(ctx, &damon_reclaim_mon_attrs);
+	err = damon_set_attrs(param_ctx, &damon_reclaim_mon_attrs);
 	if (err)
 		goto out;
 
-	err = -ENOMEM;
-	scheme = damon_reclaim_new_scheme();
-	if (!scheme)
-		goto out;
-	damon_set_schemes(ctx, &scheme, 1);
+	if (scope == DAMON_RECLAIM_SCOPE_PER_NODE) {
+		int nid, nr_targets = 0;
 
-	if (quota_mem_pressure_us) {
-		goal = damos_new_quota_goal(DAMOS_QUOTA_SOME_MEM_PSI_US,
-				quota_mem_pressure_us);
-		if (!goal)
+		schemes = kcalloc(nr_node_ids, sizeof(*schemes), GFP_KERNEL);
+		if (!schemes) {
+			err = -ENOMEM;
 			goto out;
-		damos_add_quota_goal(&scheme->quota, goal);
+		}
+
+		for_each_node_state(nid, N_MEMORY) {
+			param_target = damon_new_target();
+			if (!param_target) {
+				err = -ENOMEM;
+				goto out;
+			}
+
+			err = damon_set_regions_system_ram(param_target,
+					monitor_region_start,
+					monitor_region_end, nid);
+			if (err == -ENOENT) {
+				damon_free_target(param_target);
+				continue;
+			}
+			if (err) {
+				damon_free_target(param_target);
+				goto out;
+			}
+			damon_add_target(param_ctx, param_target);
+
+			scheme = damon_reclaim_new_scheme(nid, nr_targets);
+			if (!scheme) {
+				err = -ENOMEM;
+				goto out;
+			}
+			err = damon_reclaim_add_quota_goals(scheme, nid);
+			if (err) {
+				damon_destroy_scheme(scheme);
+				goto out;
+			}
+			schemes[nr_schemes++] = scheme;
+			nr_targets++;
+		}
+		if (!nr_schemes) {
+			err = -EINVAL;
+			goto out;
+		}
+	} else {
+		param_target = damon_new_target();
+		if (!param_target) {
+			err = -ENOMEM;
+			goto out;
+		}
+		damon_add_target(param_ctx, param_target);
+
+		err = damon_set_region_biggest_system_ram_default(param_target,
+				&monitor_region_start, &monitor_region_end);
+		if (err)
+			goto out;
+
+		scheme = damon_reclaim_new_scheme(NUMA_NO_NODE, -1);
+		if (!scheme) {
+			err = -ENOMEM;
+			goto out;
+		}
+		err = damon_reclaim_add_quota_goals(scheme, NUMA_NO_NODE);
+		if (err) {
+			damon_destroy_scheme(scheme);
+			goto out;
+		}
+		schemes = kcalloc(1, sizeof(*schemes), GFP_KERNEL);
+		if (!schemes) {
+			damon_destroy_scheme(scheme);
+			err = -ENOMEM;
+			goto out;
+		}
+		schemes[nr_schemes++] = scheme;
 	}
 
-	if (quota_free_mem_rate) {
-		goal = damos_new_quota_goal(DAMOS_QUOTA_FREE_MEM_RATE,
-				quota_free_mem_rate);
-		if (!goal)
-			goto out;
-		damos_add_quota_goal(&scheme->quota, goal);
-	}
-
-	if (quota_free_mem_bytes) {
-		goal = damos_new_quota_goal(DAMOS_QUOTA_FREE_MEM_BYTES,
-				quota_free_mem_bytes);
-		if (!goal)
-			goto out;
-		damos_add_quota_goal(&scheme->quota, goal);
-	}
-
-	if (quota_autotune_feedback) {
-		goal = damos_new_quota_goal(DAMOS_QUOTA_USER_INPUT, 10000);
-		if (!goal)
-			goto out;
-		goal->current_value = quota_autotune_feedback;
-		damos_add_quota_goal(&scheme->quota, goal);
-	}
-
-	if (skip_anon) {
-		filter = damos_new_filter(DAMOS_FILTER_TYPE_ANON, true);
-		if (!filter)
-			goto out;
-		damos_add_filter(scheme, filter);
-	}
-
-	err = damon_set_region_biggest_system_ram_default(param_target,
-					&monitor_region_start,
-					&monitor_region_end);
-	if (err)
-		goto out;
+	damon_set_schemes(param_ctx, schemes, nr_schemes);
 	err = damon_commit_ctx(ctx, param_ctx);
 out:
+	kfree(schemes);
 	damon_destroy_ctx(param_ctx);
 	return err;
 }
@@ -388,8 +536,15 @@ static int damon_reclaim_after_aggregation(struct damon_ctx *c)
 	struct damos *s;
 
 	/* update the stats parameter */
+	damon_reclaim_stat = (struct damos_stat){};
 	damon_for_each_scheme(s, c)
-		damon_reclaim_stat = s->stat;
+	{
+		damon_reclaim_stat.nr_tried += s->stat.nr_tried;
+		damon_reclaim_stat.sz_tried += s->stat.sz_tried;
+		damon_reclaim_stat.nr_applied += s->stat.nr_applied;
+		damon_reclaim_stat.sz_applied += s->stat.sz_applied;
+		damon_reclaim_stat.qt_exceeds += s->stat.qt_exceeds;
+	}
 
 	return damon_reclaim_handle_commit_inputs();
 }
@@ -401,7 +556,7 @@ static int damon_reclaim_after_wmarks_check(struct damon_ctx *c)
 
 static int __init damon_reclaim_init(void)
 {
-	int err = damon_modules_new_paddr_ctx_target(&ctx, &target);
+	int err = damon_reclaim_new_ctx(&ctx);
 
 	if (err)
 		return err;
