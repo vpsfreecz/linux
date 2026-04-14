@@ -159,6 +159,7 @@ struct tun_security_struct {
 
 struct key_security_struct {
 	u32 sid; /* SID of key */
+	struct selinux_state *state; /* SELinux state bound to this key */
 };
 
 struct ib_security_struct {
