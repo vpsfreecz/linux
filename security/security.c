@@ -2823,10 +2823,14 @@ EXPORT_SYMBOL(security_inode_listsecurity);
  * @inode: inode
  * @prop: lsm specific information to return
  *
- * Get the lsm specific information associated with the node.
+ * Get the lsm specific information associated with the node.  The returned
+ * snapshot is transient; callers that retain it beyond the inode's immediate
+ * lifetime should call security_lsmprop_hold() and later
+ * security_release_lsmprop().
  */
 void security_inode_getlsmprop(struct inode *inode, struct lsm_prop *prop)
 {
+	lsmprop_init(prop);
 	call_void_hook(inode_getlsmprop, inode, prop);
 }
 
@@ -3371,7 +3375,9 @@ EXPORT_SYMBOL(security_cred_getsecid);
  * @prop: destination for the LSM data
  *
  * Retrieve the security data of the cred structure @c.  In case of
- * failure, @prop will be cleared.
+ * failure, @prop will be cleared.  The returned snapshot is transient;
+ * callers that retain it beyond the cred's immediate lifetime should call
+ * security_lsmprop_hold() and later security_release_lsmprop().
  */
 void security_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
 {
@@ -3603,7 +3609,9 @@ int security_task_getsid(struct task_struct *p)
  * @prop: lsm specific information
  *
  * Retrieve the subjective security identifier of the current task and return
- * it in @prop.
+ * it in @prop.  The returned snapshot is transient; callers that retain it
+ * beyond the current task's immediate lifetime should call
+ * security_lsmprop_hold() and later security_release_lsmprop().
  */
 void security_current_getlsmprop_subj(struct lsm_prop *prop)
 {
@@ -3618,7 +3626,11 @@ EXPORT_SYMBOL(security_current_getlsmprop_subj);
  * @prop: lsm specific information
  *
  * Retrieve the objective security identifier of the task_struct in @p and
- * return it in @prop.
+ * return it in @prop.  Because task credentials are observed under RCU, an
+ * LSM may need to pin auxiliary state identity in the returned snapshot even
+ * for immediate callers.  Retained call sites should prefer
+ * security_task_getlsmprop_obj_held() so that stronger ownership is explicit
+ * at the capture site.
  */
 void security_task_getlsmprop_obj(struct task_struct *p, struct lsm_prop *prop)
 {
@@ -3626,6 +3638,26 @@ void security_task_getlsmprop_obj(struct task_struct *p, struct lsm_prop *prop)
 	call_void_hook(task_getlsmprop_obj, p, prop);
 }
 EXPORT_SYMBOL(security_task_getlsmprop_obj);
+
+/**
+ * security_task_getlsmprop_obj_held() - Get a retained task LSM snapshot
+ * @p: target task
+ * @prop: lsm specific information
+ *
+ * Retrieve the objective security identifier of the task_struct in @p for a
+ * caller that intends to retain the resulting snapshot and later release it
+ * with security_release_lsmprop().  This helper is intentionally a named
+ * wrapper around security_task_getlsmprop_obj() because task credential
+ * exporters may already need to return a stable snapshot when sampling under
+ * RCU; the wrapper makes retained ownership explicit at review sites without
+ * perturbing those lower-level semantics.
+ */
+void security_task_getlsmprop_obj_held(struct task_struct *p,
+				       struct lsm_prop *prop)
+{
+	security_task_getlsmprop_obj(p, prop);
+}
+EXPORT_SYMBOL(security_task_getlsmprop_obj_held);
 
 /**
  * security_task_setnice() - Check if setting a task's nice value is allowed
@@ -3841,9 +3873,11 @@ int security_ipc_permission(struct kern_ipc_perm *ipcp, short flag)
  * @ipcp: ipc permission structure
  * @prop: pointer to lsm information
  *
- * Get the lsm information associated with the ipc object.
+ * Get the lsm information associated with the ipc object.  The returned
+ * snapshot is transient; callers that retain it beyond the IPC object's
+ * immediate lifetime should call security_lsmprop_hold() and later
+ * security_release_lsmprop().
  */
-
 void security_ipc_getlsmprop(struct kern_ipc_perm *ipcp, struct lsm_prop *prop)
 {
 	lsmprop_init(prop);
@@ -4450,6 +4484,35 @@ int security_lsmprop_to_secctx(struct lsm_prop *prop, struct lsm_context *cp,
 	return LSM_RET_DEFAULT(lsmprop_to_secctx);
 }
 EXPORT_SYMBOL(security_lsmprop_to_secctx);
+
+/**
+ * security_lsmprop_hold() - Pin any internal references carried by an lsm_prop
+ * @prop: exported LSM data
+ *
+ * Some LSMs attach auxiliary state identity to @prop in addition to the raw
+ * exported identifier.  Call this helper before storing a transient @prop
+ * beyond the lifetime of the source object/task so those internal references
+ * remain stable until security_release_lsmprop() is called.
+ */
+void security_lsmprop_hold(struct lsm_prop *prop)
+{
+	call_void_hook(lsmprop_hold, prop);
+}
+EXPORT_SYMBOL(security_lsmprop_hold);
+
+/**
+ * security_release_lsmprop() - Drop internal references carried by an lsm_prop
+ * @prop: exported LSM data
+ *
+ * Release any auxiliary references carried by @prop and reinitialize it to an
+ * empty snapshot.
+ */
+void security_release_lsmprop(struct lsm_prop *prop)
+{
+	call_void_hook(lsmprop_release, prop);
+	lsmprop_init(prop);
+}
+EXPORT_SYMBOL(security_release_lsmprop);
 
 /**
  * security_secctx_to_secid() - Convert a secctx to a secid
