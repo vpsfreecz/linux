@@ -3924,7 +3924,7 @@ int selinux_audit_rule_known(struct audit_krule *rule)
 
 int selinux_audit_rule_match(struct lsm_prop *prop, u32 field, u32 op, void *vrule)
 {
-	struct selinux_state *state = &selinux_state;
+	struct selinux_state *state = prop->selinux.state ?: &selinux_state;
 	struct selinux_policy *policy;
 	struct context *ctxt;
 	struct mls_level *level;
@@ -3936,8 +3936,12 @@ int selinux_audit_rule_match(struct lsm_prop *prop, u32 field, u32 op, void *vru
 		return -ENOENT;
 	}
 
-	if (!state)
-		state = &selinux_state;
+	/*
+	 * Audit SELinux rules are parsed against the host policy only.  Do not
+	 * reinterpret child-state SIDs through that host-global rule table.
+	 */
+	if (state != &selinux_state)
+		return 0;
 
 	if (!selinux_initialized_state(state))
 		return 0;

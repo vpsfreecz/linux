@@ -562,6 +562,22 @@ static bool task_sid_obj_matches_state(const struct task_struct *task,
 	return match;
 }
 
+static struct selinux_state *task_sid_obj_state(const struct task_struct *task,
+						u32 *sidp)
+{
+	const struct cred_security_struct *crsec;
+	struct selinux_state *state;
+
+	rcu_read_lock();
+	crsec = selinux_cred(__task_cred(task));
+	if (sidp)
+		*sidp = crsec->sid;
+	state = get_selinux_state(crsec->state ?: &selinux_state);
+	rcu_read_unlock();
+
+	return state;
+}
+
 static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dentry);
 
 /*
@@ -4021,6 +4037,7 @@ static void selinux_inode_getlsmprop(struct inode *inode, struct lsm_prop *prop)
 	struct inode_security_struct *isec = inode_security_novalidate(inode);
 
 	prop->selinux.secid = isec->sid;
+	prop->selinux.state = selinux_superblock_state(inode->i_sb);
 }
 
 static int selinux_inode_copy_up(struct dentry *src, struct cred **new)
@@ -4567,6 +4584,18 @@ static void selinux_cred_getsecid(const struct cred *c, u32 *secid)
 static void selinux_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
 {
 	prop->selinux.secid = cred_sid(c);
+	prop->selinux.state = cred_selinux_state(c);
+}
+
+static void selinux_lsmprop_hold(struct lsm_prop *prop)
+{
+	prop->selinux.state = get_selinux_state(prop->selinux.state);
+}
+
+static void selinux_lsmprop_release(struct lsm_prop *prop)
+{
+	put_selinux_state(prop->selinux.state);
+	prop->selinux.state = NULL;
 }
 
 /*
@@ -4745,12 +4774,13 @@ static int selinux_task_getsid(struct task_struct *p)
 static void selinux_current_getlsmprop_subj(struct lsm_prop *prop)
 {
 	prop->selinux.secid = current_sid();
+	prop->selinux.state = current_selinux_state();
 }
 
 static void selinux_task_getlsmprop_obj(struct task_struct *p,
 					struct lsm_prop *prop)
 {
-	prop->selinux.secid = task_sid_obj(p);
+	prop->selinux.state = task_sid_obj_state(p, &prop->selinux.secid);
 }
 
 static int selinux_task_setnice(struct task_struct *p, int nice)
@@ -7099,19 +7129,9 @@ static void selinux_ipc_getlsmprop(struct kern_ipc_perm *ipcp,
 			   struct lsm_prop *prop)
 {
 	struct ipc_security_struct *isec = selinux_ipc(ipcp);
-	struct selinux_state *state = selinux_ipc_state_from_sec(isec);
-
-	/*
-	 * Generic lsm_prop export still carries only a raw SID with no attached
-	 * state identity. Keep guest-owned IPC objects and foreign-state objects
-	 * out of that generic path until lsm_prop/secctx conversion grows a state
-	 * tag of its own.
-	 */
-	if (selinux_state_shares_object_model(state) ||
-	    !selinux_ipc_state_matches(isec, current_selinux_state()))
-		return;
 
 	prop->selinux.secid = isec->sid;
+	prop->selinux.state = selinux_ipc_state_from_sec(isec);
 }
 
 static void selinux_d_instantiate(struct dentry *dentry, struct inode *inode)
@@ -7438,7 +7458,29 @@ static int selinux_secid_to_secctx(u32 secid, struct lsm_context *cp)
 static int selinux_lsmprop_to_secctx(struct lsm_prop *prop,
 				     struct lsm_context *cp)
 {
-	return selinux_secid_to_secctx(prop->selinux.secid, cp);
+	struct selinux_state *state = prop->selinux.state ?: &selinux_state;
+	u32 seclen;
+	int ret;
+
+	/*
+	 * Generic lsm_prop export now carries explicit SELinux state identity, so
+	 * convert the SID through the state that originally owned the label.
+	 */
+
+	if (cp) {
+		cp->id = LSM_ID_SELINUX;
+		ret = security_sid_to_context_state(state, prop->selinux.secid,
+						   &cp->context, &cp->len);
+		if (ret < 0)
+			return ret;
+		return cp->len;
+	}
+
+	ret = security_sid_to_context_state(state, prop->selinux.secid,
+					   NULL, &seclen);
+	if (ret < 0)
+		return ret;
+	return seclen;
 }
 
 static int selinux_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid)
@@ -8073,6 +8115,8 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(setprocattr, selinux_setprocattr),
 
 	LSM_HOOK_INIT(ismaclabel, selinux_ismaclabel),
+	LSM_HOOK_INIT(lsmprop_hold, selinux_lsmprop_hold),
+	LSM_HOOK_INIT(lsmprop_release, selinux_lsmprop_release),
 	LSM_HOOK_INIT(secctx_to_secid, selinux_secctx_to_secid),
 	LSM_HOOK_INIT(release_secctx, selinux_release_secctx),
 	LSM_HOOK_INIT(inode_invalidate_secctx, selinux_inode_invalidate_secctx),
