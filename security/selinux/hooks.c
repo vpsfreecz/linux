@@ -529,6 +529,26 @@ static inline u32 task_sid_obj(const struct task_struct *task)
 	return sid;
 }
 
+static bool task_sid_obj_matches_state(const struct task_struct *task,
+				       const struct selinux_state *state,
+				       u32 *sidp)
+{
+	const struct cred_security_struct *crsec;
+	bool match;
+
+	if (!state)
+		state = &selinux_state;
+
+	rcu_read_lock();
+	crsec = selinux_cred(__task_cred(task));
+	if (sidp)
+		*sidp = crsec->sid;
+	match = (crsec->state ?: &selinux_state) == state;
+	rcu_read_unlock();
+
+	return match;
+}
+
 static int inode_doinit_with_dentry(struct inode *inode, struct dentry *opt_dentry);
 
 /*
@@ -6535,10 +6555,102 @@ static int selinux_netlink_send(struct sock *sk, struct sk_buff *skb)
 	return rc;
 }
 
-static void ipc_init_security(struct ipc_security_struct *isec, u16 sclass)
+static struct selinux_state *selinux_ipc_state_from_sec(const struct ipc_security_struct *isec)
+{
+	struct selinux_state *state = READ_ONCE(isec->state);
+
+	return state ?: &selinux_state;
+}
+
+static bool selinux_ipc_state_matches(const struct ipc_security_struct *isec,
+				      const struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	return selinux_ipc_state_from_sec(isec) == state;
+}
+
+static void selinux_ipc_bind_state(struct ipc_security_struct *isec,
+			   struct selinux_state *state)
+{
+	struct selinux_state *old = READ_ONCE(isec->state);
+
+	if (!state)
+		state = &selinux_state;
+	if (old == state)
+		return;
+
+	WRITE_ONCE(isec->state, get_selinux_state(state));
+	put_selinux_state(old);
+}
+
+static void selinux_ipc_release_security(struct ipc_security_struct *isec)
+{
+	struct selinux_state *state = READ_ONCE(isec->state);
+
+	WRITE_ONCE(isec->state, NULL);
+	put_selinux_state(state);
+}
+
+static struct selinux_state *selinux_msg_state_from_sec(const struct msg_security_struct *msec)
+{
+	struct selinux_state *state = READ_ONCE(msec->state);
+
+	return state ?: &selinux_state;
+}
+
+static bool selinux_msg_state_matches(const struct msg_security_struct *msec,
+				      const struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	return selinux_msg_state_from_sec(msec) == state;
+}
+
+static void selinux_msg_bind_state(struct msg_security_struct *msec,
+			   struct selinux_state *state)
+{
+	struct selinux_state *old = READ_ONCE(msec->state);
+
+	if (!state)
+		state = &selinux_state;
+	if (old == state)
+		return;
+
+	WRITE_ONCE(msec->state, get_selinux_state(state));
+	put_selinux_state(old);
+}
+
+static void selinux_msg_release_security(struct msg_security_struct *msec)
+{
+	struct selinux_state *state = READ_ONCE(msec->state);
+
+	WRITE_ONCE(msec->state, NULL);
+	put_selinux_state(state);
+}
+
+static void ipc_init_security(struct ipc_security_struct *isec, u16 sclass,
+		      struct selinux_state *state)
 {
 	isec->sclass = sclass;
 	isec->sid = current_sid();
+	selinux_ipc_bind_state(isec, state);
+}
+
+static int selinux_ipc_current_state(struct kern_ipc_perm *ipc_perms,
+			     struct selinux_state **statep)
+{
+	struct selinux_state *state = current_selinux_state();
+
+	if (ipc_perms &&
+	    !selinux_ipc_state_matches(selinux_ipc(ipc_perms), state))
+		return -EACCES;
+
+	if (statep)
+		*statep = state;
+	return 0;
 }
 
 static int ipc_has_perm(struct kern_ipc_perm *ipc_perms,
@@ -6546,24 +6658,43 @@ static int ipc_has_perm(struct kern_ipc_perm *ipc_perms,
 {
 	struct ipc_security_struct *isec;
 	struct common_audit_data ad;
+	struct selinux_state *state;
 	u32 sid = current_sid();
+	int rc;
+
+	rc = selinux_ipc_current_state(ipc_perms, &state);
+	if (rc)
+		return rc;
 
 	isec = selinux_ipc(ipc_perms);
 
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = ipc_perms->key;
 
-	return avc_has_perm(sid, isec->sid, isec->sclass, perms, &ad);
+	return avc_has_perm_state(state, sid, isec->sid, isec->sclass,
+			  perms, &ad);
 }
 
 static int selinux_msg_msg_alloc_security(struct msg_msg *msg)
 {
 	struct msg_security_struct *msec;
+	struct selinux_state *state;
+	int rc;
+
+	rc = selinux_ipc_current_state(NULL, &state);
+	if (rc)
+		return rc;
 
 	msec = selinux_msg_msg(msg);
 	msec->sid = SECINITSID_UNLABELED;
+	selinux_msg_bind_state(msec, state);
 
 	return 0;
+}
+
+static void selinux_msg_msg_free_security(struct msg_msg *msg)
+{
+	selinux_msg_release_security(selinux_msg_msg(msg));
 }
 
 /* message queue security operations */
@@ -6571,43 +6702,62 @@ static int selinux_msg_queue_alloc_security(struct kern_ipc_perm *msq)
 {
 	struct ipc_security_struct *isec;
 	struct common_audit_data ad;
+	struct selinux_state *state;
 	u32 sid = current_sid();
+	int rc;
+
+	rc = selinux_ipc_current_state(NULL, &state);
+	if (rc)
+		return rc;
 
 	isec = selinux_ipc(msq);
-	ipc_init_security(isec, SECCLASS_MSGQ);
+	ipc_init_security(isec, SECCLASS_MSGQ, state);
 
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = msq->key;
 
-	return avc_has_perm(sid, isec->sid, SECCLASS_MSGQ,
-			    MSGQ__CREATE, &ad);
+	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_MSGQ,
+			  MSGQ__CREATE, &ad);
+}
+
+static void selinux_msg_queue_free_security(struct kern_ipc_perm *msq)
+{
+	selinux_ipc_release_security(selinux_ipc(msq));
 }
 
 static int selinux_msg_queue_associate(struct kern_ipc_perm *msq, int msqflg)
 {
 	struct ipc_security_struct *isec;
 	struct common_audit_data ad;
+	struct selinux_state *state;
 	u32 sid = current_sid();
+	int rc;
+
+	rc = selinux_ipc_current_state(msq, &state);
+	if (rc)
+		return rc;
 
 	isec = selinux_ipc(msq);
 
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = msq->key;
 
-	return avc_has_perm(sid, isec->sid, SECCLASS_MSGQ,
-			    MSGQ__ASSOCIATE, &ad);
+	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_MSGQ,
+			  MSGQ__ASSOCIATE, &ad);
 }
 
 static int selinux_msg_queue_msgctl(struct kern_ipc_perm *msq, int cmd)
 {
+	struct selinux_state *state = current_selinux_state();
 	u32 perms;
 
 	switch (cmd) {
 	case IPC_INFO:
 	case MSG_INFO:
 		/* No specific object, just general system-wide information. */
-		return avc_has_perm(current_sid(), SECINITSID_KERNEL,
-				    SECCLASS_SYSTEM, SYSTEM__IPC_INFO, NULL);
+		return avc_has_perm_state(state, current_sid(), SECINITSID_KERNEL,
+				  SECCLASS_SYSTEM, SYSTEM__IPC_INFO,
+				  NULL);
 	case IPC_STAT:
 	case MSG_STAT:
 	case MSG_STAT_ANY:
@@ -6631,11 +6781,18 @@ static int selinux_msg_queue_msgsnd(struct kern_ipc_perm *msq, struct msg_msg *m
 	struct ipc_security_struct *isec;
 	struct msg_security_struct *msec;
 	struct common_audit_data ad;
+	struct selinux_state *state;
 	u32 sid = current_sid();
 	int rc;
 
+	rc = selinux_ipc_current_state(msq, &state);
+	if (rc)
+		return rc;
+
 	isec = selinux_ipc(msq);
 	msec = selinux_msg_msg(msg);
+	if (!selinux_msg_state_matches(msec, state))
+		return -EACCES;
 
 	/*
 	 * First time through, need to assign label to the message
@@ -6645,8 +6802,9 @@ static int selinux_msg_queue_msgsnd(struct kern_ipc_perm *msq, struct msg_msg *m
 		 * Compute new sid based on current process and
 		 * message queue this message will be stored in
 		 */
-		rc = security_transition_sid(sid, isec->sid,
-					     SECCLASS_MSG, NULL, &msec->sid);
+		rc = security_transition_sid_state(state, sid, isec->sid,
+				   SECCLASS_MSG, NULL,
+				   &msec->sid);
 		if (rc)
 			return rc;
 	}
@@ -6655,16 +6813,18 @@ static int selinux_msg_queue_msgsnd(struct kern_ipc_perm *msq, struct msg_msg *m
 	ad.u.ipc_id = msq->key;
 
 	/* Can this process write to the queue? */
-	rc = avc_has_perm(sid, isec->sid, SECCLASS_MSGQ,
-			  MSGQ__WRITE, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid, SECCLASS_MSGQ,
+				MSGQ__WRITE, &ad);
 	if (!rc)
 		/* Can this process send the message */
-		rc = avc_has_perm(sid, msec->sid, SECCLASS_MSG,
-				  MSG__SEND, &ad);
+		rc = avc_has_perm_state(state, sid, msec->sid,
+					SECCLASS_MSG, MSG__SEND,
+					&ad);
 	if (!rc)
 		/* Can the message be put in the queue? */
-		rc = avc_has_perm(msec->sid, isec->sid, SECCLASS_MSGQ,
-				  MSGQ__ENQUEUE, &ad);
+		rc = avc_has_perm_state(state, msec->sid, isec->sid,
+					SECCLASS_MSGQ, MSGQ__ENQUEUE,
+					&ad);
 
 	return rc;
 }
@@ -6676,20 +6836,30 @@ static int selinux_msg_queue_msgrcv(struct kern_ipc_perm *msq, struct msg_msg *m
 	struct ipc_security_struct *isec;
 	struct msg_security_struct *msec;
 	struct common_audit_data ad;
-	u32 sid = task_sid_obj(target);
+	struct selinux_state *state;
+	u32 sid;
 	int rc;
+
+	rc = selinux_ipc_current_state(msq, &state);
+	if (rc)
+		return rc;
 
 	isec = selinux_ipc(msq);
 	msec = selinux_msg_msg(msg);
+	if (!task_sid_obj_matches_state(target, state, &sid))
+		return -EACCES;
+	if (!selinux_msg_state_matches(msec, state))
+		return -EACCES;
 
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = msq->key;
 
-	rc = avc_has_perm(sid, isec->sid,
-			  SECCLASS_MSGQ, MSGQ__READ, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid,
+				SECCLASS_MSGQ, MSGQ__READ, &ad);
 	if (!rc)
-		rc = avc_has_perm(sid, msec->sid,
-				  SECCLASS_MSG, MSG__RECEIVE, &ad);
+		rc = avc_has_perm_state(state, sid, msec->sid,
+					SECCLASS_MSG, MSG__RECEIVE,
+					&ad);
 	return rc;
 }
 
@@ -6698,44 +6868,63 @@ static int selinux_shm_alloc_security(struct kern_ipc_perm *shp)
 {
 	struct ipc_security_struct *isec;
 	struct common_audit_data ad;
+	struct selinux_state *state;
 	u32 sid = current_sid();
+	int rc;
+
+	rc = selinux_ipc_current_state(NULL, &state);
+	if (rc)
+		return rc;
 
 	isec = selinux_ipc(shp);
-	ipc_init_security(isec, SECCLASS_SHM);
+	ipc_init_security(isec, SECCLASS_SHM, state);
 
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = shp->key;
 
-	return avc_has_perm(sid, isec->sid, SECCLASS_SHM,
-			    SHM__CREATE, &ad);
+	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_SHM,
+			  SHM__CREATE, &ad);
+}
+
+static void selinux_shm_free_security(struct kern_ipc_perm *shp)
+{
+	selinux_ipc_release_security(selinux_ipc(shp));
 }
 
 static int selinux_shm_associate(struct kern_ipc_perm *shp, int shmflg)
 {
 	struct ipc_security_struct *isec;
 	struct common_audit_data ad;
+	struct selinux_state *state;
 	u32 sid = current_sid();
+	int rc;
+
+	rc = selinux_ipc_current_state(shp, &state);
+	if (rc)
+		return rc;
 
 	isec = selinux_ipc(shp);
 
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = shp->key;
 
-	return avc_has_perm(sid, isec->sid, SECCLASS_SHM,
-			    SHM__ASSOCIATE, &ad);
+	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_SHM,
+			  SHM__ASSOCIATE, &ad);
 }
 
 /* Note, at this point, shp is locked down */
 static int selinux_shm_shmctl(struct kern_ipc_perm *shp, int cmd)
 {
+	struct selinux_state *state = current_selinux_state();
 	u32 perms;
 
 	switch (cmd) {
 	case IPC_INFO:
 	case SHM_INFO:
 		/* No specific object, just general system-wide information. */
-		return avc_has_perm(current_sid(), SECINITSID_KERNEL,
-				    SECCLASS_SYSTEM, SYSTEM__IPC_INFO, NULL);
+		return avc_has_perm_state(state, current_sid(), SECINITSID_KERNEL,
+				  SECCLASS_SYSTEM, SYSTEM__IPC_INFO,
+				  NULL);
 	case IPC_STAT:
 	case SHM_STAT:
 	case SHM_STAT_ANY:
@@ -6776,45 +6965,63 @@ static int selinux_sem_alloc_security(struct kern_ipc_perm *sma)
 {
 	struct ipc_security_struct *isec;
 	struct common_audit_data ad;
+	struct selinux_state *state;
 	u32 sid = current_sid();
+	int rc;
+
+	rc = selinux_ipc_current_state(NULL, &state);
+	if (rc)
+		return rc;
 
 	isec = selinux_ipc(sma);
-	ipc_init_security(isec, SECCLASS_SEM);
+	ipc_init_security(isec, SECCLASS_SEM, state);
 
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = sma->key;
 
-	return avc_has_perm(sid, isec->sid, SECCLASS_SEM,
-			    SEM__CREATE, &ad);
+	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_SEM,
+			  SEM__CREATE, &ad);
+}
+
+static void selinux_sem_free_security(struct kern_ipc_perm *sma)
+{
+	selinux_ipc_release_security(selinux_ipc(sma));
 }
 
 static int selinux_sem_associate(struct kern_ipc_perm *sma, int semflg)
 {
 	struct ipc_security_struct *isec;
 	struct common_audit_data ad;
+	struct selinux_state *state;
 	u32 sid = current_sid();
+	int rc;
+
+	rc = selinux_ipc_current_state(sma, &state);
+	if (rc)
+		return rc;
 
 	isec = selinux_ipc(sma);
 
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = sma->key;
 
-	return avc_has_perm(sid, isec->sid, SECCLASS_SEM,
-			    SEM__ASSOCIATE, &ad);
+	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_SEM,
+			  SEM__ASSOCIATE, &ad);
 }
 
 /* Note, at this point, sma is locked down */
 static int selinux_sem_semctl(struct kern_ipc_perm *sma, int cmd)
 {
-	int err;
+	struct selinux_state *state = current_selinux_state();
 	u32 perms;
 
 	switch (cmd) {
 	case IPC_INFO:
 	case SEM_INFO:
 		/* No specific object, just general system-wide information. */
-		return avc_has_perm(current_sid(), SECINITSID_KERNEL,
-				    SECCLASS_SYSTEM, SYSTEM__IPC_INFO, NULL);
+		return avc_has_perm_state(state, current_sid(), SECINITSID_KERNEL,
+				  SECCLASS_SYSTEM, SYSTEM__IPC_INFO,
+				  NULL);
 	case GETPID:
 	case GETNCNT:
 	case GETZCNT:
@@ -6843,8 +7050,7 @@ static int selinux_sem_semctl(struct kern_ipc_perm *sma, int cmd)
 		return 0;
 	}
 
-	err = ipc_has_perm(sma, perms);
-	return err;
+	return ipc_has_perm(sma, perms);
 }
 
 static int selinux_sem_semop(struct kern_ipc_perm *sma,
@@ -6877,9 +7083,21 @@ static int selinux_ipc_permission(struct kern_ipc_perm *ipcp, short flag)
 }
 
 static void selinux_ipc_getlsmprop(struct kern_ipc_perm *ipcp,
-				   struct lsm_prop *prop)
+			   struct lsm_prop *prop)
 {
 	struct ipc_security_struct *isec = selinux_ipc(ipcp);
+	struct selinux_state *state = selinux_ipc_state_from_sec(isec);
+
+	/*
+	 * Generic lsm_prop export still carries only a raw SID with no attached
+	 * state identity. Keep guest-owned IPC objects and foreign-state objects
+	 * out of that generic path until lsm_prop/secctx conversion grows a state
+	 * tag of its own.
+	 */
+	if (selinux_state_shares_object_model(state) ||
+	    !selinux_ipc_state_matches(isec, current_selinux_state()))
+		return;
+
 	prop->selinux.secid = isec->sid;
 }
 
@@ -7953,13 +8171,17 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	 * PUT "ALLOCATING" HOOKS HERE
 	 */
 	LSM_HOOK_INIT(msg_msg_alloc_security, selinux_msg_msg_alloc_security),
+	LSM_HOOK_INIT(msg_msg_free_security, selinux_msg_msg_free_security),
 	LSM_HOOK_INIT(msg_queue_alloc_security,
 		      selinux_msg_queue_alloc_security),
+	LSM_HOOK_INIT(msg_queue_free_security, selinux_msg_queue_free_security),
 	LSM_HOOK_INIT(shm_alloc_security, selinux_shm_alloc_security),
+	LSM_HOOK_INIT(shm_free_security, selinux_shm_free_security),
 	LSM_HOOK_INIT(sb_alloc_security, selinux_sb_alloc_security),
 	LSM_HOOK_INIT(sb_free_security, selinux_sb_free_security),
 	LSM_HOOK_INIT(inode_alloc_security, selinux_inode_alloc_security),
 	LSM_HOOK_INIT(sem_alloc_security, selinux_sem_alloc_security),
+	LSM_HOOK_INIT(sem_free_security, selinux_sem_free_security),
 	LSM_HOOK_INIT(secid_to_secctx, selinux_secid_to_secctx),
 	LSM_HOOK_INIT(lsmprop_to_secctx, selinux_lsmprop_to_secctx),
 	LSM_HOOK_INIT(inode_getsecctx, selinux_inode_getsecctx),
