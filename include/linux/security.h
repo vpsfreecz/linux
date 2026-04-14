@@ -297,7 +297,8 @@ static inline const char *kernel_load_data_id_str(enum kernel_load_data_id id)
  * lsmprop_init - initialize a lsm_prop structure
  * @prop: Pointer to the data to initialize
  *
- * Set all secid for all modules to the specified value.
+ * Clear all exported LSM identifiers and any auxiliary state identity carried
+ * alongside them.
  */
 static inline void lsmprop_init(struct lsm_prop *prop)
 {
@@ -518,6 +519,8 @@ int security_task_getpgid(struct task_struct *p);
 int security_task_getsid(struct task_struct *p);
 void security_current_getlsmprop_subj(struct lsm_prop *prop);
 void security_task_getlsmprop_obj(struct task_struct *p, struct lsm_prop *prop);
+void security_task_getlsmprop_obj_held(struct task_struct *p,
+				       struct lsm_prop *prop);
 int security_task_setnice(struct task_struct *p, int nice);
 int security_task_setioprio(struct task_struct *p, int ioprio);
 int security_task_getioprio(struct task_struct *p);
@@ -569,6 +572,8 @@ int security_ismaclabel(const char *name);
 int security_secid_to_secctx(u32 secid, struct lsm_context *cp);
 int security_lsmprop_to_secctx(struct lsm_prop *prop, struct lsm_context *cp,
 			       int lsmid);
+void security_lsmprop_hold(struct lsm_prop *prop);
+void security_release_lsmprop(struct lsm_prop *prop);
 int security_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid);
 void security_release_secctx(struct lsm_context *cp);
 void security_inode_invalidate_secctx(struct inode *inode);
@@ -1341,6 +1346,12 @@ static inline void security_task_getlsmprop_obj(struct task_struct *p,
 	lsmprop_init(prop);
 }
 
+static inline void security_task_getlsmprop_obj_held(struct task_struct *p,
+					     struct lsm_prop *prop)
+{
+	security_task_getlsmprop_obj(p, prop);
+}
+
 static inline int security_task_setnice(struct task_struct *p, int nice)
 {
 	return cap_task_setnice(p, nice);
@@ -1556,6 +1567,15 @@ static inline int security_lsmprop_to_secctx(struct lsm_prop *prop,
 					     int lsmid)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline void security_lsmprop_hold(struct lsm_prop *prop)
+{
+}
+
+static inline void security_release_lsmprop(struct lsm_prop *prop)
+{
+	lsmprop_init(prop);
 }
 
 static inline int security_secctx_to_secid(const char *secdata,
