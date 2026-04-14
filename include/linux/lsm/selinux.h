@@ -7,9 +7,12 @@
 #define __LINUX_LSM_SELINUX_H
 #include <linux/types.h>
 
+struct selinux_state;
+
 struct lsm_prop_selinux {
 #ifdef CONFIG_SECURITY_SELINUX
 	u32 secid;
+	struct selinux_state *state;
 #endif
 };
 
