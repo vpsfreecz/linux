@@ -95,6 +95,7 @@ struct superblock_security_struct {
 	u32 mntpoint_sid; /* SECURITY_FS_USE_MNTPOINT context for files */
 	unsigned short behavior; /* labeling behavior */
 	unsigned short flags; /* which mount options were specified */
+	struct selinux_state *state; /* SELinux state bound to this superblock */
 	struct mutex lock;
 	struct list_head isec_head;
 	spinlock_t isec_lock;
@@ -239,6 +240,20 @@ static inline struct superblock_security_struct *
 selinux_superblock(const struct super_block *superblock)
 {
 	return superblock->s_security + selinux_blob_sizes.lbs_superblock;
+}
+
+static inline struct selinux_state *
+selinux_superblock_state_from_sec(const struct superblock_security_struct *sbsec)
+{
+	struct selinux_state *state = READ_ONCE(sbsec->state);
+
+	return state ?: &selinux_state;
+}
+
+static inline struct selinux_state *
+selinux_superblock_state(const struct super_block *superblock)
+{
+	return selinux_superblock_state_from_sec(selinux_superblock(superblock));
 }
 
 #ifdef CONFIG_KEYS
