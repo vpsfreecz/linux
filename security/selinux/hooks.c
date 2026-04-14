@@ -6661,6 +6661,44 @@ static void selinux_msg_release_security(struct msg_security_struct *msec)
 	put_selinux_state(state);
 }
 
+static struct selinux_state *selinux_key_state_from_sec(const struct key_security_struct *ksec)
+{
+	struct selinux_state *state = READ_ONCE(ksec->state);
+
+	return state ?: &selinux_state;
+}
+
+static bool selinux_key_state_matches(const struct key_security_struct *ksec,
+				      const struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	return selinux_key_state_from_sec(ksec) == state;
+}
+
+static void selinux_key_bind_state(struct key_security_struct *ksec,
+				   struct selinux_state *state)
+{
+	struct selinux_state *old = READ_ONCE(ksec->state);
+
+	if (!state)
+		state = &selinux_state;
+	if (old == state)
+		return;
+
+	WRITE_ONCE(ksec->state, get_selinux_state(state));
+	put_selinux_state(old);
+}
+
+static void selinux_key_release_security(struct key_security_struct *ksec)
+{
+	struct selinux_state *state = READ_ONCE(ksec->state);
+
+	WRITE_ONCE(ksec->state, NULL);
+	put_selinux_state(state);
+}
+
 static void ipc_init_security(struct ipc_security_struct *isec, u16 sclass,
 		      struct selinux_state *state)
 {
@@ -7423,8 +7461,9 @@ static int selinux_secid_to_secctx(u32 secid, struct lsm_context *cp)
 
 	/*
 	 * The generic secid/secctx hooks only carry a raw SID with no attached
-	 * state identity, so keep them frozen for child states until the generic
-	 * API can distinguish guest-owned object labels from host-global ones.
+	 * state identity, so keep them host-only for child states.  Child states
+	 * stay blocked here unless the generic API carries an explicit SELinux
+	 * state tag for guest-owned object labels.
 	 */
 	if (selinux_state_shares_object_model(state))
 		return -EOPNOTSUPP;
@@ -7476,8 +7515,9 @@ static int selinux_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid)
 
 	/*
 	 * Generic secctx import has the same state-identity problem as generic
-	 * secid export, so keep it disabled for child states until the generic
-	 * interface can carry a state tag.
+	 * secid export, so keep it host-only for child states.  Child states stay
+	 * blocked here unless the generic interface carries an explicit SELinux
+	 * state tag alongside the raw secctx.
 	 */
 	if (selinux_state_shares_object_model(state))
 		return -EOPNOTSUPP;
@@ -7549,8 +7589,14 @@ static int selinux_key_alloc(struct key *k, const struct cred *cred,
 		ksec->sid = crsec->keycreate_sid;
 	else
 		ksec->sid = crsec->sid;
+	selinux_key_bind_state(ksec, cred_selinux_state(cred));
 
 	return 0;
+}
+
+static void selinux_key_free(struct key *k)
+{
+	selinux_key_release_security(selinux_key(k));
 }
 
 static int selinux_key_permission(key_ref_t key_ref,
@@ -7559,6 +7605,7 @@ static int selinux_key_permission(key_ref_t key_ref,
 {
 	struct key *key;
 	struct key_security_struct *ksec;
+	struct selinux_state *state = cred_selinux_state(cred);
 	u32 perm, sid;
 
 	switch (need_perm) {
@@ -7594,8 +7641,11 @@ static int selinux_key_permission(key_ref_t key_ref,
 	sid = cred_sid(cred);
 	key = key_ref_to_ptr(key_ref);
 	ksec = selinux_key(key);
+	if (!selinux_key_state_matches(ksec, state))
+		return -EACCES;
 
-	return avc_has_perm(sid, ksec->sid, SECCLASS_KEY, perm, NULL);
+	return avc_has_perm_state(state, sid, ksec->sid,
+				SECCLASS_KEY, perm, NULL);
 }
 
 static int selinux_key_getsecurity(struct key *key, char **_buffer)
@@ -7607,12 +7657,13 @@ static int selinux_key_getsecurity(struct key *key, char **_buffer)
 	int rc;
 
 	/*
-	 * Child states still interpret shared key labels as raw host-owned SIDs.
-	 * Freeze guest-visible key secctx export until object state identity is
-	 * carried through the key object model.
+	 * Key objects now carry explicit SELinux state identity, so only allow
+	 * secctx export from the owning state instead of reinterpreting foreign
+	 * raw SIDs through the caller's current policy.
 	 */
-	if (selinux_state_shares_object_model(state))
-		return -EOPNOTSUPP;
+	if (!selinux_key_state_matches(ksec, state))
+		return -EACCES;
+	state = selinux_key_state_from_sec(ksec);
 
 	rc = security_sid_to_context_state(state, ksec->sid,
 					   &context, &len);
@@ -7626,9 +7677,14 @@ static int selinux_key_getsecurity(struct key *key, char **_buffer)
 static int selinux_watch_key(struct key *key)
 {
 	struct key_security_struct *ksec = selinux_key(key);
+	struct selinux_state *state = current_selinux_state();
 	u32 sid = current_sid();
 
-	return avc_has_perm(sid, ksec->sid, SECCLASS_KEY, KEY__VIEW, NULL);
+	if (!selinux_key_state_matches(ksec, state))
+		return -EACCES;
+
+	return avc_has_perm_state(state, sid, ksec->sid,
+				SECCLASS_KEY, KEY__VIEW, NULL);
 }
 #endif
 #endif
@@ -8168,6 +8224,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 #endif
 
 #ifdef CONFIG_KEYS
+	LSM_HOOK_INIT(key_free, selinux_key_free),
 	LSM_HOOK_INIT(key_permission, selinux_key_permission),
 	LSM_HOOK_INIT(key_getsecurity, selinux_key_getsecurity),
 #ifdef CONFIG_KEY_NOTIFICATIONS

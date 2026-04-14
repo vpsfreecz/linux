@@ -2286,8 +2286,8 @@ static bool selinux_state_allows_parent_policy_mutation(struct selinux_state *st
 		return true;
 
 	/*
-	 * Child SELinux states still interpret shared object labels and raw SID
-	 * values.  Keep the parent policy and booleans pinned while those child
+	 * Child SELinux states still rely on some shared object labels and raw SID
+	 * carriers.  Keep the parent policy and booleans pinned while those child
 	 * states exist or they can silently drift away from the shared object
 	 * model.
 	 */
@@ -3542,6 +3542,7 @@ int security_net_peersid_resolve(u32 nlbl_sid, u32 nlbl_type,
 				 u32 xfrm_sid,
 				 u32 *peer_sid)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
@@ -3566,9 +3567,13 @@ int security_net_peersid_resolve(u32 nlbl_sid, u32 nlbl_type,
 		return 0;
 	}
 
-	if (!state)
-		state = &selinux_state;
-
+	/*
+	 * NetLabel and packet-path XFRM peer resolution still operate on the
+	 * host-global network labeling model.  These peer SIDs do not yet carry a
+	 * per-object SELinux state tag, so keep resolution anchored to the host
+	 * policy until those raw network secid carriers grow explicit state
+	 * identity.
+	 */
 	if (!selinux_initialized_state(state))
 		return 0;
 

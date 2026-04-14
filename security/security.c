@@ -5684,6 +5684,7 @@ int security_key_alloc(struct key *key, const struct cred *cred,
  */
 void security_key_free(struct key *key)
 {
+	call_void_hook(key_free, key);
 	kfree(key->security);
 	key->security = NULL;
 }
