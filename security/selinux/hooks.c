@@ -2620,8 +2620,10 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	const struct cred_security_struct *old_crsec;
 	struct cred_security_struct *new_crsec;
 	struct inode_security_struct *isec;
+	struct selinux_state *state;
 	struct common_audit_data ad;
 	struct inode *inode = file_inode(bprm->file);
+	u32 oldsid;
 	int rc;
 
 	/* SELinux context only depends on initial program or script and not
@@ -2630,10 +2632,12 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	old_crsec = selinux_cred(current_cred());
 	new_crsec = selinux_cred(bprm->cred);
 	isec = inode_security(inode);
+	state = old_crsec->state ?: &selinux_state;
+	oldsid = old_crsec->sid;
 
 	/* Default to the current task SID. */
-	new_crsec->sid = old_crsec->sid;
-	new_crsec->osid = old_crsec->sid;
+	new_crsec->sid = oldsid;
+	new_crsec->osid = oldsid;
 
 	/* Reset fs, key, and sock SIDs on execve. */
 	new_crsec->create_sid = 0;
@@ -2664,9 +2668,9 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 			return rc;
 	} else {
 		/* Check for a default transition on this program. */
-		rc = security_transition_sid(old_crsec->sid,
-					     isec->sid, SECCLASS_PROCESS, NULL,
-					     &new_crsec->sid);
+		rc = security_transition_sid_state(state, oldsid, isec->sid,
+						   SECCLASS_PROCESS, NULL,
+						   &new_crsec->sid);
 		if (rc)
 			return rc;
 
@@ -2676,7 +2680,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 		 */
 		rc = check_nnp_nosuid(bprm, old_crsec, new_crsec);
 		if (rc)
-			new_crsec->sid = old_crsec->sid;
+			new_crsec->sid = oldsid;
 	}
 
 	ad.type = LSM_AUDIT_DATA_FILE;
@@ -5103,13 +5107,15 @@ static int selinux_conn_sid(u32 sk_sid, u32 skb_sid, u32 *conn_sid)
 static int socket_sockcreate_sid(const struct cred_security_struct *crsec,
 				 u16 secclass, u32 *socksid)
 {
+	struct selinux_state *state = crsec->state ?: &selinux_state;
+
 	if (crsec->sockcreate_sid > SECSID_NULL) {
 		*socksid = crsec->sockcreate_sid;
 		return 0;
 	}
 
-	return security_transition_sid(crsec->sid, crsec->sid,
-				       secclass, NULL, socksid);
+	return security_transition_sid_state(state, crsec->sid, crsec->sid,
+				     secclass, NULL, socksid);
 }
 
 static bool sock_skip_has_perm(u32 sid)
@@ -5699,6 +5705,7 @@ static int selinux_socket_getpeersec_stream(struct socket *sock,
 	char *scontext = NULL;
 	u32 scontext_len;
 	struct sk_security_struct *sksec = selinux_sock(sock->sk);
+	struct selinux_state *state = current_selinux_state();
 	u32 peer_sid = SECSID_NULL;
 
 	if (sksec->sclass == SECCLASS_UNIX_STREAM_SOCKET ||
@@ -5712,11 +5719,11 @@ static int selinux_socket_getpeersec_stream(struct socket *sock,
 	 * Peer secctx export is still ambiguous while child states interpret shared
 	 * object labels as raw SIDs without attached state identity.
 	 */
-	if (selinux_state_shares_object_model(current_selinux_state()))
+	if (selinux_state_shares_object_model(state))
 		return -EOPNOTSUPP;
 
-	err = security_sid_to_context(peer_sid, &scontext,
-				      &scontext_len);
+	err = security_sid_to_context_state(state, peer_sid, &scontext,
+					    &scontext_len);
 	if (err)
 		return err;
 	if (scontext_len > len) {
@@ -7185,17 +7192,26 @@ static int selinux_ismaclabel(const char *name)
 
 static int selinux_secid_to_secctx(u32 secid, struct lsm_context *cp)
 {
+	struct selinux_state *state = current_selinux_state();
 	u32 seclen;
 	int ret;
 
+	/*
+	 * The generic secid/secctx hooks only carry a raw SID with no attached
+	 * state identity, so keep them frozen for child states until the generic
+	 * API can distinguish guest-owned object labels from host-global ones.
+	 */
+	if (selinux_state_shares_object_model(state))
+		return -EOPNOTSUPP;
+
 	if (cp) {
 		cp->id = LSM_ID_SELINUX;
-		ret = security_sid_to_context(secid, &cp->context, &cp->len);
+		ret = security_sid_to_context_state(state, secid, &cp->context, &cp->len);
 		if (ret < 0)
 			return ret;
 		return cp->len;
 	}
-	ret = security_sid_to_context(secid, NULL, &seclen);
+	ret = security_sid_to_context_state(state, secid, NULL, &seclen);
 	if (ret < 0)
 		return ret;
 	return seclen;
@@ -7209,8 +7225,18 @@ static int selinux_lsmprop_to_secctx(struct lsm_prop *prop,
 
 static int selinux_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid)
 {
-	return security_context_to_sid(secdata, seclen,
-				       secid, GFP_KERNEL);
+	struct selinux_state *state = current_selinux_state();
+
+	/*
+	 * Generic secctx import has the same state-identity problem as generic
+	 * secid export, so keep it disabled for child states until the generic
+	 * interface can carry a state tag.
+	 */
+	if (selinux_state_shares_object_model(state))
+		return -EOPNOTSUPP;
+
+	return security_context_to_sid_state(state, secdata, seclen,
+					    secid, GFP_KERNEL);
 }
 
 static void selinux_release_secctx(struct lsm_context *cp)
@@ -7330,6 +7356,7 @@ static int selinux_key_getsecurity(struct key *key, char **_buffer)
 	struct key_security_struct *ksec = selinux_key(key);
 	char *context = NULL;
 	unsigned len;
+	struct selinux_state *state = current_selinux_state();
 	int rc;
 
 	/*
@@ -7337,11 +7364,11 @@ static int selinux_key_getsecurity(struct key *key, char **_buffer)
 	 * Freeze guest-visible key secctx export until object state identity is
 	 * carried through the key object model.
 	 */
-	if (selinux_state_shares_object_model(current_selinux_state()))
+	if (selinux_state_shares_object_model(state))
 		return -EOPNOTSUPP;
 
-	rc = security_sid_to_context(ksec->sid,
-				     &context, &len);
+	rc = security_sid_to_context_state(state, ksec->sid,
+					   &context, &len);
 	if (!rc)
 		rc = len;
 	*_buffer = context;
