@@ -77,6 +77,7 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 {
 	int rc;
 	struct xfrm_sec_ctx *ctx = NULL;
+	struct selinux_state *state = current_selinux_state();
 	u32 str_len;
 
 	if (ctxp == NULL || uctx == NULL ||
@@ -97,13 +98,25 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 	ctx->ctx_len = str_len + 1;
 	memcpy(ctx->ctx_str, &uctx[1], str_len);
 	ctx->ctx_str[str_len] = '\0';
-	rc = security_context_to_sid(ctx->ctx_str, str_len,
-				     &ctx->ctx_sid, gfp);
+
+	/*
+	 * XFRM contexts are still stored as raw SIDs without attached SELinux
+	 * state identity, so keep child-state import frozen until the XFRM object
+	 * model grows a guest-safe state tag.
+	 */
+	if (selinux_state_shares_object_model(state)) {
+		rc = -EOPNOTSUPP;
+		goto err;
+	}
+
+	rc = security_context_to_sid_state(state, ctx->ctx_str, str_len,
+					   &ctx->ctx_sid, gfp);
 	if (rc)
 		goto err;
 
-	rc = avc_has_perm(current_sid(), ctx->ctx_sid,
-			  SECCLASS_ASSOCIATION, ASSOCIATION__SETCONTEXT, NULL);
+	rc = avc_has_perm_state(state, current_sid(), ctx->ctx_sid,
+				SECCLASS_ASSOCIATION,
+				ASSOCIATION__SETCONTEXT, NULL);
 	if (rc)
 		goto err;
 
@@ -341,6 +354,7 @@ int selinux_xfrm_state_alloc_acquire(struct xfrm_state *x,
 	int rc;
 	struct xfrm_sec_ctx *ctx;
 	char *ctx_str = NULL;
+	struct selinux_state *state = current_selinux_state();
 	u32 str_len;
 
 	if (!polsec)
@@ -349,8 +363,14 @@ int selinux_xfrm_state_alloc_acquire(struct xfrm_state *x,
 	if (secid == 0)
 		return -EINVAL;
 
-	rc = security_sid_to_context(secid, &ctx_str,
-				     &str_len);
+	/*
+	 * Child states cannot safely export raw XFRM object secctx yet because the
+	 * XFRM object model still lacks attached SELinux state identity.
+	 */
+	if (selinux_state_shares_object_model(state))
+		return -EOPNOTSUPP;
+
+	rc = security_sid_to_context_state(state, secid, &ctx_str, &str_len);
 	if (rc)
 		return rc;
 
