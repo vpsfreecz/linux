@@ -103,11 +103,13 @@ struct superblock_security_struct {
 
 struct msg_security_struct {
 	u32 sid; /* SID of message */
+	struct selinux_state *state; /* SELinux state bound to this message */
 };
 
 struct ipc_security_struct {
 	u16 sclass; /* security class of this object */
 	u32 sid; /* SID of IPC resource */
+	struct selinux_state *state; /* SELinux state bound to this IPC object */
 };
 
 struct netif_security_struct {
