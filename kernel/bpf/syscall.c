@@ -1413,7 +1413,8 @@ static bool bpf_container_map_type_allowed(enum bpf_map_type map_type)
 }
 
 static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
-					    enum bpf_attach_type attach_type)
+					    enum bpf_attach_type attach_type,
+					    u32 attach_btf_id)
 {
 	switch (prog_type) {
 	case BPF_PROG_TYPE_KPROBE:
@@ -1434,9 +1435,23 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
 		return !attach_type || attach_type == BPF_CGROUP_SYSCTL;
 	case BPF_PROG_TYPE_LSM:
+		return attach_type == BPF_LSM_MAC &&
+		       bpf_lsm_is_file_open_hook(attach_btf_id);
 	default:
 		return false;
 	}
+}
+
+static bool
+bpf_container_prog_load_perfmon_cap_exempt(bool container_prog_allowed,
+					   enum bpf_prog_type prog_type,
+					   enum bpf_attach_type attach_type,
+					   u32 attach_btf_id)
+{
+	return container_prog_allowed &&
+	       prog_type == BPF_PROG_TYPE_LSM &&
+	       attach_type == BPF_LSM_MAC &&
+	       bpf_lsm_is_file_open_hook(attach_btf_id);
 }
 
 static bool
@@ -3076,7 +3091,8 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	if (bpf_token_is_container(token)) {
 		container_prog_allowed =
 			bpf_container_prog_type_allowed(attr->prog_type,
-							attr->expected_attach_type);
+							attr->expected_attach_type,
+							attr->attach_btf_id);
 		if (!container_prog_allowed) {
 			err = -EPERM;
 			goto put_token;
@@ -3116,7 +3132,12 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 
 	if (is_net_admin_prog_type(type) && !bpf_token_capable(token, CAP_NET_ADMIN))
 		goto put_token;
-	if (is_perfmon_prog_type(type) && !bpf_token_capable(token, CAP_PERFMON))
+	if (is_perfmon_prog_type(type) &&
+	    !bpf_container_prog_load_perfmon_cap_exempt(container_prog_allowed,
+							type,
+							attr->expected_attach_type,
+							attr->attach_btf_id) &&
+	    !bpf_token_capable(token, CAP_PERFMON))
 		goto put_token;
 
 	/* attach_prog_fd/attach_btf_obj_fd can specify fd of either bpf_prog
@@ -3788,6 +3809,11 @@ static int bpf_tracing_prog_attach(struct bpf_prog *prog,
 	case BPF_PROG_TYPE_LSM:
 		if (prog->expected_attach_type != BPF_LSM_MAC) {
 			err = -EINVAL;
+			goto out_put_prog;
+		}
+		if (bpf_token_is_container(prog->aux->token) &&
+		    !bpf_lsm_is_file_open_hook(prog->aux->attach_btf_id)) {
+			err = -EPERM;
 			goto out_put_prog;
 		}
 		break;

@@ -1,4 +1,5 @@
 #include <linux/bpf.h>
+#include <linux/bpf_lsm.h>
 #include <linux/vmalloc.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -401,7 +402,11 @@ bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
 	if (bpf_token_allow_tracing_prog_helper(prog, func_id))
 		return true;
 
-	return false;
+	return (func_id == BPF_FUNC_probe_read ||
+		func_id == BPF_FUNC_probe_read_kernel) &&
+	       prog->type == BPF_PROG_TYPE_LSM &&
+	       prog->expected_attach_type == BPF_LSM_MAC &&
+	       bpf_lsm_is_file_open_hook(prog->aux->attach_btf_id);
 }
 
 bool bpf_token_capable(const struct bpf_token *token, int cap)
