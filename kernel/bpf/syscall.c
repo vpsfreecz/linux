@@ -1430,7 +1430,8 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 	case BPF_PROG_TYPE_PERF_EVENT:
 		return true;
 	case BPF_PROG_TYPE_CGROUP_SKB:
-		return attach_type == BPF_CGROUP_INET_INGRESS ||
+		return !attach_type ||
+		       attach_type == BPF_CGROUP_INET_INGRESS ||
 		       attach_type == BPF_CGROUP_INET_EGRESS;
 	case BPF_PROG_TYPE_CGROUP_SOCK:
 		return attach_type == BPF_CGROUP_INET_SOCK_CREATE;
@@ -1438,7 +1439,7 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 		return attach_type == BPF_CGROUP_INET4_BIND ||
 		       attach_type == BPF_CGROUP_INET6_BIND;
 	case BPF_PROG_TYPE_CGROUP_DEVICE:
-		return attach_type == BPF_CGROUP_DEVICE;
+		return !attach_type || attach_type == BPF_CGROUP_DEVICE;
 	case BPF_PROG_TYPE_LSM:
 		return attach_type == BPF_LSM_CGROUP;
 	default:
