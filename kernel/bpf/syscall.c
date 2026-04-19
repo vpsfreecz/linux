@@ -1395,6 +1395,7 @@ static bool bpf_container_map_type_allowed(enum bpf_map_type map_type)
 	case BPF_MAP_TYPE_LRU_HASH:
 	case BPF_MAP_TYPE_LRU_PERCPU_HASH:
 	case BPF_MAP_TYPE_LPM_TRIE:
+	case BPF_MAP_TYPE_HASH_OF_MAPS:
 	case BPF_MAP_TYPE_PROG_ARRAY:
 	case BPF_MAP_TYPE_PERF_EVENT_ARRAY:
 	case BPF_MAP_TYPE_RINGBUF:
@@ -1409,6 +1410,7 @@ static bool bpf_container_cgroup_attach_type_allowed(enum bpf_attach_type attach
 	switch (attach_type) {
 	case BPF_CGROUP_INET_INGRESS:
 	case BPF_CGROUP_INET_EGRESS:
+	case BPF_CGROUP_INET_SOCK_CREATE:
 	case BPF_CGROUP_INET4_BIND:
 	case BPF_CGROUP_INET6_BIND:
 	case BPF_CGROUP_DEVICE:
@@ -1430,6 +1432,8 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 	case BPF_PROG_TYPE_CGROUP_SKB:
 		return attach_type == BPF_CGROUP_INET_INGRESS ||
 		       attach_type == BPF_CGROUP_INET_EGRESS;
+	case BPF_PROG_TYPE_CGROUP_SOCK:
+		return attach_type == BPF_CGROUP_INET_SOCK_CREATE;
 	case BPF_PROG_TYPE_CGROUP_SOCK_ADDR:
 		return attach_type == BPF_CGROUP_INET4_BIND ||
 		       attach_type == BPF_CGROUP_INET6_BIND;
