@@ -59,7 +59,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	unsigned long pages[NR_LRU_LISTS];
 	unsigned long sreclaimable, sunreclaim;
 	struct mem_cgroup *memcg;
-	unsigned long memusage, totalram, swapmax, swapusage, swapcache = 0;
+	unsigned long memusage, totalram, swapmax, swapusage, proactive_swap;
+	unsigned long normal_swap_usage = 0, swapcache = 0;
 	int lru;
 
 	si_meminfo(&i);
@@ -96,6 +97,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		i.bufferram = 0;
 		i.sharedram = memcg_page_state(memcg, NR_SHMEM);
 
+		proactive_swap = mem_cgroup_proactive_swap_usage(memcg);
+
 		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) {
 			swapmax = READ_ONCE(memcg->memsw.max);
 			swapusage = page_counter_read(&memcg->memsw);
@@ -103,12 +106,14 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 			if (!swapmax || swapmax == totalram) {
 				i.totalswap = 0;
 				i.freeswap = 0;
-			} else if (swapmax == PAGE_COUNTER_MAX) {
-				i.totalswap = i.totalswap;
-				i.freeswap = i.totalswap - (swapusage - memusage);
 			} else {
-				i.totalswap = swapmax - totalram;
-				i.freeswap = i.totalswap - (swapusage - memusage);
+				if (swapmax != PAGE_COUNTER_MAX)
+					i.totalswap = swapmax - totalram;
+
+				normal_swap_usage = swapusage > memusage + proactive_swap ?
+					(swapusage - memusage - proactive_swap) : 0;
+				i.freeswap = i.totalswap > normal_swap_usage ?
+					(i.totalswap - normal_swap_usage) : 0;
 			}
 		} else {
 			swapmax = READ_ONCE(memcg->swap.max);
@@ -117,13 +122,18 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 			if (!swapmax) {
 				i.totalswap = 0;
 				i.freeswap = 0;
-			} else if (swapmax == PAGE_COUNTER_MAX) {
-				i.freeswap = i.totalswap - swapusage;
 			} else {
-				i.totalswap = swapmax;
-				i.freeswap = i.totalswap - swapusage;
+				if (swapmax != PAGE_COUNTER_MAX)
+					i.totalswap = swapmax;
+
+				normal_swap_usage = swapusage > proactive_swap ?
+					(swapusage - proactive_swap) : 0;
+				i.freeswap = i.totalswap > normal_swap_usage ?
+					(i.totalswap - normal_swap_usage) : 0;
 			}
 		}
+
+		i.totalswap += proactive_swap;
 
 		available = i.freeram + sreclaimable + cached_inactive;
 		committed = 0;
