@@ -3665,6 +3665,25 @@ struct mem_cgroup *mem_cgroup_from_id(unsigned short id)
 	return xa_load(&mem_cgroup_ids, id);
 }
 
+void mem_cgroup_proactive_swap_charge(struct mem_cgroup *memcg,
+				      unsigned int nr_pages)
+{
+	for (; !mem_cgroup_is_root(memcg); memcg = parent_mem_cgroup(memcg))
+		atomic_long_add(nr_pages, &memcg->proactive_swap);
+}
+
+void mem_cgroup_proactive_swap_uncharge(struct mem_cgroup *memcg,
+					unsigned int nr_pages)
+{
+	for (; !mem_cgroup_is_root(memcg); memcg = parent_mem_cgroup(memcg))
+		atomic_long_sub(nr_pages, &memcg->proactive_swap);
+}
+
+unsigned long mem_cgroup_proactive_swap_usage(struct mem_cgroup *memcg)
+{
+	return atomic_long_read(&memcg->proactive_swap);
+}
+
 #ifdef CONFIG_SHRINKER_DEBUG
 struct mem_cgroup *mem_cgroup_get_from_ino(unsigned long ino)
 {
@@ -5201,11 +5220,13 @@ int __init mem_cgroup_init(void)
  *
  * Returns 0 on success, -ENOMEM on failure.
  */
-int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry)
+int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry,
+			      bool system_proactive_swap)
 {
 	unsigned int nr_pages = folio_nr_pages(folio);
 	struct page_counter *counter;
 	struct mem_cgroup *memcg;
+	bool over_swap_limit = false;
 
 	if (do_memsw_account())
 		return 0;
@@ -5223,12 +5244,26 @@ int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry)
 
 	memcg = mem_cgroup_id_get_online(memcg);
 
-	if (!mem_cgroup_is_root(memcg) &&
-	    !page_counter_try_charge(&memcg->swap, nr_pages, &counter)) {
-		memcg_memory_event(memcg, MEMCG_SWAP_MAX);
-		memcg_memory_event(memcg, MEMCG_SWAP_FAIL);
-		mem_cgroup_id_put(memcg);
-		return -ENOMEM;
+	if (!mem_cgroup_is_root(memcg)) {
+		if (system_proactive_swap) {
+			for (counter = &memcg->swap; counter; counter = counter->parent) {
+				if (page_counter_read(counter) + nr_pages >
+				    READ_ONCE(counter->max)) {
+					over_swap_limit = true;
+					break;
+				}
+			}
+			page_counter_charge(&memcg->swap, nr_pages);
+			mem_cgroup_proactive_swap_charge(memcg, nr_pages);
+			if (over_swap_limit)
+				memcg_memory_event(memcg, MEMCG_SWAP_PROACTIVE);
+		} else if (!page_counter_try_charge(&memcg->swap, nr_pages,
+						&counter)) {
+			memcg_memory_event(memcg, MEMCG_SWAP_MAX);
+			memcg_memory_event(memcg, MEMCG_SWAP_FAIL);
+			mem_cgroup_id_put(memcg);
+			return -ENOMEM;
+		}
 	}
 
 	/* Get references for the tail pages, too */
@@ -5236,7 +5271,8 @@ int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry)
 		mem_cgroup_id_get_many(memcg, nr_pages - 1);
 	mod_memcg_state(memcg, MEMCG_SWAP, nr_pages);
 
-	swap_cgroup_record(folio, mem_cgroup_id(memcg), entry);
+	swap_cgroup_record(folio, mem_cgroup_id(memcg), system_proactive_swap,
+			   entry);
 
 	return 0;
 }
@@ -5250,7 +5286,9 @@ void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
 {
 	struct mem_cgroup *memcg;
 	unsigned short id;
+	bool system_proactive_swap;
 
+	system_proactive_swap = lookup_swap_cgroup_proactive(entry);
 	id = swap_cgroup_clear(entry, nr_pages);
 	rcu_read_lock();
 	memcg = mem_cgroup_from_id(id);
@@ -5258,8 +5296,11 @@ void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
 		if (!mem_cgroup_is_root(memcg)) {
 			if (do_memsw_account())
 				page_counter_uncharge(&memcg->memsw, nr_pages);
-			else
+			else {
 				page_counter_uncharge(&memcg->swap, nr_pages);
+				if (system_proactive_swap)
+					mem_cgroup_proactive_swap_uncharge(memcg, nr_pages);
+			}
 		}
 		mod_memcg_state(memcg, MEMCG_SWAP, -nr_pages);
 		mem_cgroup_id_put_many(memcg, nr_pages);
@@ -5267,11 +5308,13 @@ void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
 	rcu_read_unlock();
 }
 
-long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg)
+long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg,
+				 bool system_proactive_swap)
 {
 	long nr_swap_pages = get_nr_swap_pages();
 
-	if (mem_cgroup_disabled() || do_memsw_account())
+	if (mem_cgroup_disabled() || do_memsw_account() ||
+	    system_proactive_swap)
 		return nr_swap_pages;
 	for (; !mem_cgroup_is_root(memcg); memcg = parent_mem_cgroup(memcg))
 		nr_swap_pages = min_t(long, nr_swap_pages,
@@ -5280,7 +5323,7 @@ long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg)
 	return nr_swap_pages;
 }
 
-bool mem_cgroup_swap_full(struct folio *folio)
+bool mem_cgroup_swap_full(struct folio *folio, bool system_proactive_swap)
 {
 	struct mem_cgroup *memcg;
 
@@ -5288,7 +5331,7 @@ bool mem_cgroup_swap_full(struct folio *folio)
 
 	if (vm_swap_full())
 		return true;
-	if (do_memsw_account())
+	if (do_memsw_account() || system_proactive_swap)
 		return false;
 
 	memcg = folio_memcg(folio);
@@ -5399,6 +5442,8 @@ static int swap_events_show(struct seq_file *m, void *v)
 		   atomic_long_read(&memcg->memory_events[MEMCG_SWAP_MAX]));
 	seq_printf(m, "fail %lu\n",
 		   atomic_long_read(&memcg->memory_events[MEMCG_SWAP_FAIL]));
+	seq_printf(m, "proactive %lu\n",
+		   atomic_long_read(&memcg->memory_events[MEMCG_SWAP_PROACTIVE]));
 
 	return 0;
 }

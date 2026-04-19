@@ -200,7 +200,8 @@ put_folio:
 	}
 	if (install_young_filter)
 		damos_destroy_filter(filter);
-	applied = reclaim_pages(&folio_list);
+	applied = reclaim_pages(&folio_list,
+			       MEMCG_RECLAIM_SYSTEM_PROACTIVE_SWAP);
 	cond_resched();
 	s->last_applied = folio;
 	return damon_pa_core_addr(applied * PAGE_SIZE, addr_unit);

@@ -54,6 +54,7 @@ enum memcg_memory_event {
 	MEMCG_SWAP_HIGH,
 	MEMCG_SWAP_MAX,
 	MEMCG_SWAP_FAIL,
+	MEMCG_SWAP_PROACTIVE,
 	MEMCG_NR_MEMORY_EVENTS,
 };
 
@@ -201,6 +202,7 @@ struct mem_cgroup {
 		struct page_counter swap;	/* v2 only */
 		struct page_counter memsw;	/* v1 only */
 	};
+	atomic_long_t proactive_swap;
 
 	/* registered local peak watchers */
 	struct list_head memory_peaks;
@@ -827,6 +829,11 @@ static inline unsigned short mem_cgroup_id(struct mem_cgroup *memcg)
 
 	return memcg->id.id;
 }
+void mem_cgroup_proactive_swap_charge(struct mem_cgroup *memcg,
+				      unsigned int nr_pages);
+void mem_cgroup_proactive_swap_uncharge(struct mem_cgroup *memcg,
+					unsigned int nr_pages);
+unsigned long mem_cgroup_proactive_swap_usage(struct mem_cgroup *memcg);
 struct mem_cgroup *mem_cgroup_from_id(unsigned short id);
 
 #ifdef CONFIG_SHRINKER_DEBUG
@@ -1012,7 +1019,8 @@ static inline void __memcg_memory_event(struct mem_cgroup *memcg,
 					bool allow_spinning)
 {
 	bool swap_event = event == MEMCG_SWAP_HIGH || event == MEMCG_SWAP_MAX ||
-			  event == MEMCG_SWAP_FAIL;
+			  event == MEMCG_SWAP_FAIL ||
+			  event == MEMCG_SWAP_PROACTIVE;
 
 	/* For now only MEMCG_MAX can happen with !allow_spinning context. */
 	VM_WARN_ON_ONCE(!allow_spinning && event != MEMCG_MAX);
@@ -1321,6 +1329,21 @@ static inline void mem_cgroup_scan_tasks(struct mem_cgroup *memcg,
 }
 
 static inline unsigned short mem_cgroup_id(struct mem_cgroup *memcg)
+{
+	return 0;
+}
+
+static inline void mem_cgroup_proactive_swap_charge(struct mem_cgroup *memcg,
+					    unsigned int nr_pages)
+{
+}
+
+static inline void mem_cgroup_proactive_swap_uncharge(struct mem_cgroup *memcg,
+					      unsigned int nr_pages)
+{
+}
+
+static inline unsigned long mem_cgroup_proactive_swap_usage(struct mem_cgroup *memcg)
 {
 	return 0;
 }

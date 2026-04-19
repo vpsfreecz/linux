@@ -260,7 +260,7 @@ again:
 
 	need_reclaim = ((flags & TTRS_ANYWAY) ||
 			((flags & TTRS_UNMAPPED) && !folio_mapped(folio)) ||
-			((flags & TTRS_FULL) && mem_cgroup_swap_full(folio)));
+			((flags & TTRS_FULL) && mem_cgroup_swap_full(folio, false)));
 	if (!need_reclaim || !folio_swapcache_freeable(folio))
 		goto out_unlock;
 
@@ -1407,7 +1407,8 @@ start_over:
  * Context: Caller needs to hold the folio lock.
  * Return: Whether the folio was added to the swap cache.
  */
-int folio_alloc_swap(struct folio *folio, gfp_t gfp)
+int folio_alloc_swap(struct folio *folio, gfp_t gfp,
+		     bool system_proactive_swap)
 {
 	unsigned int order = folio_order(folio);
 	unsigned int size = 1 << order;
@@ -1440,7 +1441,8 @@ int folio_alloc_swap(struct folio *folio, gfp_t gfp)
 	local_unlock(&percpu_swap_cluster.lock);
 
 	/* Need to call this even if allocation failed, for MEMCG_SWAP_FAIL. */
-	if (mem_cgroup_try_charge_swap(folio, entry))
+	if (mem_cgroup_try_charge_swap(folio, entry,
+				   system_proactive_swap))
 		goto out_free;
 
 	if (!entry.val)
@@ -3103,10 +3105,12 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 	struct mem_cgroup *memcg = swap->private;
 	unsigned long totalram = READ_ONCE(memcg->memory.max);
 	unsigned long memusage = page_counter_read(&memcg->memory);
-	unsigned long swapmax, swapusage, totalswap, usedswap;
+	unsigned long proactive_usedswap;
+	unsigned long swapmax, swapusage, totalswap, usedswap, normal_usedswap;
 	struct sysinfo i;
 
 	si_swapinfo(&i);
+	proactive_usedswap = mem_cgroup_proactive_swap_usage(memcg) * PAGE_SIZE;
 
 	seq_puts(swap, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
 
@@ -3114,34 +3118,55 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 		swapmax = READ_ONCE(memcg->memsw.max);
 		swapusage = page_counter_read(&memcg->memsw);
 
-		if (!swapmax || swapmax == totalram)
-			return 0;
-
-		if (swapmax == PAGE_COUNTER_MAX)
-			totalswap = i.totalswap * PAGE_SIZE;
-		else
-			totalswap = (swapmax - totalram) * PAGE_SIZE;
-		usedswap = (swapusage - memusage) * PAGE_SIZE;
+		if (!swapmax || swapmax == totalram) {
+			totalswap = 0;
+			usedswap = 0;
+		} else {
+			if (swapmax == PAGE_COUNTER_MAX)
+				totalswap = i.totalswap * PAGE_SIZE;
+			else
+				totalswap = (swapmax - totalram) * PAGE_SIZE;
+			usedswap = (swapusage - memusage) * PAGE_SIZE;
+		}
 	} else {
 		swapmax = READ_ONCE(memcg->swap.max);
 		swapusage = page_counter_read(&memcg->swap);
 
-		if (!swapmax)
-			return 0;
-
-		if (swapmax == PAGE_COUNTER_MAX)
-			totalswap = i.totalswap * PAGE_SIZE;
-		else
-			totalswap = swapmax * PAGE_SIZE;
-		usedswap = swapusage * PAGE_SIZE;
+		if (!swapmax) {
+			totalswap = 0;
+			usedswap = 0;
+		} else {
+			if (swapmax == PAGE_COUNTER_MAX)
+				totalswap = i.totalswap * PAGE_SIZE;
+			else
+				totalswap = swapmax * PAGE_SIZE;
+			usedswap = swapusage * PAGE_SIZE;
+		}
 	}
 
-	seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+	normal_usedswap = usedswap > proactive_usedswap ?
+		(usedswap - proactive_usedswap) : 0;
+	if (normal_usedswap > totalswap)
+		normal_usedswap = totalswap;
+
+	if (!totalswap && !proactive_usedswap)
+		return 0;
+
+	if (totalswap)
+		seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
 		   "virtual",
 		   "virtual\t",
 		   totalswap, totalswap < 10000000 ? "\t" : "",
-		   usedswap, usedswap < 10000000 ? "\t" : "",
+		   normal_usedswap, normal_usedswap < 10000000 ? "\t" : "",
 		   -1);
+
+	if (proactive_usedswap)
+		seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
+		   "virtual-system",
+		   "virtual\t",
+		   proactive_usedswap, proactive_usedswap < 10000000 ? "\t" : "",
+		   proactive_usedswap, proactive_usedswap < 10000000 ? "\t" : "",
+		   -2);
 	return 0;
 }
 

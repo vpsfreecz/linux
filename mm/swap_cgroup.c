@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/swap_cgroup.h>
+#include <linux/bitmap.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 
@@ -17,6 +18,7 @@ struct swap_cgroup {
 
 struct swap_cgroup_ctrl {
 	struct swap_cgroup *map;
+	unsigned long *proactive_map;
 };
 
 static struct swap_cgroup_ctrl swap_cgroup_ctrl[MAX_SWAPFILES];
@@ -59,22 +61,31 @@ static unsigned short __swap_cgroup_id_xchg(struct swap_cgroup *map,
  *
  * @folio: the folio that the swap entry belongs to
  * @id: mem_cgroup ID to be recorded
+ * @system_proactive_swap: swap imposed by system-managed proactive reclaim
  * @ent: the first swap entry to be recorded
  */
 void swap_cgroup_record(struct folio *folio, unsigned short id,
-			swp_entry_t ent)
+			bool system_proactive_swap, swp_entry_t ent)
 {
 	unsigned int nr_ents = folio_nr_pages(folio);
 	struct swap_cgroup *map;
+	unsigned long *proactive_map;
+	struct swap_cgroup_ctrl *ctrl;
 	pgoff_t offset, end;
 	unsigned short old;
 
 	offset = swp_offset(ent);
 	end = offset + nr_ents;
-	map = swap_cgroup_ctrl[swp_type(ent)].map;
+	ctrl = &swap_cgroup_ctrl[swp_type(ent)];
+	map = ctrl->map;
+	proactive_map = ctrl->proactive_map;
 
 	do {
 		old = __swap_cgroup_id_xchg(map, offset, id);
+		if (system_proactive_swap)
+			__set_bit(offset, proactive_map);
+		else
+			__clear_bit(offset, proactive_map);
 		VM_BUG_ON(old);
 	} while (++offset != end);
 }
@@ -94,14 +105,17 @@ unsigned short swap_cgroup_clear(swp_entry_t ent, unsigned int nr_ents)
 {
 	pgoff_t offset, end;
 	struct swap_cgroup *map;
+	struct swap_cgroup_ctrl *ctrl;
 	unsigned short old, iter = 0;
 
 	offset = swp_offset(ent);
 	end = offset + nr_ents;
-	map = swap_cgroup_ctrl[swp_type(ent)].map;
+	ctrl = &swap_cgroup_ctrl[swp_type(ent)];
+	map = ctrl->map;
 
 	do {
 		old = __swap_cgroup_id_xchg(map, offset, 0);
+		__clear_bit(offset, ctrl->proactive_map);
 		if (!iter)
 			iter = old;
 		VM_BUG_ON(iter != old);
@@ -127,9 +141,23 @@ unsigned short lookup_swap_cgroup_id(swp_entry_t ent)
 	return __swap_cgroup_id_lookup(ctrl->map, swp_offset(ent));
 }
 
+bool lookup_swap_cgroup_proactive(swp_entry_t ent)
+{
+	struct swap_cgroup_ctrl *ctrl;
+
+	if (mem_cgroup_disabled())
+		return false;
+
+	ctrl = &swap_cgroup_ctrl[swp_type(ent)];
+	if (!ctrl->proactive_map)
+		return false;
+	return test_bit(swp_offset(ent), ctrl->proactive_map);
+}
+
 int swap_cgroup_swapon(int type, unsigned long max_pages)
 {
 	struct swap_cgroup *map;
+	unsigned long *proactive_map;
 	struct swap_cgroup_ctrl *ctrl;
 
 	if (mem_cgroup_disabled())
@@ -142,9 +170,16 @@ int swap_cgroup_swapon(int type, unsigned long max_pages)
 	if (!map)
 		goto nomem;
 
+	proactive_map = bitmap_zalloc(max_pages, GFP_KERNEL);
+	if (!proactive_map) {
+		vfree(map);
+		goto nomem;
+	}
+
 	ctrl = &swap_cgroup_ctrl[type];
 	mutex_lock(&swap_cgroup_mutex);
 	ctrl->map = map;
+	ctrl->proactive_map = proactive_map;
 	mutex_unlock(&swap_cgroup_mutex);
 
 	return 0;
@@ -157,6 +192,7 @@ nomem:
 void swap_cgroup_swapoff(int type)
 {
 	struct swap_cgroup *map;
+	unsigned long *proactive_map;
 	struct swap_cgroup_ctrl *ctrl;
 
 	if (mem_cgroup_disabled())
@@ -165,8 +201,11 @@ void swap_cgroup_swapoff(int type)
 	mutex_lock(&swap_cgroup_mutex);
 	ctrl = &swap_cgroup_ctrl[type];
 	map = ctrl->map;
+	proactive_map = ctrl->proactive_map;
 	ctrl->map = NULL;
+	ctrl->proactive_map = NULL;
 	mutex_unlock(&swap_cgroup_mutex);
 
 	vfree(map);
+	bitmap_free(proactive_map);
 }

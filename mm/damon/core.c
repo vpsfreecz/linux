@@ -2044,6 +2044,16 @@ static __kernel_ulong_t damos_get_node_mem_bp(
 #endif
 
 
+static unsigned long damos_get_free_mem_rate(void)
+{
+	return global_zone_page_state(NR_FREE_PAGES) * 1000 / totalram_pages();
+}
+
+static unsigned long damos_get_free_mem_bytes(void)
+{
+	return global_zone_page_state(NR_FREE_PAGES) * PAGE_SIZE;
+}
+
 static void damos_set_quota_goal_current_value(struct damos_quota_goal *goal)
 {
 	u64 now_psi_total;
@@ -2060,6 +2070,12 @@ static void damos_set_quota_goal_current_value(struct damos_quota_goal *goal)
 	case DAMOS_QUOTA_NODE_MEM_USED_BP:
 	case DAMOS_QUOTA_NODE_MEM_FREE_BP:
 		goal->current_value = damos_get_node_mem_bp(goal);
+		break;
+	case DAMOS_QUOTA_FREE_MEM_RATE:
+		goal->current_value = damos_get_free_mem_rate();
+		break;
+	case DAMOS_QUOTA_FREE_MEM_BYTES:
+		goal->current_value = damos_get_free_mem_bytes();
 		break;
 	default:
 		break;
@@ -2436,8 +2452,7 @@ static int damos_get_wmark_metric_value(enum damos_wmark_metric metric,
 {
 	switch (metric) {
 	case DAMOS_WMARK_FREE_MEM_RATE:
-		*metric_value = global_zone_page_state(NR_FREE_PAGES) * 1000 /
-		       totalram_pages();
+		*metric_value = damos_get_free_mem_rate();
 		return 0;
 	default:
 		break;
