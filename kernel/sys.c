@@ -2918,7 +2918,8 @@ static int do_sysinfo(struct sysinfo *info)
 	if (memcg) {
 		unsigned long memusage = page_counter_read(&memcg->memory);
 		unsigned long totalram = READ_ONCE(memcg->memory.max);
-		unsigned long swapmax, swapusage;
+		unsigned long swapmax, swapusage, proactive_swap;
+		unsigned long normal_swap_usage = 0;
 
 		info->totalram = totalram;
 		info->totalhigh = totalram;
@@ -2926,6 +2927,7 @@ static int do_sysinfo(struct sysinfo *info)
 		info->freehigh = totalram - memusage;
 		info->bufferram = memcg_page_state(memcg, NR_FILE_PAGES);
 		info->sharedram = memcg_page_state(memcg, NR_SHMEM);
+		proactive_swap = mem_cgroup_proactive_swap_usage(memcg);
 
 		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) {
 			swapmax = READ_ONCE(memcg->memsw.max);
@@ -2934,11 +2936,15 @@ static int do_sysinfo(struct sysinfo *info)
 			if (!swapmax || swapmax == totalram) {
 				info->totalswap = 0;
 				info->freeswap = 0;
-			} else if (swapmax == PAGE_COUNTER_MAX) {
-				info->freeswap = info->totalswap - (swapusage - memusage);
 			} else {
-				info->totalswap = swapmax - totalram;
-				info->freeswap = info->totalswap - (swapusage - memusage);
+				if (swapmax != PAGE_COUNTER_MAX)
+					info->totalswap = swapmax - totalram;
+
+				normal_swap_usage =
+					swapusage > memusage + proactive_swap ?
+					(swapusage - memusage - proactive_swap) : 0;
+				info->freeswap = info->totalswap > normal_swap_usage ?
+					(info->totalswap - normal_swap_usage) : 0;
 			}
 		} else {
 			swapmax = READ_ONCE(memcg->swap.max);
@@ -2947,14 +2953,18 @@ static int do_sysinfo(struct sysinfo *info)
 			if (!swapmax) {
 				info->totalswap = 0;
 				info->freeswap = 0;
-			} else if (swapmax == PAGE_COUNTER_MAX) {
-				info->freeswap = info->totalswap - swapusage;
 			} else {
-				info->totalswap = swapmax;
-				info->freeswap = info->totalswap - swapusage;
+				if (swapmax != PAGE_COUNTER_MAX)
+					info->totalswap = swapmax;
+
+				normal_swap_usage = swapusage > proactive_swap ?
+					(swapusage - proactive_swap) : 0;
+				info->freeswap = info->totalswap > normal_swap_usage ?
+					(info->totalswap - normal_swap_usage) : 0;
 			}
 		}
 
+		info->totalswap += proactive_swap;
 		mem_cgroup_put(memcg);
 	}
 
