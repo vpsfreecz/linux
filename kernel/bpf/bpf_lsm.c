@@ -85,6 +85,15 @@ BTF_ID(func, bpf_lsm_socket_socketpair)
 #endif
 BTF_SET_END(bpf_lsm_unlocked_sockopt_hooks)
 
+BTF_SET_START(bpf_lsm_file_open_hooks)
+BTF_ID(func, bpf_lsm_file_open)
+BTF_SET_END(bpf_lsm_file_open_hooks)
+
+bool bpf_lsm_is_file_open_hook(u32 btf_id)
+{
+	return btf_id_set_contains(&bpf_lsm_file_open_hooks, btf_id);
+}
+
 #ifdef CONFIG_CGROUP_BPF
 void bpf_lsm_find_cgroup_shim(const struct bpf_prog *prog,
 			     bpf_func_t *bpf_func)
