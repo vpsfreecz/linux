@@ -325,6 +325,7 @@ struct bpf_call_arg_meta {
 	bool map_key_range_known;
 	u64 map_key_min;
 	u64 map_key_max;
+	bool container_probe_read_checked;
 	bool container_spill_ptr;
 	struct btf *container_spill_btf;
 	u32 container_spill_btf_id;
@@ -7287,6 +7288,8 @@ BTF_ID_LIST_SINGLE(container_fs_struct_id, struct, fs_struct)
 BTF_ID_LIST_SINGLE(container_signal_struct_id, struct, signal_struct)
 BTF_ID_LIST_SINGLE(container_cred_id, struct, cred)
 BTF_ID_LIST_SINGLE(container_file_id, struct, file)
+BTF_ID_LIST_SINGLE(container_inode_id, struct, inode)
+BTF_ID_LIST_SINGLE(container_super_block_id, struct, super_block)
 BTF_ID_LIST_SINGLE(container_linux_binprm_id, struct, linux_binprm)
 
 static bool container_btf_id_matches(const struct btf *btf, u32 btf_id, const u32 *expected_id)
@@ -7298,6 +7301,66 @@ static bool container_btf_scalar_access_allowed(const struct bpf_reg_state *reg)
 {
 	return is_trusted_reg(reg) && btf_is_kernel(reg->btf) &&
 	       btf_id_set_contains(&container_tracing_scalar_types, reg->btf_id);
+}
+
+static bool
+container_prog_is_systemd_restrict_fs_lsm(const struct bpf_prog *prog)
+{
+	return prog->type == BPF_PROG_TYPE_LSM &&
+	       prog->expected_attach_type == BPF_LSM_MAC &&
+	       bpf_lsm_is_file_open_hook(prog->aux->attach_btf_id);
+}
+
+static bool
+container_restrict_fs_btf_scalar_access_allowed(const struct bpf_verifier_env *env,
+						const struct bpf_reg_state *reg,
+						const char *field_name,
+						int off, int size)
+{
+	if (!container_prog_is_systemd_restrict_fs_lsm(env->prog))
+		return false;
+	if (!btf_is_kernel(reg->btf))
+		return false;
+	if (!container_btf_id_matches(reg->btf, reg->btf_id,
+				      &container_super_block_id[0]))
+		return false;
+	if (field_name && strcmp(field_name, "s_magic"))
+		return false;
+
+	return off == offsetof(struct super_block, s_magic) &&
+	       size == sizeof_field(struct super_block, s_magic);
+}
+
+static bool
+container_restrict_fs_btf_fixed_ptr_alu_allowed(const struct bpf_verifier_env *env,
+						const struct bpf_reg_state *ptr_reg,
+						u8 opcode, s64 off)
+{
+	s64 new_off;
+
+	if (opcode != BPF_ADD)
+		return false;
+	if (!container_prog_is_systemd_restrict_fs_lsm(env->prog))
+		return false;
+	if (base_type(ptr_reg->type) != PTR_TO_BTF_ID ||
+	    !is_trusted_reg(ptr_reg) || !btf_is_kernel(ptr_reg->btf))
+		return false;
+	if (!tnum_is_const(ptr_reg->var_off) || ptr_reg->var_off.value)
+		return false;
+	if (check_add_overflow(ptr_reg->off, off, &new_off))
+		return false;
+
+	if (container_btf_id_matches(ptr_reg->btf, ptr_reg->btf_id,
+				     &container_file_id[0]))
+		return new_off == offsetof(struct file, f_inode);
+	if (container_btf_id_matches(ptr_reg->btf, ptr_reg->btf_id,
+				     &container_inode_id[0]))
+		return new_off == offsetof(struct inode, i_sb);
+	if (container_btf_id_matches(ptr_reg->btf, ptr_reg->btf_id,
+				     &container_super_block_id[0]))
+		return new_off == offsetof(struct super_block, s_magic);
+
+	return false;
 }
 
 static bool container_btf_ptr_access_allowed(const struct bpf_reg_state *reg,
@@ -7336,13 +7399,54 @@ static bool container_btf_ptr_access_allowed(const struct bpf_reg_state *reg,
 	return false;
 }
 
+static bool
+container_restrict_fs_btf_ptr_access_allowed(const struct bpf_verifier_env *env,
+					     const struct bpf_reg_state *reg,
+					     const char *field_name, u32 btf_id,
+					     enum bpf_type_flag *flag)
+{
+	enum bpf_type_flag container_flag = *flag & PTR_MAYBE_NULL;
+
+	if (!container_prog_is_systemd_restrict_fs_lsm(env->prog))
+		return false;
+	if (!field_name || !btf_is_kernel(reg->btf))
+		return false;
+
+	if (is_trusted_reg(reg))
+		container_flag |= PTR_TRUSTED;
+	else
+		container_flag |= PTR_UNTRUSTED;
+
+	if (container_btf_id_matches(reg->btf, reg->btf_id,
+				     &container_file_id[0])) {
+		if (!strcmp(field_name, "f_inode") &&
+		    btf_id == container_inode_id[0]) {
+			*flag = container_flag;
+			return true;
+		}
+	} else if (container_btf_id_matches(reg->btf, reg->btf_id,
+					    &container_inode_id[0])) {
+		if (!strcmp(field_name, "i_sb") &&
+		    btf_id == container_super_block_id[0]) {
+			*flag = container_flag;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static int check_container_btf_access(struct bpf_verifier_env *env,
 				      struct bpf_reg_state *reg,
 				      const char *field_name, u32 btf_id,
-				      enum bpf_type_flag *flag, int ret)
+				      enum bpf_type_flag *flag, int ret,
+				      int off, int size)
 {
 	if (ret == PTR_TO_BTF_ID) {
-		if (container_btf_ptr_access_allowed(reg, field_name, btf_id, flag))
+		if (container_btf_ptr_access_allowed(reg, field_name, btf_id, flag) ||
+		    container_restrict_fs_btf_ptr_access_allowed(env, reg,
+								 field_name, btf_id,
+								 flag))
 			return ret;
 
 		verbose(env, "container tracing rejects pointer field access to %s.%s\n",
@@ -7355,6 +7459,10 @@ static int check_container_btf_access(struct bpf_verifier_env *env,
 			btf_type_name(reg->btf, reg->btf_id), field_name ?: "<anon>");
 		return -EACCES;
 	}
+
+	if (container_restrict_fs_btf_scalar_access_allowed(env, reg, field_name,
+							    off, size))
+		return ret;
 
 	if (!container_btf_scalar_access_allowed(reg)) {
 		verbose(env, "container tracing rejects scalar access from %s\n",
@@ -7457,7 +7565,8 @@ static int check_ptr_to_btf_access(struct bpf_verifier_env *env,
 		return ret;
 
 	if (container_prog) {
-		ret = check_container_btf_access(env, reg, field_name, btf_id, &flag, ret);
+		ret = check_container_btf_access(env, reg, field_name, btf_id,
+						 &flag, ret, off, size);
 		if (ret < 0)
 			return ret;
 		goto out_mark;
@@ -8556,6 +8665,61 @@ static int apply_container_spill_ptr(struct bpf_verifier_env *env,
 	return 0;
 }
 
+static bool
+container_restrict_fs_intermediate_spill(const struct bpf_reg_state *reg)
+{
+	if (base_type(reg->type) != PTR_TO_BTF_ID || !btf_is_kernel(reg->btf))
+		return false;
+
+	return container_btf_id_matches(reg->btf, reg->btf_id,
+					&container_inode_id[0]) ||
+	       container_btf_id_matches(reg->btf, reg->btf_id,
+					&container_super_block_id[0]);
+}
+
+static int
+prepare_container_probe_read_dst(struct bpf_verifier_env *env,
+				 struct bpf_call_arg_meta *meta)
+{
+	struct bpf_reg_state *dst_reg = &cur_regs(env)[BPF_REG_1];
+	struct bpf_func_state *state;
+	struct bpf_stack_state *stack;
+	int slot, spi, off, err, i;
+
+	if (!meta->container_probe_read_checked)
+		return 0;
+	if (!container_prog_is_systemd_restrict_fs_lsm(env->prog))
+		return 0;
+	if (meta->access_size != BPF_REG_SIZE)
+		return 0;
+	if (dst_reg->type != PTR_TO_STACK || !tnum_is_const(dst_reg->var_off))
+		return 0;
+
+	off = dst_reg->off + dst_reg->var_off.value;
+	if (off >= 0 || off % BPF_REG_SIZE)
+		return 0;
+
+	state = func(env, dst_reg);
+	err = check_stack_slot_within_bounds(env, off, state, BPF_WRITE);
+	if (err)
+		return err;
+
+	slot = -off - 1;
+	spi = slot / BPF_REG_SIZE;
+	stack = &state->stack[spi];
+
+	if (!is_spilled_reg(stack) || is_spilled_scalar_reg(stack))
+		return 0;
+	if (!container_restrict_fs_intermediate_spill(&stack->spilled_ptr))
+		return 0;
+
+	stack->spilled_ptr.type = NOT_INIT;
+	for (i = 0; i < BPF_REG_SIZE; i++)
+		scrub_spilled_slot(&stack->slot_type[i]);
+
+	return 0;
+}
+
 static int check_container_probe_read_kernel(struct bpf_verifier_env *env,
 					     struct bpf_call_arg_meta *meta)
 {
@@ -8609,9 +8773,13 @@ static int check_container_probe_read_kernel(struct bpf_verifier_env *env,
 	if (ret < 0)
 		return ret;
 
-	ret = check_container_btf_access(env, src_reg, field_name, btf_id, &flag, ret);
+	ret = check_container_btf_access(env, src_reg, field_name, btf_id,
+					 &flag, ret, src_reg->off,
+					 access_size);
 	if (ret < 0)
 		return ret;
+
+	meta->container_probe_read_checked = true;
 
 	if (ret == PTR_TO_BTF_ID) {
 		if (access_size != BPF_REG_SIZE) {
@@ -11924,6 +12092,10 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 	if (err)
 		return err;
 
+	err = prepare_container_probe_read_dst(env, &meta);
+	if (err)
+		return err;
+
 	/* Mark slots with STACK_MISC in case of raw mode, stack offset
 	 * is inferred from register state.
 	 */
@@ -15053,6 +15225,7 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	    umin_ptr = ptr_reg->umin_value, umax_ptr = ptr_reg->umax_value;
 	struct bpf_sanitize_info info = {};
 	u8 opcode = BPF_OP(insn->code);
+	bool container_fixed_btf_alu;
 	u32 dst = insn->dst_reg;
 	int ret, bounds_ret;
 
@@ -15135,7 +15308,12 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	/* pointer types do not carry 32-bit bounds at the moment. */
 	__mark_reg32_unbounded(dst_reg);
 
-	if (sanitize_needed(opcode)) {
+	container_fixed_btf_alu = known &&
+		container_restrict_fs_btf_fixed_ptr_alu_allowed(env, ptr_reg,
+								opcode,
+								smin_val);
+
+	if (sanitize_needed(opcode) && !container_fixed_btf_alu) {
 		ret = sanitize_ptr_alu(env, insn, ptr_reg, off_reg, dst_reg,
 				       &info, false);
 		if (ret < 0)
@@ -15261,10 +15439,11 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	if (!check_reg_sane_offset(env, dst_reg, ptr_reg->type))
 		return -EINVAL;
 	reg_bounds_sync(dst_reg);
-	bounds_ret = sanitize_check_bounds(env, insn, dst_reg);
+	bounds_ret = container_fixed_btf_alu ? 0 :
+		sanitize_check_bounds(env, insn, dst_reg);
 	if (bounds_ret == -EACCES)
 		return bounds_ret;
-	if (sanitize_needed(opcode)) {
+	if (sanitize_needed(opcode) && !container_fixed_btf_alu) {
 		ret = sanitize_ptr_alu(env, insn, dst_reg, off_reg, dst_reg,
 				       &info, true);
 		if (verifier_bug_if(!can_skip_alu_sanitation(env, insn)
