@@ -124,6 +124,12 @@ struct scan_control {
 	unsigned int proactive:1;
 
 	/*
+	 * System-managed proactive reclaim may swap out cold anonymous memory
+	 * even if the charged memcg is already at memory.swap.max.
+	 */
+	unsigned int system_proactive_swap:1;
+
+	/*
 	 * Cgroup memory below memory.low is protected as long as we
 	 * don't threaten to OOM. If any cgroup is reclaimed at
 	 * reduced force or passed over entirely due to its memory.low
@@ -373,7 +379,8 @@ static inline bool can_reclaim_anon_pages(struct mem_cgroup *memcg,
 			return true;
 	} else {
 		/* Is the memcg below its swap limit? */
-		if (mem_cgroup_get_nr_swap_pages(memcg) > 0)
+		if (mem_cgroup_get_nr_swap_pages(memcg,
+					 sc->system_proactive_swap) > 0)
 			return true;
 	}
 
@@ -1319,7 +1326,8 @@ retry:
 					    split_folio_to_list(folio, folio_list))
 						goto activate_locked;
 				}
-				if (folio_alloc_swap(folio, __GFP_HIGH | __GFP_NOWARN)) {
+				if (folio_alloc_swap(folio, __GFP_HIGH | __GFP_NOWARN,
+					    sc->system_proactive_swap)) {
 					int __maybe_unused order = folio_order(folio);
 
 					if (!folio_test_large(folio))
@@ -1335,7 +1343,8 @@ retry:
 					}
 #endif
 					count_mthp_stat(order, MTHP_STAT_SWPOUT_FALLBACK);
-					if (folio_alloc_swap(folio, __GFP_HIGH | __GFP_NOWARN))
+					if (folio_alloc_swap(folio, __GFP_HIGH | __GFP_NOWARN,
+					    sc->system_proactive_swap))
 						goto activate_locked_split;
 				}
 				/*
@@ -1583,7 +1592,7 @@ activate_locked_split:
 activate_locked:
 		/* Not a candidate for swapping, so reclaim swap space. */
 		if (folio_test_swapcache(folio) &&
-		    (mem_cgroup_swap_full(folio) || folio_test_mlocked(folio)))
+		    (mem_cgroup_swap_full(folio, sc->system_proactive_swap) || folio_test_mlocked(folio)))
 			folio_free_swap(folio);
 		VM_BUG_ON_FOLIO(folio_test_active(folio), folio);
 		if (!folio_test_mlocked(folio)) {
@@ -2218,7 +2227,8 @@ static void shrink_active_list(unsigned long nr_to_scan,
 }
 
 static unsigned int reclaim_folio_list(struct list_head *folio_list,
-				      struct pglist_data *pgdat)
+				      struct pglist_data *pgdat,
+				      unsigned int reclaim_options)
 {
 	struct reclaim_stat stat;
 	unsigned int nr_reclaimed;
@@ -2229,6 +2239,8 @@ static unsigned int reclaim_folio_list(struct list_head *folio_list,
 		.may_unmap = 1,
 		.may_swap = 1,
 		.no_demotion = 1,
+		.system_proactive_swap =
+			!!(reclaim_options & MEMCG_RECLAIM_SYSTEM_PROACTIVE_SWAP),
 	};
 
 	nr_reclaimed = shrink_folio_list(folio_list, pgdat, &sc, &stat, true, NULL);
@@ -2242,7 +2254,8 @@ static unsigned int reclaim_folio_list(struct list_head *folio_list,
 	return nr_reclaimed;
 }
 
-unsigned long reclaim_pages(struct list_head *folio_list)
+unsigned long reclaim_pages(struct list_head *folio_list,
+			     unsigned int reclaim_options)
 {
 	int nid;
 	unsigned int nr_reclaimed = 0;
@@ -2264,11 +2277,13 @@ unsigned long reclaim_pages(struct list_head *folio_list)
 			continue;
 		}
 
-		nr_reclaimed += reclaim_folio_list(&node_folio_list, NODE_DATA(nid));
+		nr_reclaimed += reclaim_folio_list(&node_folio_list,
+						   NODE_DATA(nid), reclaim_options);
 		nid = folio_nid(lru_to_folio(folio_list));
 	} while (!list_empty(folio_list));
 
-	nr_reclaimed += reclaim_folio_list(&node_folio_list, NODE_DATA(nid));
+	nr_reclaimed += reclaim_folio_list(&node_folio_list, NODE_DATA(nid),
+					   reclaim_options);
 
 	memalloc_noreclaim_restore(noreclaim_flag);
 
@@ -2766,7 +2781,8 @@ static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
 		return 0;
 
 	if (!can_demote(pgdat->node_id, sc, memcg) &&
-	    mem_cgroup_get_nr_swap_pages(memcg) < MIN_LRU_BATCH)
+	    mem_cgroup_get_nr_swap_pages(memcg,
+				      sc->system_proactive_swap) < MIN_LRU_BATCH)
 		return 0;
 
 	return sc_swappiness(sc, memcg);
@@ -6718,6 +6734,8 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 		.may_unmap = 1,
 		.may_swap = !!(reclaim_options & MEMCG_RECLAIM_MAY_SWAP),
 		.proactive = !!(reclaim_options & MEMCG_RECLAIM_PROACTIVE),
+		.system_proactive_swap =
+			!!(reclaim_options & MEMCG_RECLAIM_SYSTEM_PROACTIVE_SWAP),
 	};
 	/*
 	 * Traverse the ZONELIST_FALLBACK zonelist of the current node to put
