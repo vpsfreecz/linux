@@ -1422,7 +1422,8 @@ static bool bpf_container_cgroup_attach_type_allowed(enum bpf_attach_type attach
 }
 
 static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
-					 enum bpf_attach_type attach_type)
+					 enum bpf_attach_type attach_type,
+					 u32 attach_btf_id)
 {
 	switch (prog_type) {
 	case BPF_PROG_TYPE_KPROBE:
@@ -1441,7 +1442,9 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 	case BPF_PROG_TYPE_CGROUP_DEVICE:
 		return !attach_type || attach_type == BPF_CGROUP_DEVICE;
 	case BPF_PROG_TYPE_LSM:
-		return attach_type == BPF_LSM_CGROUP;
+		return attach_type == BPF_LSM_CGROUP ||
+		       (attach_type == BPF_LSM_MAC &&
+			bpf_lsm_is_file_open_hook(attach_btf_id));
 	default:
 		return false;
 	}
@@ -2995,7 +2998,8 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 
 	if (bpf_token_is_container(token) &&
 	    !bpf_container_prog_type_allowed(attr->prog_type,
-					 attr->expected_attach_type)) {
+					 attr->expected_attach_type,
+					 attr->attach_btf_id)) {
 		err = -EPERM;
 		goto put_token;
 	}
@@ -3681,6 +3685,11 @@ static int bpf_tracing_prog_attach(struct bpf_prog *prog,
 	case BPF_PROG_TYPE_LSM:
 		if (prog->expected_attach_type != BPF_LSM_MAC) {
 			err = -EINVAL;
+			goto out_put_prog;
+		}
+		if (bpf_token_is_container(prog->aux->token) &&
+		    !bpf_lsm_is_file_open_hook(prog->aux->attach_btf_id)) {
+			err = -EPERM;
 			goto out_put_prog;
 		}
 		break;
