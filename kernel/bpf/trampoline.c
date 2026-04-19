@@ -969,6 +969,30 @@ static void notrace __bpf_prog_exit_lsm_cgroup(struct bpf_prog *prog, u64 start,
 	rcu_read_unlock_migrate();
 }
 
+static u64 notrace __bpf_prog_enter_lsm_mac_container(struct bpf_prog *prog,
+				      struct bpf_tramp_run_ctx *run_ctx)
+	__acquires(RCU)
+{
+	rcu_read_lock_dont_migrate();
+
+	run_ctx->saved_run_ctx = bpf_set_run_ctx(&run_ctx->run_ctx);
+
+	if (!bpf_token_task_match(prog->aux->token, current))
+		return 0;
+
+	return NO_START_TIME;
+}
+
+static void notrace __bpf_prog_exit_lsm_mac_container(struct bpf_prog *prog,
+				     u64 start,
+				     struct bpf_tramp_run_ctx *run_ctx)
+	__releases(RCU)
+{
+	bpf_reset_run_ctx(run_ctx->saved_run_ctx);
+
+	rcu_read_unlock_migrate();
+}
+
 u64 notrace __bpf_prog_enter_sleepable_recur(struct bpf_prog *prog,
 					     struct bpf_tramp_run_ctx *run_ctx)
 {
@@ -1059,9 +1083,13 @@ bpf_trampoline_enter_t bpf_trampoline_enter(const struct bpf_prog *prog)
 		return sleepable ? __bpf_prog_enter_sleepable_recur :
 			__bpf_prog_enter_recur;
 
-	if (resolve_prog_type(prog) == BPF_PROG_TYPE_LSM &&
-	    prog->expected_attach_type == BPF_LSM_CGROUP)
-		return __bpf_prog_enter_lsm_cgroup;
+	if (resolve_prog_type(prog) == BPF_PROG_TYPE_LSM) {
+		if (prog->expected_attach_type == BPF_LSM_CGROUP)
+			return __bpf_prog_enter_lsm_cgroup;
+		if (prog->expected_attach_type == BPF_LSM_MAC &&
+		    bpf_token_is_container(prog->aux->token))
+			return __bpf_prog_enter_lsm_mac_container;
+	}
 
 	return sleepable ? __bpf_prog_enter_sleepable : __bpf_prog_enter;
 }
@@ -1074,9 +1102,13 @@ bpf_trampoline_exit_t bpf_trampoline_exit(const struct bpf_prog *prog)
 		return sleepable ? __bpf_prog_exit_sleepable_recur :
 			__bpf_prog_exit_recur;
 
-	if (resolve_prog_type(prog) == BPF_PROG_TYPE_LSM &&
-	    prog->expected_attach_type == BPF_LSM_CGROUP)
-		return __bpf_prog_exit_lsm_cgroup;
+	if (resolve_prog_type(prog) == BPF_PROG_TYPE_LSM) {
+		if (prog->expected_attach_type == BPF_LSM_CGROUP)
+			return __bpf_prog_exit_lsm_cgroup;
+		if (prog->expected_attach_type == BPF_LSM_MAC &&
+		    bpf_token_is_container(prog->aux->token))
+			return __bpf_prog_exit_lsm_mac_container;
+	}
 
 	return sleepable ? __bpf_prog_exit_sleepable : __bpf_prog_exit;
 }
