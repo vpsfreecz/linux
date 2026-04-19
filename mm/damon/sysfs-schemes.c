@@ -1029,6 +1029,14 @@ struct damos_sysfs_qgoal_metric_name damos_sysfs_qgoal_metric_names[] = {
 		.metric = DAMOS_QUOTA_NODE_MEM_FREE_BP,
 		.name = "node_mem_free_bp",
 	},
+	{
+		.metric = DAMOS_QUOTA_FREE_MEM_RATE,
+		.name = "free_mem_rate",
+	},
+	{
+		.metric = DAMOS_QUOTA_FREE_MEM_BYTES,
+		.name = "free_mem_bytes",
+	},
 };
 
 static ssize_t target_metric_show(struct kobject *kobj,
