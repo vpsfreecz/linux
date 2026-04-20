@@ -832,6 +832,21 @@ vpsa_proc_dentry_decide(const struct dentry *dentry, const struct qstr *leaf,
 	return vpsa_kernfs_filter_proc_path_decide(segments, lens, depth, mask);
 }
 
+static struct dentry *vpsa_proc_lookup_stamp(struct dentry *ret,
+				     struct dentry *lookup)
+{
+	struct dentry *target;
+
+	if (IS_ERR(ret))
+		return ret;
+
+	target = ret ? ret : lookup;
+	if (target)
+		vpsa_kernfs_filter_dentry_set_visibility_token(target);
+
+	return ret;
+}
+
 static enum vpsa_kernfs_filter_decision
 vpsa_proc_inode_alias_decide(struct inode *inode, unsigned int mask)
 {
@@ -2243,6 +2258,9 @@ static int pid_revalidate(struct inode *dir, const struct qstr *name,
 	struct task_struct *task;
 	int ret = 0;
 
+	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
+		return 0;
+
 	rcu_read_lock();
 	inode = d_inode_rcu(dentry);
 	if (!inode)
@@ -2321,8 +2339,11 @@ bool proc_fill_cache(struct file *file, struct dir_context *ctx,
 		}
 	}
 	inode = d_inode(child);
-	ino = inode->i_ino;
-	type = inode->i_mode >> 12;
+	if (inode) {
+		vpsa_kernfs_filter_dentry_set_visibility_token(child);
+		ino = inode->i_ino;
+		type = inode->i_mode >> 12;
+	}
 	dput(child);
 end_instantiate:
 	return dir_emit(ctx, name, len, ino, type);
@@ -2382,6 +2403,9 @@ static int map_files_d_revalidate(struct inode *dir, const struct qstr *name,
 
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
+
+	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
+		return 0;
 
 	inode = d_inode(dentry);
 	task = get_proc_task(inode);
@@ -2515,8 +2539,10 @@ proc_map_files_instantiate(struct dentry *dentry,
 	inode->i_op = &proc_map_files_link_inode_operations;
 	inode->i_size = 64;
 
-	return proc_splice_unmountable(inode, dentry,
-				       &tid_map_files_dentry_operations);
+	return vpsa_proc_lookup_stamp(
+		proc_splice_unmountable(inode, dentry,
+				       &tid_map_files_dentry_operations),
+		dentry);
 }
 
 static struct dentry *proc_map_files_lookup(struct inode *dir,
@@ -2880,7 +2906,9 @@ static struct dentry *proc_pident_instantiate(struct dentry *dentry,
 		inode->i_fop = p->fop;
 	ei->op = p->op;
 	pid_update_inode(task, inode);
-	return d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	return vpsa_proc_lookup_stamp(
+		d_splice_alias_ops(inode, dentry, &pid_dentry_operations),
+		dentry);
 }
 
 static struct dentry *proc_pident_lookup(struct inode *dir, 
@@ -3691,7 +3719,9 @@ static struct dentry *proc_pid_instantiate(struct dentry * dentry,
 	set_nlink(inode, nlink_tgid);
 	pid_update_inode(task, inode);
 
-	return d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	return vpsa_proc_lookup_stamp(
+		d_splice_alias_ops(inode, dentry, &pid_dentry_operations),
+		dentry);
 }
 
 struct dentry *proc_pid_lookup(struct dentry *dentry, unsigned int flags)
@@ -4052,7 +4082,9 @@ static struct dentry *proc_task_instantiate(struct dentry *dentry,
 	set_nlink(inode, nlink_tid);
 	pid_update_inode(task, inode);
 
-	return d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	return vpsa_proc_lookup_stamp(
+		d_splice_alias_ops(inode, dentry, &pid_dentry_operations),
+		dentry);
 }
 
 static struct dentry *proc_task_lookup(struct inode *dir, struct dentry * dentry, unsigned int flags)

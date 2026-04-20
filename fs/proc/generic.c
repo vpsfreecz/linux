@@ -85,6 +85,21 @@ vpsa_proc_pde_decide(const struct proc_dir_entry *de, unsigned int mask)
 	return vpsa_kernfs_filter_proc_path_decide(segments, lens, depth, mask);
 }
 
+static struct dentry *vpsa_proc_lookup_stamp(struct dentry *ret,
+				     struct dentry *lookup)
+{
+	struct dentry *target;
+
+	if (IS_ERR(ret))
+		return ret;
+
+	target = ret ? ret : lookup;
+	if (target)
+		vpsa_kernfs_filter_dentry_set_visibility_token(target);
+
+	return ret;
+}
+
 void pde_free(struct proc_dir_entry *pde)
 {
 	if (S_ISLNK(pde->mode))
@@ -293,6 +308,9 @@ static int proc_misc_d_revalidate(struct inode *dir, const struct qstr *name,
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
+	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
+		return 0;
+
 	if (atomic_read(&PDE(d_inode(dentry))->in_use) < 0)
 		return 0; /* revalidate */
 	return 1;
@@ -330,10 +348,13 @@ struct dentry *proc_lookup_de(struct inode *dir, struct dentry *dentry,
 		if (!inode)
 			return ERR_PTR(-ENOMEM);
 		if (de->flags & PROC_ENTRY_FORCE_LOOKUP)
-			return d_splice_alias_ops(inode, dentry,
-						  &proc_net_dentry_ops);
-		return d_splice_alias_ops(inode, dentry,
-					  &proc_misc_dentry_ops);
+			return vpsa_proc_lookup_stamp(
+				d_splice_alias_ops(inode, dentry,
+						      &proc_net_dentry_ops),
+				dentry);
+		return vpsa_proc_lookup_stamp(d_splice_alias_ops(inode, dentry,
+					      &proc_misc_dentry_ops),
+				dentry);
 	}
 	read_unlock(&proc_subdir_lock);
 	return ERR_PTR(-ENOENT);

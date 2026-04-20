@@ -127,6 +127,21 @@ kernfs_vpsa_kernfs_filter_kn_decide(const struct kernfs_node *kn,
 	return decision;
 }
 
+static struct dentry *kernfs_vpsa_kernfs_filter_lookup_stamp(struct dentry *ret,
+					   struct dentry *lookup)
+{
+	struct dentry *target;
+
+	if (IS_ERR(ret))
+		return ret;
+
+	target = ret ? ret : lookup;
+	if (target)
+		vpsa_kernfs_filter_dentry_set_visibility_token(target);
+
+	return ret;
+}
+
 static bool __kernfs_active(struct kernfs_node *kn)
 {
 	return atomic_read(&kn->active) >= 0;
@@ -1238,6 +1253,9 @@ static int kernfs_dop_revalidate(struct inode *dir, const struct qstr *name,
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
+	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
+		return 0;
+
 	/* Negative hashed dentry? */
 	if (d_really_is_negative(dentry)) {
 		/* If the kernfs parent node has changed discard and
@@ -1325,7 +1343,8 @@ static struct dentry *kernfs_iop_lookup(struct inode *dir,
 	    VPSA_KERNFS_FILTER_DECISION_HIDE) {
 		kernfs_set_rev(parent, dentry);
 		up_read(&root->kernfs_rwsem);
-		return d_splice_alias(NULL, dentry);
+		return kernfs_vpsa_kernfs_filter_lookup_stamp(d_splice_alias(NULL, dentry),
+					      dentry);
 	}
 
 	kn = kernfs_find_ns(parent, dentry->d_name.name, ns);
@@ -1353,7 +1372,8 @@ static struct dentry *kernfs_iop_lookup(struct inode *dir,
 	up_read(&root->kernfs_rwsem);
 
 	/* instantiate and hash (possibly negative) dentry */
-	return d_splice_alias(inode, dentry);
+	return kernfs_vpsa_kernfs_filter_lookup_stamp(d_splice_alias(inode, dentry),
+					  dentry);
 }
 
 static struct dentry *kernfs_iop_mkdir(struct mnt_idmap *idmap,

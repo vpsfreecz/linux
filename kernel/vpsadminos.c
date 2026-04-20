@@ -9,6 +9,7 @@
 #include <linux/fs.h>
 #include <linux/glob.h>
 #include <linux/sysfs.h>
+#include <linux/dcache.h>
 #include <linux/memcontrol.h>
 #include <linux/proc_fs.h>
 #include <linux/rcupdate.h>
@@ -1600,6 +1601,26 @@ u64 vpsa_kernfs_filter_generation(void)
 	return generation;
 }
 EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_generation);
+
+static unsigned long vpsa_kernfs_filter_visibility_token_current(void)
+{
+	if (!vpsa_kernfs_filter_subject_restricted_current())
+		return 0;
+
+	return (unsigned long)vpsa_kernfs_filter_generation();
+}
+
+bool vpsa_kernfs_filter_dentry_visibility_stale(const struct dentry *dentry)
+{
+	return (unsigned long)READ_ONCE(dentry->d_fsdata) !=
+		vpsa_kernfs_filter_visibility_token_current();
+}
+
+void vpsa_kernfs_filter_dentry_set_visibility_token(struct dentry *dentry)
+{
+	WRITE_ONCE(dentry->d_fsdata,
+		   (void *)vpsa_kernfs_filter_visibility_token_current());
+}
 
 static void vpsa_kernfs_filter_record_replace_result(int ret,
 				    const struct vpsa_kernfs_filter_parse_error *perr)
