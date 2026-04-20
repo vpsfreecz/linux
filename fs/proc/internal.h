@@ -17,6 +17,7 @@
 
 struct ctl_table_header;
 struct mempolicy;
+struct vpsa_kernfs_filter_view;
 
 /*
  * This is not completely implemented yet. The idea is to
@@ -125,6 +126,41 @@ struct proc_inode {
 	const struct proc_ns_operations *ns_ops;
 	struct inode vfs_inode;
 } __randomize_layout;
+
+struct proc_kernfs_filter_dir_state {
+	struct vpsa_kernfs_filter_view *view;
+	unsigned long cookie;
+};
+
+static inline struct proc_kernfs_filter_dir_state *proc_kernfs_filter_dir_state(const struct file *file)
+{
+	return file ? file->private_data : NULL;
+}
+
+static inline const struct vpsa_kernfs_filter_view *proc_kernfs_filter_dir_view(const struct file *file)
+{
+	struct proc_kernfs_filter_dir_state *state = proc_kernfs_filter_dir_state(file);
+
+	return state ? state->view : NULL;
+}
+
+static inline unsigned long proc_kernfs_filter_dir_cookie(const struct file *file)
+{
+	struct proc_kernfs_filter_dir_state *state = proc_kernfs_filter_dir_state(file);
+
+	return state ? state->cookie : 0;
+}
+
+static inline void proc_kernfs_filter_dir_set_cookie(struct file *file, unsigned long cookie)
+{
+	struct proc_kernfs_filter_dir_state *state = proc_kernfs_filter_dir_state(file);
+
+	if (state)
+		state->cookie = cookie;
+}
+
+int proc_kernfs_filter_dir_open(struct inode *inode, struct file *file);
+int proc_kernfs_filter_dir_release(struct inode *inode, struct file *file);
 
 /*
  * General functions

@@ -11,6 +11,7 @@ struct dentry;
 struct proc_dir_entry;
 struct seq_file;
 struct task_struct;
+struct vpsa_kernfs_filter_view;
 
 enum vpsa_kernfs_filter_decision {
 	VPSA_KERNFS_FILTER_DECISION_ALLOW = 0,
@@ -62,10 +63,28 @@ static inline bool vpsa_kernfs_filter_subject_restricted_current(void)
 u64 vpsa_kernfs_filter_generation(void);
 bool vpsa_kernfs_filter_dentry_visibility_stale(const struct dentry *dentry);
 void vpsa_kernfs_filter_dentry_set_visibility_token(struct dentry *dentry);
+void vpsa_kernfs_filter_dentry_set_visibility_token_value(struct dentry *dentry,
+					 unsigned long token);
+
+struct vpsa_kernfs_filter_view *vpsa_kernfs_filter_view_open(void);
+void vpsa_kernfs_filter_view_close(struct vpsa_kernfs_filter_view *view);
+unsigned long vpsa_kernfs_filter_view_visibility_token(const struct vpsa_kernfs_filter_view *view);
+
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_proc_path_decide_view(const char *const *segments,
+				    const u16 *segment_lens,
+				    u16 depth, unsigned int mask,
+				    const struct vpsa_kernfs_filter_view *view);
 
 enum vpsa_kernfs_filter_decision
 vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segment_lens,
 			   u16 depth, unsigned int mask);
+
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_sysfs_path_decide_view(const char *const *segments,
+				     const u16 *segment_lens,
+				     u16 depth, unsigned int mask,
+				     const struct vpsa_kernfs_filter_view *view);
 
 enum vpsa_kernfs_filter_decision
 vpsa_kernfs_filter_sysfs_path_decide(const char *const *segments, const u16 *segment_lens,
