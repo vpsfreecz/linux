@@ -53,6 +53,7 @@
 #include <linux/errno.h>
 #include <linux/time.h>
 #include <linux/proc_fs.h>
+#include <linux/vpsadminos.h>
 #include <linux/stat.h>
 #include <linux/task_io_accounting_ops.h>
 #include <linux/init.h>
@@ -116,6 +117,11 @@
 
 static u8 nlink_tid __ro_after_init;
 static u8 nlink_tgid __ro_after_init;
+
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_name_decide(const char *name, u16 len, unsigned int mask);
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_inode_decide(struct inode *inode, unsigned int mask);
 
 enum proc_mem_force {
 	PROC_MEM_FORCE_ALWAYS,
@@ -770,7 +776,14 @@ static int proc_pid_permission(struct mnt_idmap *idmap,
 {
 	struct proc_fs_info *fs_info = proc_sb_info(inode->i_sb);
 	struct task_struct *task;
+	enum vpsa_kernfs_filter_decision decision;
 	bool has_perms;
+
+	decision = vpsa_proc_pid_root_inode_decide(inode, mask);
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+	if (decision == VPSA_KERNFS_FILTER_DECISION_DENY)
+		return -EACCES;
 
 	task = get_proc_task(inode);
 	if (!task)
@@ -2060,7 +2073,12 @@ int pid_getattr(struct mnt_idmap *idmap, const struct path *path,
 {
 	struct inode *inode = d_inode(path->dentry);
 	struct proc_fs_info *fs_info = proc_sb_info(inode->i_sb);
+	enum vpsa_kernfs_filter_decision decision;
 	struct task_struct *task;
+
+	decision = vpsa_proc_pid_root_inode_decide(inode, MAY_READ);
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
 
 	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
 
@@ -3553,6 +3571,10 @@ struct dentry *proc_pid_lookup(struct dentry *dentry, unsigned int flags)
 	struct pid_namespace *ns;
 	struct dentry *result = ERR_PTR(-ENOENT);
 
+	if (vpsa_proc_pid_root_name_decide(dentry->d_name.name, dentry->d_name.len,
+				      MAY_READ) == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		goto out;
+
 	tgid = name_to_int(&dentry->d_name);
 	if (tgid == ~0U)
 		goto out;
@@ -3613,6 +3635,42 @@ retry:
 
 #define TGID_OFFSET (FIRST_PROCESS_ENTRY + 2)
 
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_name_decide(const char *name, u16 len, unsigned int mask)
+{
+	const char *segments[1] = { name };
+	u16 lens[1] = { len };
+
+	if (!len)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	return vpsa_kernfs_filter_proc_path_decide(segments, lens, 1, mask);
+}
+
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_inode_decide(struct inode *inode, unsigned int mask)
+{
+	struct pid_namespace *ns;
+	struct pid *pid;
+	char name[11];
+	unsigned int tgid;
+	int len;
+
+	if (!inode)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	pid = proc_pid(inode);
+	if (!pid)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	ns = proc_pid_ns(inode->i_sb);
+	tgid = pid_nr_ns(pid, ns);
+	if (!tgid)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	len = snprintf(name, sizeof(name), "%u", tgid);
+	return vpsa_proc_pid_root_name_decide(name, len, mask);
+}
+
 /* for the /proc/ directory itself, after non-process stuff has been done */
 int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 {
@@ -3626,14 +3684,22 @@ int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 
 	if (pos == TGID_OFFSET - 2) {
 		struct inode *inode = d_inode(fs_info->proc_self);
-		if (!dir_emit(ctx, "self", 4, inode->i_ino, DT_LNK))
-			return 0;
+
+		if (vpsa_proc_pid_root_name_decide("self", 4, MAY_READ) !=
+		    VPSA_KERNFS_FILTER_DECISION_HIDE) {
+			if (!dir_emit(ctx, "self", 4, inode->i_ino, DT_LNK))
+				return 0;
+		}
 		ctx->pos = pos = pos + 1;
 	}
 	if (pos == TGID_OFFSET - 1) {
 		struct inode *inode = d_inode(fs_info->proc_thread_self);
-		if (!dir_emit(ctx, "thread-self", 11, inode->i_ino, DT_LNK))
-			return 0;
+
+		if (vpsa_proc_pid_root_name_decide("thread-self", 11, MAY_READ) !=
+		    VPSA_KERNFS_FILTER_DECISION_HIDE) {
+			if (!dir_emit(ctx, "thread-self", 11, inode->i_ino, DT_LNK))
+				return 0;
+		}
 		ctx->pos = pos = pos + 1;
 	}
 	iter.tgid = pos - TGID_OFFSET;
@@ -3649,6 +3715,9 @@ int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 			continue;
 
 		len = snprintf(name, sizeof(name), "%u", iter.tgid);
+		if (vpsa_proc_pid_root_name_decide(name, len, MAY_READ) ==
+		    VPSA_KERNFS_FILTER_DECISION_HIDE)
+			continue;
 		ctx->pos = iter.tgid + TGID_OFFSET;
 		if (!proc_fill_cache(file, ctx, name, len,
 				     proc_pid_instantiate, iter.task, NULL)) {

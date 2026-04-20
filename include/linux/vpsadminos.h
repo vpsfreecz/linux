@@ -11,6 +11,12 @@ struct proc_dir_entry;
 struct seq_file;
 struct task_struct;
 
+enum vpsa_kernfs_filter_decision {
+	VPSA_KERNFS_FILTER_DECISION_ALLOW = 0,
+	VPSA_KERNFS_FILTER_DECISION_DENY,
+	VPSA_KERNFS_FILTER_DECISION_HIDE,
+};
+
 static inline struct user_namespace *current_1stlvl_user_ns(void)
 {
 	struct user_namespace *ns = current_user_ns();
@@ -53,5 +59,9 @@ static inline bool vpsa_kernfs_filter_subject_restricted_current(void)
 }
 
 u64 vpsa_kernfs_filter_generation(void);
+
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segment_lens,
+			   u16 depth, unsigned int mask);
 
 #endif /* _LINUX_VPSADMINOS_H */
