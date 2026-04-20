@@ -13,6 +13,7 @@
 #include <linux/memcontrol.h>
 #include <linux/proc_fs.h>
 #include <linux/rcupdate.h>
+#include <linux/refcount.h>
 #include <linux/seq_file.h>
 #include <linux/module.h>
 #include <linux/kobject.h>
@@ -651,6 +652,7 @@ struct vpsa_kernfs_filter_rule {
 
 struct vpsa_kernfs_filter {
 	struct rcu_head rcu;
+	refcount_t refs;
 	u64 generation;
 	u32 rule_count;
 	u32 proc_rule_count;
@@ -664,6 +666,12 @@ struct vpsa_kernfs_filter {
 	size_t canonical_len;
 	char *canonical;
 	struct vpsa_kernfs_filter_rule *rules;
+};
+
+struct vpsa_kernfs_filter_view {
+	struct vpsa_kernfs_filter *policy;
+	u64 generation;
+	bool restricted;
 };
 
 struct vpsa_kernfs_filter_parse_error {
@@ -745,6 +753,25 @@ static void vpsa_kernfs_filter_rcu_free(struct rcu_head *rcu)
 
 	policy = container_of(rcu, struct vpsa_kernfs_filter, rcu);
 	vpsa_kernfs_filter_destroy(policy);
+}
+
+static void vpsa_kernfs_filter_put(struct vpsa_kernfs_filter *policy)
+{
+	if (policy && refcount_dec_and_test(&policy->refs))
+		call_rcu(&policy->rcu, vpsa_kernfs_filter_rcu_free);
+}
+
+static struct vpsa_kernfs_filter *vpsa_kernfs_filter_active_policy_get(void)
+{
+	struct vpsa_kernfs_filter *policy;
+
+	rcu_read_lock();
+	policy = rcu_dereference(vpsa_kernfs_filter_active_policy);
+	if (!policy || !refcount_inc_not_zero(&policy->refs))
+		policy = NULL;
+	rcu_read_unlock();
+
+	return policy;
 }
 
 static void vpsa_kernfs_filter_parse_error_set(struct vpsa_kernfs_filter_parse_error *perr,
@@ -1228,6 +1255,7 @@ static int vpsa_kernfs_filter_parse(struct vpsa_kernfs_filter **ret_policy,
 	policy = kzalloc(sizeof(*policy), GFP_KERNEL);
 	if (!policy)
 		return -ENOMEM;
+	refcount_set(&policy->refs, 1);
 
 	ret = vpsa_textbuf_append(&canonical, "version 1\n");
 	if (ret)
@@ -1500,27 +1528,25 @@ static bool vpsa_kernfs_filter_rule_better_match(const struct vpsa_kernfs_filter
 }
 
 static enum vpsa_kernfs_filter_decision
-vpsa_kernfs_filter_path_decide(enum vpsa_kernfs_filter_rule_fs fs,
-		      const char *const *segments,
-		      const u16 *segment_lens,
-		      u16 depth,
-		      unsigned int mask)
+vpsa_kernfs_filter_path_decide_policy(const struct vpsa_kernfs_filter *policy,
+			     enum vpsa_kernfs_filter_rule_fs fs,
+			     const char *const *segments,
+			     const u16 *segment_lens,
+			     u16 depth,
+			     unsigned int mask)
 {
-	struct vpsa_kernfs_filter *policy;
 	const struct vpsa_kernfs_filter_rule *best = NULL;
 	bool best_explicit_access = false;
 	unsigned int req;
 	u32 i;
 
-	if (!depth || !vpsa_kernfs_filter_subject_restricted_current())
+	if (!depth)
 		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (!policy)
+		return (mask & MAY_WRITE) ? VPSA_KERNFS_FILTER_DECISION_DENY :
+					      VPSA_KERNFS_FILTER_DECISION_HIDE;
 
 	req = vpsa_kernfs_filter_mask_to_request(mask);
-
-	rcu_read_lock();
-	policy = rcu_dereference(vpsa_kernfs_filter_active_policy);
-	if (!policy)
-		goto out_unlock;
 
 	for (i = 0; i < policy->rule_count; i++) {
 		const struct vpsa_kernfs_filter_rule *rule = &policy->rules[i];
@@ -1543,23 +1569,63 @@ vpsa_kernfs_filter_path_decide(enum vpsa_kernfs_filter_rule_fs fs,
 	}
 
 	if (!best)
-		goto out_unlock;
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
 
 	switch (best->action) {
 	case VPSA_KERNFS_FILTER_RULE_ACTION_HIDE:
-		rcu_read_unlock();
 		return VPSA_KERNFS_FILTER_DECISION_HIDE;
 	case VPSA_KERNFS_FILTER_RULE_ACTION_DENY:
-		rcu_read_unlock();
 		return VPSA_KERNFS_FILTER_DECISION_DENY;
 	default:
 		break;
 	}
 
-out_unlock:
-	rcu_read_unlock();
 	return VPSA_KERNFS_FILTER_DECISION_ALLOW;
 }
+
+static enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_path_decide(enum vpsa_kernfs_filter_rule_fs fs,
+		      const char *const *segments,
+		      const u16 *segment_lens,
+		      u16 depth,
+		      unsigned int mask)
+{
+	struct vpsa_kernfs_filter *policy;
+	enum vpsa_kernfs_filter_decision decision;
+
+	if (!depth || !vpsa_kernfs_filter_subject_restricted_current())
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	rcu_read_lock();
+	policy = rcu_dereference(vpsa_kernfs_filter_active_policy);
+	decision = vpsa_kernfs_filter_path_decide_policy(policy, fs, segments,
+					       segment_lens, depth, mask);
+	rcu_read_unlock();
+	return decision;
+}
+
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_proc_path_decide_view(const char *const *segments,
+				    const u16 *segment_lens,
+				    u16 depth, unsigned int mask,
+				    const struct vpsa_kernfs_filter_view *view)
+{
+	if (!view)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	if (!view->restricted && vpsa_kernfs_filter_subject_restricted_current())
+		return vpsa_kernfs_filter_path_decide(VPSA_KERNFS_FILTER_RULE_FS_PROC,
+					      segments, segment_lens,
+					      depth, mask);
+
+	if (!view->restricted)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	return vpsa_kernfs_filter_path_decide_policy(view->policy, VPSA_KERNFS_FILTER_RULE_FS_PROC,
+					    segments, segment_lens,
+					    depth, mask);
+}
+EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_proc_path_decide_view);
 
 enum vpsa_kernfs_filter_decision
 vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segment_lens,
@@ -1569,6 +1635,29 @@ vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segm
 				    segment_lens, depth, mask);
 }
 EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_proc_path_decide);
+
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_sysfs_path_decide_view(const char *const *segments,
+				     const u16 *segment_lens,
+				     u16 depth, unsigned int mask,
+				     const struct vpsa_kernfs_filter_view *view)
+{
+	if (!view)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	if (!view->restricted && vpsa_kernfs_filter_subject_restricted_current())
+		return vpsa_kernfs_filter_path_decide(VPSA_KERNFS_FILTER_RULE_FS_SYSFS,
+					      segments, segment_lens,
+					      depth, mask);
+
+	if (!view->restricted)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	return vpsa_kernfs_filter_path_decide_policy(view->policy, VPSA_KERNFS_FILTER_RULE_FS_SYSFS,
+					    segments, segment_lens,
+					    depth, mask);
+}
+EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_sysfs_path_decide_view);
 
 enum vpsa_kernfs_filter_decision
 vpsa_kernfs_filter_sysfs_path_decide(const char *const *segments,
@@ -1587,6 +1676,44 @@ bool vpsa_kernfs_filter_subject_restricted_userns(const struct user_namespace *n
 }
 EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_subject_restricted_userns);
 
+struct vpsa_kernfs_filter_view *vpsa_kernfs_filter_view_open(void)
+{
+	struct vpsa_kernfs_filter_view *view;
+
+	view = kzalloc(sizeof(*view), GFP_KERNEL);
+	if (!view)
+		return NULL;
+
+	view->restricted = vpsa_kernfs_filter_subject_restricted_current();
+	if (!view->restricted)
+		return view;
+
+	view->policy = vpsa_kernfs_filter_active_policy_get();
+	if (view->policy)
+		view->generation = READ_ONCE(view->policy->generation);
+	return view;
+}
+EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_view_open);
+
+void vpsa_kernfs_filter_view_close(struct vpsa_kernfs_filter_view *view)
+{
+	if (!view)
+		return;
+
+	vpsa_kernfs_filter_put(view->policy);
+	kfree(view);
+}
+EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_view_close);
+
+unsigned long vpsa_kernfs_filter_view_visibility_token(const struct vpsa_kernfs_filter_view *view)
+{
+	if (!view)
+		return vpsa_kernfs_filter_subject_restricted_current() ?
+			(unsigned long)vpsa_kernfs_filter_generation() : 0;
+	return view->restricted ? (unsigned long)view->generation : 0;
+}
+EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_view_visibility_token);
+
 u64 vpsa_kernfs_filter_generation(void)
 {
 	struct vpsa_kernfs_filter *policy;
@@ -1604,10 +1731,7 @@ EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_generation);
 
 static unsigned long vpsa_kernfs_filter_visibility_token_current(void)
 {
-	if (!vpsa_kernfs_filter_subject_restricted_current())
-		return 0;
-
-	return (unsigned long)vpsa_kernfs_filter_generation();
+	return vpsa_kernfs_filter_view_visibility_token(NULL);
 }
 
 bool vpsa_kernfs_filter_dentry_visibility_stale(const struct dentry *dentry)
@@ -1616,10 +1740,17 @@ bool vpsa_kernfs_filter_dentry_visibility_stale(const struct dentry *dentry)
 		vpsa_kernfs_filter_visibility_token_current();
 }
 
+void vpsa_kernfs_filter_dentry_set_visibility_token_value(struct dentry *dentry,
+					 unsigned long token)
+{
+	WRITE_ONCE(dentry->d_fsdata, (void *)token);
+}
+EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_dentry_set_visibility_token_value);
+
 void vpsa_kernfs_filter_dentry_set_visibility_token(struct dentry *dentry)
 {
-	WRITE_ONCE(dentry->d_fsdata,
-		   (void *)vpsa_kernfs_filter_visibility_token_current());
+	vpsa_kernfs_filter_dentry_set_visibility_token_value(dentry,
+					    vpsa_kernfs_filter_visibility_token_current());
 }
 
 static void vpsa_kernfs_filter_record_replace_result(int ret,
@@ -1660,7 +1791,7 @@ static int vpsa_kernfs_filter_install_policy(struct vpsa_kernfs_filter *new_poli
 	mutex_unlock(&vpsa_kernfs_filter_lock);
 
 	if (old_policy)
-		call_rcu(&old_policy->rcu, vpsa_kernfs_filter_rcu_free);
+		vpsa_kernfs_filter_put(old_policy);
 
 	pr_info("vpsAdminOS: kernfs-filter generation=%llu rules=%u proc=%u sysfs=%u\n",
 		new_policy->generation, new_policy->rule_count,
