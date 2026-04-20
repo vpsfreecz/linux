@@ -9,6 +9,8 @@
 #include <linux/security.h>
 #include <linux/tracing_namespace.h>
 
+#include "../trace/trace_btf.h"
+
 static bool bpf_ns_capable(struct user_namespace *ns, int cap)
 {
 	return ns_capable(ns, cap) || (cap != CAP_SYS_ADMIN && ns_capable(ns, CAP_SYS_ADMIN));
