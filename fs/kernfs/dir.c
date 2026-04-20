@@ -30,6 +30,17 @@ static char kernfs_pr_cont_buf[PATH_MAX];	/* protected by pr_cont_lock */
 #define rb_to_kn(X) rb_entry((X), struct kernfs_node, rb)
 #define VPSA_KERNFS_FILTER_MAX_DEPTH	128
 
+struct kernfs_vpsa_kernfs_filter_dir_state {
+	struct vpsa_kernfs_filter_view *view;
+	struct kernfs_node *pos;
+};
+
+static inline struct kernfs_vpsa_kernfs_filter_dir_state *
+kernfs_vpsa_kernfs_filter_dir_state(const struct file *file)
+{
+	return file ? file->private_data : NULL;
+}
+
 static bool kernfs_vpsa_kernfs_filter_root_enabled(const struct kernfs_root *root)
 {
 	return root && (root->flags & KERNFS_ROOT_FILTER_VISIBILITY);
@@ -83,16 +94,20 @@ static bool kernfs_vpsa_kernfs_filter_path_build_locked(const struct kernfs_node
 	return true;
 }
 
-enum vpsa_kernfs_filter_decision
-kernfs_vpsa_kernfs_filter_kn_decide_locked(const struct kernfs_node *kn,
-				  const struct qstr *leaf, unsigned int mask)
+static enum vpsa_kernfs_filter_decision
+kernfs_vpsa_kernfs_filter_kn_decide_locked_view(const struct kernfs_node *kn,
+				       const struct qstr *leaf,
+				       unsigned int mask,
+				       const struct vpsa_kernfs_filter_view *view)
 {
 	const char *segments[VPSA_KERNFS_FILTER_MAX_DEPTH];
 	u16 lens[VPSA_KERNFS_FILTER_MAX_DEPTH];
 	struct kernfs_root *root;
 	u16 depth;
 
-	if (!kn || !vpsa_kernfs_filter_subject_restricted_current())
+	if (!kn)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (!view && !vpsa_kernfs_filter_subject_restricted_current())
 		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
 
 	root = kernfs_root(kn);
@@ -102,8 +117,18 @@ kernfs_vpsa_kernfs_filter_kn_decide_locked(const struct kernfs_node *kn,
 	if (!kernfs_vpsa_kernfs_filter_path_build_locked(kn, leaf, segments, lens, &depth) ||
 	    !depth)
 		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (view)
+		return vpsa_kernfs_filter_sysfs_path_decide_view(segments, lens, depth, mask,
+						       view);
 
 	return vpsa_kernfs_filter_sysfs_path_decide(segments, lens, depth, mask);
+}
+
+enum vpsa_kernfs_filter_decision
+kernfs_vpsa_kernfs_filter_kn_decide_locked(const struct kernfs_node *kn,
+				  const struct qstr *leaf, unsigned int mask)
+{
+	return kernfs_vpsa_kernfs_filter_kn_decide_locked_view(kn, leaf, mask, NULL);
 }
 
 enum vpsa_kernfs_filter_decision
@@ -1946,9 +1971,35 @@ int kernfs_rename_ns(struct kernfs_node *kn, struct kernfs_node *new_parent,
 	return error;
 }
 
+static int kernfs_dir_fop_open(struct inode *inode, struct file *filp)
+{
+	struct kernfs_vpsa_kernfs_filter_dir_state *state;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	state->view = vpsa_kernfs_filter_view_open();
+	if (!state->view) {
+		kfree(state);
+		return -ENOMEM;
+	}
+
+	filp->private_data = state;
+	return 0;
+}
+
 static int kernfs_dir_fop_release(struct inode *inode, struct file *filp)
 {
-	kernfs_put(filp->private_data);
+	struct kernfs_vpsa_kernfs_filter_dir_state *state = kernfs_vpsa_kernfs_filter_dir_state(filp);
+
+	if (!state)
+		return 0;
+
+	kernfs_put(state->pos);
+	vpsa_kernfs_filter_view_close(state->view);
+	kfree(state);
+	filp->private_data = NULL;
 	return 0;
 }
 
@@ -2005,10 +2056,12 @@ static struct kernfs_node *kernfs_dir_next_pos(const void *ns,
 
 static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 {
+	struct kernfs_vpsa_kernfs_filter_dir_state *state = kernfs_vpsa_kernfs_filter_dir_state(file);
 	struct dentry *dentry = file->f_path.dentry;
 	struct kernfs_node *parent = kernfs_dentry_node(dentry);
-	struct kernfs_node *pos = file->private_data;
+	struct kernfs_node *pos = state ? state->pos : NULL;
 	struct kernfs_root *root;
+	const struct vpsa_kernfs_filter_view *view = state ? state->view : NULL;
 	const void *ns = NULL;
 
 	if (!dir_emit_dots(file, ctx))
@@ -2029,10 +2082,12 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 		ino_t ino = kernfs_ino(pos);
 
 		ctx->pos = pos->hash;
-		file->private_data = pos;
+		if (state)
+			state->pos = pos;
 		kernfs_get(pos);
 
-		if (kernfs_vpsa_kernfs_filter_kn_decide_locked(pos, NULL, MAY_READ) ==
+		if (kernfs_vpsa_kernfs_filter_kn_decide_locked_view(pos, NULL, MAY_READ,
+						   view) ==
 		    VPSA_KERNFS_FILTER_DECISION_HIDE)
 			continue;
 
@@ -2042,13 +2097,15 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 		}
 	}
 	up_read(&root->kernfs_rwsem);
-	file->private_data = NULL;
+	if (state)
+		state->pos = NULL;
 	ctx->pos = INT_MAX;
 	return 0;
 }
 
 const struct file_operations kernfs_dir_fops = {
 	.read		= generic_read_dir,
+	.open		= kernfs_dir_fop_open,
 	.iterate_shared	= kernfs_fop_readdir,
 	.release	= kernfs_dir_fop_release,
 	.llseek		= generic_file_llseek,

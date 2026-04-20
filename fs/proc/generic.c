@@ -71,18 +71,30 @@ static bool vpsa_proc_pde_path_build(const struct proc_dir_entry *de,
 }
 
 static enum vpsa_kernfs_filter_decision
-vpsa_proc_pde_decide(const struct proc_dir_entry *de, unsigned int mask)
+vpsa_proc_pde_decide_view(const struct proc_dir_entry *de, unsigned int mask,
+			  const struct vpsa_kernfs_filter_view *view)
 {
 	const char *segments[VPSA_PROC_FILTER_MAX_DEPTH];
 	u16 lens[VPSA_PROC_FILTER_MAX_DEPTH];
 	u16 depth;
 
-	if (!de || !vpsa_kernfs_filter_subject_restricted_current())
+	if (!de)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (!view && !vpsa_kernfs_filter_subject_restricted_current())
 		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
 	if (!vpsa_proc_pde_path_build(de, segments, lens, &depth) || !depth)
 		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (view)
+		return vpsa_kernfs_filter_proc_path_decide_view(segments, lens, depth, mask,
+						    view);
 
 	return vpsa_kernfs_filter_proc_path_decide(segments, lens, depth, mask);
+}
+
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pde_decide(const struct proc_dir_entry *de, unsigned int mask)
+{
+	return vpsa_proc_pde_decide_view(de, mask, NULL);
 }
 
 static struct dentry *vpsa_proc_lookup_stamp(struct dentry *ret,
@@ -98,6 +110,37 @@ static struct dentry *vpsa_proc_lookup_stamp(struct dentry *ret,
 		vpsa_kernfs_filter_dentry_set_visibility_token(target);
 
 	return ret;
+}
+
+int proc_kernfs_filter_dir_open(struct inode *inode, struct file *file)
+{
+	struct proc_kernfs_filter_dir_state *state;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	state->view = vpsa_kernfs_filter_view_open();
+	if (!state->view) {
+		kfree(state);
+		return -ENOMEM;
+	}
+
+	file->private_data = state;
+	return 0;
+}
+
+int proc_kernfs_filter_dir_release(struct inode *inode, struct file *file)
+{
+	struct proc_kernfs_filter_dir_state *state = proc_kernfs_filter_dir_state(file);
+
+	if (!state)
+		return 0;
+
+	vpsa_kernfs_filter_view_close(state->view);
+	kfree(state);
+	file->private_data = NULL;
+	return 0;
 }
 
 void pde_free(struct proc_dir_entry *pde)
@@ -383,6 +426,7 @@ struct dentry *proc_lookup(struct inode *dir, struct dentry *dentry,
 int proc_readdir_de(struct file *file, struct dir_context *ctx,
 		    struct proc_dir_entry *de)
 {
+	const struct vpsa_kernfs_filter_view *view = proc_kernfs_filter_dir_view(file);
 	int i;
 
 	if (!dir_emit_dots(file, ctx))
@@ -406,7 +450,7 @@ int proc_readdir_de(struct file *file, struct dir_context *ctx,
 		struct proc_dir_entry *next;
 		enum vpsa_kernfs_filter_decision decision;
 
-		decision = vpsa_proc_pde_decide(de, MAY_READ);
+		decision = vpsa_proc_pde_decide_view(de, MAY_READ, view);
 		pde_get(de);
 		read_unlock(&proc_subdir_lock);
 
@@ -453,6 +497,8 @@ int proc_readdir(struct file *file, struct dir_context *ctx)
 static const struct file_operations proc_dir_operations = {
 	.llseek			= generic_file_llseek,
 	.read			= generic_read_dir,
+	.open			= proc_kernfs_filter_dir_open,
+	.release		= proc_kernfs_filter_dir_release,
 	.iterate_shared		= proc_readdir,
 };
 
