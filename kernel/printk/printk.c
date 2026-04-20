@@ -33,6 +33,7 @@
 #include <linux/smp.h>
 #include <linux/security.h>
 #include <linux/memblock.h>
+#include <linux/proc_ns.h>
 #include <linux/syscalls.h>
 #include <linux/syscore_ops.h>
 #include <linux/vmcore_info.h>
@@ -1157,6 +1158,7 @@ static char setup_text_buf[PRINTKRB_RECORD_MAX] __initdata;
 
 static void print_log_buf_usage_stats(void)
 {
+	u32 log_buf_len = init_syslog_ns.log_buf_len;
 	unsigned int descs_count = log_buf_len >> PRB_AVGBITS;
 	size_t meta_data_size;
 

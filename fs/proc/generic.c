@@ -42,13 +42,12 @@ static bool vpsa_proc_pde_path_build(const struct proc_dir_entry *de,
 				     u16 *lens,
 				     u16 *depth)
 {
+	const char *tmp_name;
+	u16 tmp_len;
 	u16 count = 0;
 	u16 i;
 
 	while (de && de != &proc_root && de->parent != de) {
-		const char *tmp_name;
-		u16 tmp_len;
-
 		if (count >= VPSA_PROC_FILTER_MAX_DEPTH)
 			return false;
 
