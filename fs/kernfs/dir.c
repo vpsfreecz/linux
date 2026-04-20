@@ -14,7 +14,6 @@
 #include <linux/slab.h>
 #include <linux/security.h>
 #include <linux/hash.h>
-#include <linux/vpsadminos.h>
 
 #include "kernfs-internal.h"
 
@@ -29,6 +28,104 @@ static DEFINE_SPINLOCK(kernfs_pr_cont_lock);
 static char kernfs_pr_cont_buf[PATH_MAX];	/* protected by pr_cont_lock */
 
 #define rb_to_kn(X) rb_entry((X), struct kernfs_node, rb)
+#define VPSA_KERNFS_FILTER_MAX_DEPTH	128
+
+static bool kernfs_vpsa_kernfs_filter_root_enabled(const struct kernfs_root *root)
+{
+	return root && (root->flags & KERNFS_ROOT_FILTER_VISIBILITY);
+}
+
+static bool kernfs_vpsa_kernfs_filter_path_build_locked(const struct kernfs_node *kn,
+				       const struct qstr *leaf,
+				       const char **segments,
+				       u16 *lens, u16 *depth)
+{
+	const char *tmp_name;
+	u16 tmp_len;
+	u16 count = 0;
+	u16 i;
+
+	if (leaf && leaf->len) {
+		if (leaf->len > U16_MAX || count >= VPSA_KERNFS_FILTER_MAX_DEPTH)
+			return false;
+		segments[count] = leaf->name;
+		lens[count] = leaf->len;
+		count++;
+	}
+
+	while (kn && kernfs_parent(kn)) {
+		const char *name = kernfs_rcu_name(kn);
+		size_t len;
+
+		if (!name || count >= VPSA_KERNFS_FILTER_MAX_DEPTH)
+			return false;
+
+		len = strlen(name);
+		if (len > U16_MAX)
+			return false;
+
+		segments[count] = name;
+		lens[count] = len;
+		count++;
+		kn = kernfs_parent(kn);
+	}
+
+	for (i = 0; i < count / 2; i++) {
+		tmp_name = segments[i];
+		tmp_len = lens[i];
+		segments[i] = segments[count - 1 - i];
+		lens[i] = lens[count - 1 - i];
+		segments[count - 1 - i] = tmp_name;
+		lens[count - 1 - i] = tmp_len;
+	}
+
+	*depth = count;
+	return true;
+}
+
+enum vpsa_kernfs_filter_decision
+kernfs_vpsa_kernfs_filter_kn_decide_locked(const struct kernfs_node *kn,
+				  const struct qstr *leaf, unsigned int mask)
+{
+	const char *segments[VPSA_KERNFS_FILTER_MAX_DEPTH];
+	u16 lens[VPSA_KERNFS_FILTER_MAX_DEPTH];
+	struct kernfs_root *root;
+	u16 depth;
+
+	if (!kn || !vpsa_kernfs_filter_subject_restricted_current())
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	root = kernfs_root(kn);
+	if (!kernfs_vpsa_kernfs_filter_root_enabled(root))
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	if (!kernfs_vpsa_kernfs_filter_path_build_locked(kn, leaf, segments, lens, &depth) ||
+	    !depth)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	return vpsa_kernfs_filter_sysfs_path_decide(segments, lens, depth, mask);
+}
+
+enum vpsa_kernfs_filter_decision
+kernfs_vpsa_kernfs_filter_kn_decide(const struct kernfs_node *kn,
+			   const struct qstr *leaf, unsigned int mask)
+{
+	struct kernfs_root *root;
+	enum vpsa_kernfs_filter_decision decision;
+
+	if (!kn || !vpsa_kernfs_filter_subject_restricted_current())
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	root = kernfs_root(kn);
+	if (!kernfs_vpsa_kernfs_filter_root_enabled(root))
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	down_read(&root->kernfs_rwsem);
+	decision = kernfs_vpsa_kernfs_filter_kn_decide_locked(kn, leaf, mask);
+	up_read(&root->kernfs_rwsem);
+
+	return decision;
+}
 
 static bool __kernfs_active(struct kernfs_node *kn)
 {
@@ -1224,6 +1321,13 @@ static struct dentry *kernfs_iop_lookup(struct inode *dir,
 	if (kernfs_ns_enabled(parent))
 		ns = kernfs_info(dir->i_sb)->ns;
 
+	if (kernfs_vpsa_kernfs_filter_kn_decide_locked(parent, &dentry->d_name, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE) {
+		kernfs_set_rev(parent, dentry);
+		up_read(&root->kernfs_rwsem);
+		return d_splice_alias(NULL, dentry);
+	}
+
 	kn = kernfs_find_ns(parent, dentry->d_name.name, ns);
 	/* attach dentry and inode */
 	if (kn) {
@@ -1899,28 +2003,18 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 	for (pos = kernfs_dir_pos(ns, parent, ctx->pos, pos);
 	     pos;
 	     pos = kernfs_dir_next_pos(ns, parent, ctx->pos, pos)) {
-		const char *name = kernfs_rcu_name(pos), *pname = kernfs_rcu_name(parent);
+		const char *name = kernfs_rcu_name(pos);
 		unsigned int type = fs_umode_to_dtype(pos->mode);
 		int len = strlen(name);
 		ino_t ino = kernfs_ino(pos);
 
 		ctx->pos = pos->hash;
 		file->private_data = pos;
-
-		if (current->nsproxy && current->nsproxy->cgroup_ns != &init_cgroup_ns &&
-		    strncmp(pname, "cpu", 3) == 0 && strncmp(name, "cpu", 3) == 0) {
-			int id = 0;
-			struct cpumask cpu_fake_mask;
-
-			if (!fake_online_cpumask(current, &cpu_fake_mask))
-				goto orig;
-			if (sscanf(name, "cpu%d", &id) != 1)
-				goto orig;
-			if (!cpumask_test_cpu(id, &cpu_fake_mask))
-				continue;
-		}
-orig:
 		kernfs_get(pos);
+
+		if (kernfs_vpsa_kernfs_filter_kn_decide_locked(pos, NULL, MAY_READ) ==
+		    VPSA_KERNFS_FILTER_DECISION_HIDE)
+			continue;
 
 		if (!dir_emit(ctx, name, len, ino, type)) {
 			up_read(&root->kernfs_rwsem);

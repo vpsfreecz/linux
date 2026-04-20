@@ -1498,9 +1498,12 @@ static bool vpsa_kernfs_filter_rule_better_match(const struct vpsa_kernfs_filter
 	return true;
 }
 
-enum vpsa_kernfs_filter_decision
-vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segment_lens,
-			   u16 depth, unsigned int mask)
+static enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_path_decide(enum vpsa_kernfs_filter_rule_fs fs,
+		      const char *const *segments,
+		      const u16 *segment_lens,
+		      u16 depth,
+		      unsigned int mask)
 {
 	struct vpsa_kernfs_filter *policy;
 	const struct vpsa_kernfs_filter_rule *best = NULL;
@@ -1522,7 +1525,7 @@ vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segm
 		const struct vpsa_kernfs_filter_rule *rule = &policy->rules[i];
 		bool explicit_access;
 
-		if (rule->fs != VPSA_KERNFS_FILTER_RULE_FS_PROC)
+		if (rule->fs != fs)
 			continue;
 		if (!vpsa_kernfs_filter_rule_access_matches(rule, req))
 			continue;
@@ -1556,7 +1559,26 @@ out_unlock:
 	rcu_read_unlock();
 	return VPSA_KERNFS_FILTER_DECISION_ALLOW;
 }
+
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segment_lens,
+			   u16 depth, unsigned int mask)
+{
+	return vpsa_kernfs_filter_path_decide(VPSA_KERNFS_FILTER_RULE_FS_PROC, segments,
+				    segment_lens, depth, mask);
+}
 EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_proc_path_decide);
+
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_sysfs_path_decide(const char *const *segments,
+			    const u16 *segment_lens,
+			    u16 depth,
+			    unsigned int mask)
+{
+	return vpsa_kernfs_filter_path_decide(VPSA_KERNFS_FILTER_RULE_FS_SYSFS, segments,
+				    segment_lens, depth, mask);
+}
+EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_sysfs_path_decide);
 
 bool vpsa_kernfs_filter_subject_restricted_userns(const struct user_namespace *ns)
 {
