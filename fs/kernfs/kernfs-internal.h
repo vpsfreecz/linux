@@ -18,6 +18,7 @@
 
 #include <linux/kernfs.h>
 #include <linux/fs_context.h>
+#include <linux/vpsadminos.h>
 
 struct kernfs_iattrs {
 	kuid_t			ia_uid;
@@ -194,6 +195,12 @@ struct kernfs_node *kernfs_new_node(struct kernfs_node *parent,
 				    const char *name, umode_t mode,
 				    kuid_t uid, kgid_t gid,
 				    unsigned flags);
+enum vpsa_kernfs_filter_decision
+kernfs_vpsa_kernfs_filter_kn_decide_locked(const struct kernfs_node *kn,
+				  const struct qstr *leaf, unsigned int mask);
+enum vpsa_kernfs_filter_decision
+kernfs_vpsa_kernfs_filter_kn_decide(const struct kernfs_node *kn,
+			   const struct qstr *leaf, unsigned int mask);
 
 /*
  * file.c
