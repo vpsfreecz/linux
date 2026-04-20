@@ -796,7 +796,7 @@ static bool vpsa_proc_dentry_path_build(const struct dentry *dentry,
 		count++;
 	}
 
-	while (dentry && !d_is_root(dentry)) {
+	while (dentry && !IS_ROOT(dentry)) {
 		if (count >= VPSA_PROC_FILTER_MAX_DEPTH)
 			return false;
 

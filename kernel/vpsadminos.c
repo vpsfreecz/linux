@@ -104,11 +104,19 @@ void fake_sysctl_bufs_free(struct user_namespace *ns)
 
 ssize_t fake_sysfs_kf_read(struct kernfs_open_file *of, char *buf)
 {
-	struct kobject *kobj = of->kn->parent->priv;
-	const struct kobj_type *ktype = get_ktype(kobj);
+	struct kernfs_node *parent = kernfs_get_parent(of->kn);
+	struct kobject *kobj;
+	const struct kobj_type *ktype;
 	unsigned long index = (unsigned long)of->kn;
 	struct user_namespace *ns = current_user_ns();
 	struct fake_sysctl_buf *fbuf;
+
+	if (!parent)
+		return 0;
+
+	kobj = parent->priv;
+	ktype = get_ktype(kobj);
+	kernfs_put(parent);
 
 	if ((ktype == &module_ktype) && (ns != &init_user_ns)) {
 		fbuf = xa_find(&ns->fake_sysctl_bufs, &index, ULONG_MAX, XA_PRESENT);
@@ -126,8 +134,9 @@ ssize_t fake_sysfs_kf_read(struct kernfs_open_file *of, char *buf)
 ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 			   size_t count, loff_t pos)
 {
-	struct kobject *kobj = of->kn->parent->priv;
-	const struct kobj_type *ktype = get_ktype(kobj);
+	struct kernfs_node *parent;
+	struct kobject *kobj;
+	const struct kobj_type *ktype;
 	unsigned long index = (unsigned long)of->kn;
 	struct user_namespace *ns = current_user_ns();
 	struct fake_sysctl_buf *fbuf;
@@ -137,6 +146,14 @@ ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 
 	if ((count > PAGE_SIZE) || (pos > PAGE_SIZE))
 		return 0;
+
+	parent = kernfs_get_parent(of->kn);
+	if (!parent)
+		return 0;
+
+	kobj = parent->priv;
+	ktype = get_ktype(kobj);
+	kernfs_put(parent);
 
 	if ((ktype == &module_ktype) && (ns != &init_user_ns)) {
 		fbuf = xa_find(&ns->fake_sysctl_bufs, &index, ULONG_MAX, XA_PRESENT);
@@ -405,12 +422,11 @@ void fake_cputime_readout_v2(struct task_struct *p, u64 timestamp,
 		goto out;
 
 	if (cgroup_parent(cgrp)) {
-		cgroup_rstat_flush_hold(cgrp);
+		css_rstat_flush(&cgrp->self);
 		usr_old = cgrp->prev_cputime_real.utime;
 		sys_old = cgrp->prev_cputime_real.stime;
 		cputime_adjust(&cgrp->bstat.cputime, &cgrp->prev_cputime_real,
 			       &usr, &sys);
-		cgroup_rstat_flush_release(cgrp);
 	} else
 		goto out;
 
@@ -1876,7 +1892,7 @@ static int vpsa_kernfs_filter_replace_release(struct inode *inode, struct file *
 static const struct proc_ops vpsa_kernfs_filter_replace_proc_ops = {
 	.proc_open	= vpsa_kernfs_filter_replace_open,
 	.proc_write	= vpsa_kernfs_filter_replace_write,
-	.proc_lseek	= no_llseek,
+	.proc_lseek	= noop_llseek,
 	.proc_release	= vpsa_kernfs_filter_replace_release,
 };
 
