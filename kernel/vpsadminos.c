@@ -7,6 +7,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/glob.h>
 #include <linux/sysfs.h>
 #include <linux/memcontrol.h>
 #include <linux/proc_fs.h>
@@ -605,6 +606,9 @@ u64 fake_cputime_readout_idle(u64 timestamp, struct task_struct *p)
 #define VPSA_KERNFS_FILTER_SEG_GLOB			BIT(0)
 #define VPSA_KERNFS_FILTER_SEG_RECURSIVE			BIT(1)
 #define VPSA_KERNFS_FILTER_DEFAULT_POLICY		"version 1\nscope noninit-userns\n"
+#define VPSA_KERNFS_FILTER_SEG_TMP_MAX			256
+#define VPSA_KERNFS_FILTER_REQ_READ			BIT(0)
+#define VPSA_KERNFS_FILTER_REQ_WRITE			BIT(1)
 
 enum vpsa_kernfs_filter_rule_fs {
 	VPSA_KERNFS_FILTER_RULE_FS_PROC,
@@ -1392,6 +1396,167 @@ out:
 	vpsa_kernfs_filter_destroy(policy);
 	return ret;
 }
+
+
+static unsigned int vpsa_kernfs_filter_mask_to_request(unsigned int mask)
+{
+	unsigned int req = 0;
+
+	if (mask & MAY_WRITE)
+		req |= VPSA_KERNFS_FILTER_REQ_WRITE;
+	if (mask & (MAY_READ | MAY_EXEC))
+		req |= VPSA_KERNFS_FILTER_REQ_READ;
+	if (!req)
+		req = VPSA_KERNFS_FILTER_REQ_READ;
+
+	return req;
+}
+
+static bool vpsa_kernfs_filter_segment_pattern_matches(
+	const struct vpsa_kernfs_filter_rule_segment *segment,
+	const char *name, u16 len)
+{
+	char tmp[VPSA_KERNFS_FILTER_SEG_TMP_MAX];
+
+	if (!(segment->flags & VPSA_KERNFS_FILTER_SEG_GLOB))
+		return segment->len == len && !memcmp(segment->pattern, name, len);
+
+	if (len >= sizeof(tmp))
+		return false;
+
+	memcpy(tmp, name, len);
+	tmp[len] = '\0';
+	return glob_match(segment->pattern, tmp);
+}
+
+static bool vpsa_kernfs_filter_rule_matches_segments(const struct vpsa_kernfs_filter_rule *rule,
+				    const char *const *segments,
+				    const u16 *segment_lens,
+				    u16 depth)
+{
+	bool recursive = false;
+	u16 i;
+
+	if (!rule || !segments || !segment_lens || !rule->depth)
+		return false;
+
+	if (rule->segments[rule->depth - 1].flags & VPSA_KERNFS_FILTER_SEG_RECURSIVE)
+		recursive = true;
+
+	if (!recursive && depth != rule->depth)
+		return false;
+	if (recursive && depth + 1 < rule->depth)
+		return false;
+
+	for (i = 0; i < rule->depth; i++) {
+		const struct vpsa_kernfs_filter_rule_segment *seg = &rule->segments[i];
+
+		if (seg->flags & VPSA_KERNFS_FILTER_SEG_RECURSIVE)
+			return true;
+		if (i >= depth)
+			return false;
+		if (!vpsa_kernfs_filter_segment_pattern_matches(seg, segments[i],
+					      segment_lens[i]))
+			return false;
+	}
+
+	return !recursive ? depth == rule->depth : true;
+}
+
+static bool vpsa_kernfs_filter_rule_access_matches(const struct vpsa_kernfs_filter_rule *rule,
+				  unsigned int req)
+{
+	switch (rule->access) {
+	case VPSA_KERNFS_FILTER_RULE_ACCESS_ANY:
+		return true;
+	case VPSA_KERNFS_FILTER_RULE_ACCESS_READ:
+		return req & VPSA_KERNFS_FILTER_REQ_READ;
+	case VPSA_KERNFS_FILTER_RULE_ACCESS_WRITE:
+		return req & VPSA_KERNFS_FILTER_REQ_WRITE;
+	case VPSA_KERNFS_FILTER_RULE_ACCESS_RW:
+		return req & (VPSA_KERNFS_FILTER_REQ_READ | VPSA_KERNFS_FILTER_REQ_WRITE);
+	default:
+		return false;
+	}
+}
+
+static bool vpsa_kernfs_filter_rule_better_match(const struct vpsa_kernfs_filter_rule *rule,
+					bool explicit_access,
+					const struct vpsa_kernfs_filter_rule *best,
+					bool best_explicit_access)
+{
+	if (!best)
+		return true;
+	if (rule->depth != best->depth)
+		return rule->depth > best->depth;
+	if (rule->literal_prefix_depth != best->literal_prefix_depth)
+		return rule->literal_prefix_depth > best->literal_prefix_depth;
+	if (rule->wildcard_segments != best->wildcard_segments)
+		return rule->wildcard_segments < best->wildcard_segments;
+	if (explicit_access != best_explicit_access)
+		return explicit_access;
+	return true;
+}
+
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segment_lens,
+			   u16 depth, unsigned int mask)
+{
+	struct vpsa_kernfs_filter *policy;
+	const struct vpsa_kernfs_filter_rule *best = NULL;
+	bool best_explicit_access = false;
+	unsigned int req;
+	u32 i;
+
+	if (!depth || !vpsa_kernfs_filter_subject_restricted_current())
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	req = vpsa_kernfs_filter_mask_to_request(mask);
+
+	rcu_read_lock();
+	policy = rcu_dereference(vpsa_kernfs_filter_active_policy);
+	if (!policy)
+		goto out_unlock;
+
+	for (i = 0; i < policy->rule_count; i++) {
+		const struct vpsa_kernfs_filter_rule *rule = &policy->rules[i];
+		bool explicit_access;
+
+		if (rule->fs != VPSA_KERNFS_FILTER_RULE_FS_PROC)
+			continue;
+		if (!vpsa_kernfs_filter_rule_access_matches(rule, req))
+			continue;
+		if (!vpsa_kernfs_filter_rule_matches_segments(rule, segments, segment_lens,
+					      depth))
+			continue;
+
+		explicit_access = rule->access != VPSA_KERNFS_FILTER_RULE_ACCESS_ANY;
+		if (vpsa_kernfs_filter_rule_better_match(rule, explicit_access, best,
+						best_explicit_access)) {
+			best = rule;
+			best_explicit_access = explicit_access;
+		}
+	}
+
+	if (!best)
+		goto out_unlock;
+
+	switch (best->action) {
+	case VPSA_KERNFS_FILTER_RULE_ACTION_HIDE:
+		rcu_read_unlock();
+		return VPSA_KERNFS_FILTER_DECISION_HIDE;
+	case VPSA_KERNFS_FILTER_RULE_ACTION_DENY:
+		rcu_read_unlock();
+		return VPSA_KERNFS_FILTER_DECISION_DENY;
+	default:
+		break;
+	}
+
+out_unlock:
+	rcu_read_unlock();
+	return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+}
+EXPORT_SYMBOL_GPL(vpsa_kernfs_filter_proc_path_decide);
 
 bool vpsa_kernfs_filter_subject_restricted_userns(const struct user_namespace *ns)
 {
