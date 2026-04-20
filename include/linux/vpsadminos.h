@@ -7,6 +7,7 @@
 #include <linux/user_namespace.h>
 
 struct cpumask;
+struct dentry;
 struct proc_dir_entry;
 struct seq_file;
 struct task_struct;
@@ -59,6 +60,8 @@ static inline bool vpsa_kernfs_filter_subject_restricted_current(void)
 }
 
 u64 vpsa_kernfs_filter_generation(void);
+bool vpsa_kernfs_filter_dentry_visibility_stale(const struct dentry *dentry);
+void vpsa_kernfs_filter_dentry_set_visibility_token(struct dentry *dentry);
 
 enum vpsa_kernfs_filter_decision
 vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segment_lens,
