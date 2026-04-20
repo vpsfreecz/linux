@@ -64,4 +64,8 @@ enum vpsa_kernfs_filter_decision
 vpsa_kernfs_filter_proc_path_decide(const char *const *segments, const u16 *segment_lens,
 			   u16 depth, unsigned int mask);
 
+enum vpsa_kernfs_filter_decision
+vpsa_kernfs_filter_sysfs_path_decide(const char *const *segments, const u16 *segment_lens,
+			    u16 depth, unsigned int mask);
+
 #endif /* _LINUX_VPSADMINOS_H */
