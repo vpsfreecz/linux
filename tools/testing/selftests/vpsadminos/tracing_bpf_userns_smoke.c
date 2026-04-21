@@ -464,6 +464,193 @@ static int get_program_id(int prog_fd, uint32_t *id)
 	return 0;
 }
 
+static int load_libbpf_probe_errno(enum bpf_prog_type prog_type,
+				   enum bpf_attach_type attach_type,
+				   const struct bpf_insn *insns,
+				   size_t insn_cnt, const char *name,
+				   const char *license, uint32_t kern_version,
+				   int *prog_fd)
+{
+	union bpf_attr attr = {
+		.prog_type = prog_type,
+		.expected_attach_type = attach_type,
+		.insn_cnt = insn_cnt,
+		.insns = (uintptr_t)insns,
+		.license = (uintptr_t)license,
+		.log_buf = (uintptr_t)verifier_log,
+		.log_size = sizeof(verifier_log),
+		.log_level = 1,
+		.kern_version = kern_version,
+	};
+	int fd;
+
+	if (name)
+		snprintf(attr.prog_name, sizeof(attr.prog_name), "%s", name);
+
+	memset(verifier_log, 0, sizeof(verifier_log));
+	fd = do_bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
+	if (fd < 0)
+		return errno;
+
+	if (prog_fd)
+		*prog_fd = fd;
+	else
+		close(fd);
+	return 0;
+}
+
+static int create_cgroup_link_errno(int prog_fd, int cgroup_fd,
+				    enum bpf_attach_type attach_type)
+{
+	union bpf_attr attr = {
+		.link_create.prog_fd = prog_fd,
+		.link_create.target_fd = cgroup_fd,
+		.link_create.attach_type = attach_type,
+	};
+	int fd;
+
+	fd = do_bpf(BPF_LINK_CREATE, &attr, sizeof(attr));
+	if (fd < 0)
+		return errno;
+	close(fd);
+	return 0;
+}
+
+static int prog_info_errno(int prog_fd)
+{
+	struct bpf_prog_info info = {};
+	union bpf_attr attr = {};
+
+	attr.info.bpf_fd = prog_fd;
+	attr.info.info_len = sizeof(info);
+	attr.info.info = (uintptr_t)&info;
+	if (do_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr)) < 0)
+		return errno;
+	return 0;
+}
+
+static int prog_test_run_errno(int prog_fd)
+{
+	union bpf_attr attr = {
+		.test.prog_fd = prog_fd,
+	};
+
+	if (do_bpf(BPF_PROG_TEST_RUN, &attr, sizeof(attr)) < 0)
+		return errno;
+	return 0;
+}
+
+static int prog_pin_errno(int prog_fd)
+{
+	static const char path[] =
+		"/sys/fs/bpf/vpsadminos-libbpf-probe-must-not-pin";
+	union bpf_attr attr = {
+		.pathname = (uintptr_t)path,
+		.bpf_fd = prog_fd,
+	};
+
+	if (do_bpf(BPF_OBJ_PIN, &attr, sizeof(attr)) < 0)
+		return errno;
+	return 0;
+}
+
+static int prog_bind_map_errno(int prog_fd, int map_fd)
+{
+	union bpf_attr attr = {
+		.prog_bind_map.prog_fd = prog_fd,
+		.prog_bind_map.map_fd = map_fd,
+	};
+
+	if (do_bpf(BPF_PROG_BIND_MAP, &attr, sizeof(attr)) < 0)
+		return errno;
+	return 0;
+}
+
+static int prog_raw_tracepoint_errno(int prog_fd)
+{
+	static const char name[] = "sched_switch";
+	union bpf_attr attr = {
+		.raw_tracepoint.prog_fd = prog_fd,
+		.raw_tracepoint.name = (uintptr_t)name,
+	};
+	int fd;
+
+	fd = do_bpf(BPF_RAW_TRACEPOINT_OPEN, &attr, sizeof(attr));
+	if (fd < 0)
+		return errno;
+	close(fd);
+	return 0;
+}
+
+static int prog_stream_read_errno(int prog_fd)
+{
+	char buf[1];
+	union bpf_attr attr = {
+		.prog_stream_read.prog_fd = prog_fd,
+		.prog_stream_read.stream_buf = (uintptr_t)buf,
+		.prog_stream_read.stream_buf_len = sizeof(buf),
+	};
+
+	if (do_bpf(BPF_PROG_STREAM_READ_BY_FD, &attr, sizeof(attr)) < 0)
+		return errno;
+	return 0;
+}
+
+static int prog_array_update_errno(int map_fd, int prog_fd)
+{
+	uint32_t key = 0;
+	uint32_t value = prog_fd;
+	union bpf_attr attr = {
+		.map_fd = map_fd,
+		.key = (uintptr_t)&key,
+		.value = (uintptr_t)&value,
+		.flags = BPF_ANY,
+	};
+
+	if (do_bpf(BPF_MAP_UPDATE_ELEM, &attr, sizeof(attr)) < 0)
+		return errno;
+	return 0;
+}
+
+static int prog_fdinfo_fields(int prog_fd)
+{
+	static const char * const fields[] = {
+		"prog_type:",
+		"prog_jited:",
+		"prog_tag:",
+		"prog_id:",
+		"verified_insns:",
+	};
+	char path[64];
+	char line[256];
+	FILE *fp;
+	size_t i;
+
+	snprintf(path, sizeof(path), "/proc/self/fdinfo/%d", prog_fd);
+	fp = fopen(path, "r");
+	if (!fp)
+		return -errno;
+
+	while (fgets(line, sizeof(line), fp)) {
+		for (i = 0; i < ARRAY_SIZE(fields); i++) {
+			if (!strncmp(line, fields[i], strlen(fields[i]))) {
+				fclose(fp);
+				return 1;
+			}
+		}
+	}
+
+	if (ferror(fp)) {
+		int err = errno ?: EIO;
+
+		fclose(fp);
+		return -err;
+	}
+
+	fclose(fp);
+	return 0;
+}
+
 static int attach_program_errno(int prog_fd, int cgroup_fd,
 				enum bpf_attach_type attach_type,
 				uint32_t attach_flags)
@@ -848,6 +1035,18 @@ static int create_array_map_fd(uint32_t max_entries)
 	return do_bpf(BPF_MAP_CREATE, &attr, sizeof(attr));
 }
 
+static int create_map_fd(enum bpf_map_type type, uint32_t value_size)
+{
+	union bpf_attr attr = {
+		.map_type = type,
+		.key_size = sizeof(uint32_t),
+		.value_size = value_size,
+		.max_entries = 1,
+	};
+
+	return do_bpf(BPF_MAP_CREATE, &attr, sizeof(attr));
+}
+
 static void patch_jump(struct bpf_insn *insns, size_t from, size_t to)
 {
 	insns[from].off = to - from - 1;
@@ -1158,6 +1357,165 @@ static void emit_container_bpf_policy_checks(int out_fd)
 
 	emit_var_stack_matrix_checks(out_fd);
 	emit_array_key_checks(out_fd, "container");
+}
+
+static void
+emit_container_libbpf_probe_checks(int out_fd,
+				   const struct cgroup_fixture *fixture)
+{
+	static const struct bpf_insn zero_return[] = {
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+		BPF_EXIT_INSN(),
+	};
+	static const struct bpf_insn nonzero_return[] = {
+		BPF_MOV64_IMM(BPF_REG_0, 1),
+		BPF_EXIT_INSN(),
+	};
+	struct bpf_insn global_data[] = {
+		BPF_RAW_INSN(BPF_LD | BPF_DW | BPF_IMM, BPF_REG_1,
+			     BPF_PSEUDO_MAP_VALUE, 0, 0),
+		BPF_RAW_INSN(0, 0, 0, 0, 16),
+		BPF_ST_MEM(BPF_DW, BPF_REG_1, 0, 42),
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+		BPF_EXIT_INSN(),
+	};
+	int prog_array_fd = -1;
+	int global_map_fd = -1;
+	int ordinary_map_fd = -1;
+	int global_fd = -1;
+	int named_fd = -1;
+	int probe_fd = -1;
+	int cleanup_err = 0;
+	int fields;
+	int err;
+
+	err = load_libbpf_probe_errno(BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+				      BPF_CGROUP_INET4_CONNECT,
+				      zero_return, ARRAY_SIZE(zero_return),
+				      NULL, "GPL", 0, &probe_fd);
+	dprintf(out_fd, "container_libbpf_probe_load_errno=%d\n", err);
+	if (err)
+		goto out;
+
+	err = load_libbpf_probe_errno(BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+				      BPF_CGROUP_INET4_CONNECT,
+				      nonzero_return,
+				      ARRAY_SIZE(nonzero_return),
+				      NULL, "GPL", 0, NULL);
+	dprintf(out_fd, "container_libbpf_probe_nonprobe_errno=%d\n", err);
+
+	err = load_libbpf_probe_errno(BPF_PROG_TYPE_SOCKET_FILTER, 0,
+				      zero_return, ARRAY_SIZE(zero_return),
+				      "libbpf_nametest", "GPL", 0,
+				      &named_fd);
+	dprintf(out_fd, "container_libbpf_probe_name_load_errno=%d\n", err);
+
+	err = load_libbpf_probe_errno(BPF_PROG_TYPE_SOCKET_FILTER, 0,
+				      zero_return, ARRAY_SIZE(zero_return),
+				      "not_libbpf", "GPL", 0, NULL);
+	dprintf(out_fd, "container_libbpf_probe_bad_name_errno=%d\n", err);
+
+	err = load_libbpf_probe_errno(BPF_PROG_TYPE_SOCKET_FILTER, 0,
+				      zero_return, ARRAY_SIZE(zero_return),
+				      NULL, "MIT", 0, NULL);
+	dprintf(out_fd, "container_libbpf_probe_bad_license_errno=%d\n", err);
+
+	err = load_libbpf_probe_errno(BPF_PROG_TYPE_SOCKET_FILTER, 0,
+				      zero_return, ARRAY_SIZE(zero_return),
+				      NULL, "GPL", 1, NULL);
+	dprintf(out_fd, "container_libbpf_probe_metadata_errno=%d\n", err);
+
+	err = create_cgroup_link_errno(probe_fd, -1,
+				       BPF_CGROUP_INET4_CONNECT);
+	dprintf(out_fd, "container_libbpf_probe_invalid_link_errno=%d\n", err);
+
+	err = create_cgroup_link_errno(probe_fd, fixture->container_fd,
+				       BPF_CGROUP_INET4_CONNECT);
+	dprintf(out_fd, "container_libbpf_probe_valid_link_errno=%d\n", err);
+
+	err = prog_info_errno(probe_fd);
+	dprintf(out_fd, "container_libbpf_probe_info_errno=%d\n", err);
+
+	err = prog_test_run_errno(probe_fd);
+	dprintf(out_fd, "container_libbpf_probe_test_run_errno=%d\n", err);
+
+	err = attach_program_errno(probe_fd, fixture->container_fd,
+				   BPF_CGROUP_INET4_CONNECT, 0);
+	dprintf(out_fd, "container_libbpf_probe_attach_errno=%d\n", err);
+
+	err = prog_pin_errno(probe_fd);
+	dprintf(out_fd, "container_libbpf_probe_pin_errno=%d\n", err);
+
+	ordinary_map_fd = create_map_fd(BPF_MAP_TYPE_ARRAY, sizeof(uint64_t));
+	err = ordinary_map_fd < 0 ? errno : 0;
+	dprintf(out_fd, "container_libbpf_probe_map_create_errno=%d\n", err);
+	if (ordinary_map_fd >= 0) {
+		err = prog_bind_map_errno(probe_fd, ordinary_map_fd);
+		dprintf(out_fd, "container_libbpf_probe_bind_map_errno=%d\n",
+			err);
+	}
+
+	err = prog_raw_tracepoint_errno(probe_fd);
+	dprintf(out_fd, "container_libbpf_probe_raw_tracepoint_errno=%d\n",
+		err);
+
+	prog_array_fd = create_map_fd(BPF_MAP_TYPE_PROG_ARRAY,
+				      sizeof(uint32_t));
+	err = prog_array_fd < 0 ? errno : 0;
+	dprintf(out_fd, "container_libbpf_probe_prog_array_create_errno=%d\n",
+		err);
+	if (prog_array_fd >= 0) {
+		err = prog_array_update_errno(prog_array_fd, probe_fd);
+		dprintf(out_fd,
+			"container_libbpf_probe_prog_array_update_errno=%d\n",
+			err);
+	}
+
+	err = prog_stream_read_errno(probe_fd);
+	dprintf(out_fd, "container_libbpf_probe_stream_read_errno=%d\n",
+		err);
+
+	fields = prog_fdinfo_fields(probe_fd);
+	err = fields < 0 ? -fields : 0;
+	dprintf(out_fd, "container_libbpf_probe_fdinfo_errno=%d\n", err);
+	dprintf(out_fd, "container_libbpf_probe_fdinfo_fields=%d\n",
+		fields < 0 ? -1 : fields);
+
+	global_data[0].imm = -1;
+	err = load_libbpf_probe_errno(BPF_PROG_TYPE_SOCKET_FILTER, 0,
+				      global_data, ARRAY_SIZE(global_data),
+				      NULL, "GPL", 0, NULL);
+	dprintf(out_fd, "container_libbpf_probe_bad_map_fd_errno=%d\n", err);
+
+	global_map_fd = create_map_fd(BPF_MAP_TYPE_ARRAY, 32);
+	err = global_map_fd < 0 ? errno : 0;
+	dprintf(out_fd, "container_libbpf_probe_global_map_create_errno=%d\n",
+		err);
+	if (global_map_fd >= 0) {
+		global_data[0].imm = global_map_fd;
+		err = load_libbpf_probe_errno(BPF_PROG_TYPE_SOCKET_FILTER, 0,
+					      global_data,
+					      ARRAY_SIZE(global_data),
+					      NULL, "GPL", 0, &global_fd);
+		dprintf(out_fd,
+			"container_libbpf_probe_global_load_errno=%d\n", err);
+	}
+
+out:
+	if (global_fd >= 0 && close(global_fd) && !cleanup_err)
+		cleanup_err = errno;
+	if (global_map_fd >= 0 && close(global_map_fd) && !cleanup_err)
+		cleanup_err = errno;
+	if (prog_array_fd >= 0 && close(prog_array_fd) && !cleanup_err)
+		cleanup_err = errno;
+	if (ordinary_map_fd >= 0 && close(ordinary_map_fd) && !cleanup_err)
+		cleanup_err = errno;
+	if (named_fd >= 0 && close(named_fd) && !cleanup_err)
+		cleanup_err = errno;
+	if (probe_fd >= 0 && close(probe_fd) && !cleanup_err)
+		cleanup_err = errno;
+	dprintf(out_fd, "container_libbpf_probe_cleanup_errno=%d\n",
+		cleanup_err);
 }
 
 static void keep_first_error(int *first, int err)
@@ -1765,6 +2123,7 @@ static int child_main(void *arg)
 	dprintf(cfg->pipefd, "first_level_bpf_errno=%d\n", err);
 	xlated_fdpass = cfg->fdpass;
 	emit_container_bpf_policy_checks(cfg->pipefd);
+	emit_container_libbpf_probe_checks(cfg->pipefd, cfg->cgroup);
 	emit_container_cgroup_checks(cfg->pipefd, cfg->cgroup);
 
 	err = run_nested_userns(cfg);
