@@ -2263,6 +2263,37 @@ static void security_load_policycaps(struct selinux_policy *policy)
 	}
 }
 
+static bool selinux_state_has_tracked_children(struct selinux_state *state)
+{
+	bool has_children;
+
+	if (!state)
+		state = &selinux_state;
+
+	mutex_lock(&state->children_lock);
+	has_children = !list_empty(&state->children);
+	mutex_unlock(&state->children_lock);
+
+	return has_children;
+}
+
+static bool selinux_state_allows_parent_policy_mutation(struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	if (state->parent)
+		return true;
+
+	/*
+	 * Child SELinux states still interpret shared object labels and raw SID
+	 * values.  Keep the parent policy and booleans pinned while those child
+	 * states exist or they can silently drift away from the shared object
+	 * model.
+	 */
+	return !selinux_state_has_tracked_children(state);
+}
+
 static int security_preserve_bools(struct selinux_policy *oldpolicy,
 				struct selinux_policy *newpolicy);
 
@@ -2422,6 +2453,12 @@ int security_load_policy_state(struct selinux_state *state,
 
 	if (!state)
 		state = &selinux_state;
+
+	if (!selinux_state_allows_runtime_policy_mutation(state))
+		return -EOPNOTSUPP;
+
+	if (!selinux_state_allows_parent_policy_mutation(state))
+		return -EBUSY;
 
 	newpolicy = kzalloc(sizeof(*newpolicy), GFP_KERNEL);
 	if (!newpolicy)
@@ -3249,6 +3286,12 @@ int security_set_bools_state(struct selinux_state *state,
 
 	if (!selinux_initialized_state(state))
 		return -EINVAL;
+
+	if (!selinux_state_allows_runtime_policy_mutation(state))
+		return -EOPNOTSUPP;
+
+	if (!selinux_state_allows_parent_policy_mutation(state))
+		return -EBUSY;
 
 	oldpolicy = rcu_dereference_protected(state->policy,
 					lockdep_is_held(&state->policy_mutex));
