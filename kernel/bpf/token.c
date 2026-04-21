@@ -300,6 +300,7 @@ bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func
 	case BPF_FUNC_ktime_get_boot_ns:
 	case BPF_FUNC_ktime_get_tai_ns:
 	case BPF_FUNC_jiffies64:
+	case BPF_FUNC_skb_load_bytes:
 	case BPF_FUNC_ringbuf_output:
 	case BPF_FUNC_ringbuf_reserve:
 	case BPF_FUNC_ringbuf_submit:
@@ -318,6 +319,7 @@ bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func
 	case BPF_FUNC_snprintf:
 	case BPF_FUNC_loop:
 	case BPF_FUNC_get_current_pid_tgid:
+	case BPF_FUNC_get_current_cgroup_id:
 	case BPF_FUNC_get_ns_current_pid_tgid:
 	case BPF_FUNC_get_current_uid_gid:
 	case BPF_FUNC_get_current_comm:
