@@ -11465,6 +11465,10 @@ static int __perf_event_set_bpf_prog(struct perf_event *event,
 	if (is_kprobe && perf_event_token_is_container(event) &&
 	    !event->container_kprobe_func_proto)
 		return -EACCES;
+	if (prog->aux->container_userns_lifecycle_kprobe_only &&
+	    (!is_kprobe || !event->container_kprobe_userns_lifecycle ||
+	     !prog->aux->container_userns_lifecycle_kprobe_rdonly_cast))
+		return -EACCES;
 
 	if (is_tracepoint || is_syscall_tp) {
 		int off = trace_event_get_offsets(event->tp_event);
@@ -13152,6 +13156,8 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 			parent_event->container_kprobe_func_proto;
 		event->container_kprobe_access_safe =
 			parent_event->container_kprobe_access_safe;
+		event->container_kprobe_userns_lifecycle =
+			parent_event->container_kprobe_userns_lifecycle;
 		if (event->container_kprobe_btf)
 			btf_get(event->container_kprobe_btf);
 	} else if (bpf_container_tracing_enabled()) {

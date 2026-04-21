@@ -1644,6 +1644,8 @@ struct bpf_prog_aux {
 	bool changes_pkt_data;
 	bool might_sleep;
 	bool kprobe_write_ctx;
+	bool container_userns_lifecycle_kprobe_only;
+	bool container_userns_lifecycle_kprobe_rdonly_cast;
 	u64 prog_array_member_cnt; /* counts how many times as member of prog_array */
 	struct mutex ext_mutex; /* mutex for is_extended and prog_array_member_cnt */
 	struct bpf_arena *arena;
@@ -1753,6 +1755,12 @@ struct bpf_prog {
 		DECLARE_FLEX_ARRAY(struct bpf_insn, insnsi);
 	};
 };
+
+static inline bool
+bpf_prog_container_userns_lifecycle_kprobe_only(const struct bpf_prog *prog)
+{
+	return prog->aux->container_userns_lifecycle_kprobe_only;
+}
 
 struct bpf_array_aux {
 	/* Programs with direct jumps into programs part of this array. */
