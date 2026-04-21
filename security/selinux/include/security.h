@@ -153,6 +153,62 @@ static inline bool selinux_initialized_state(struct selinux_state *state)
 	return smp_load_acquire(&state->initialized);
 }
 
+/*
+ * Child SELinux states still interpret the shared host object model through
+ * raw SIDs unless an object carries explicit state identity alongside them.
+ */
+static inline bool selinux_state_shares_object_model(const struct selinux_state *state)
+{
+	return state && state != &selinux_state;
+}
+
+static inline bool selinux_state_freezes_raw_network_sid_carriers(const struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	/*
+	 * NetLabel, XFRM packet peer labels, request/flow secids, and datagram
+	 * peer secid export still move through raw networking APIs with no attached
+	 * SELinux state identity.  Keep those carriers host-global or frozen when a
+	 * child SELinux state is active.
+	 */
+	return selinux_state_shares_object_model(state);
+}
+
+static inline u32 selinux_state_raw_network_sid(const struct selinux_state *state,
+						      u32 sid)
+{
+	if (!state)
+		state = &selinux_state;
+
+	/*
+	 * The remaining packet/secmark/netpeer/XFRM carriers still have no attached
+	 * SELinux state identity.  When a child state has to project a socket or
+	 * packet subject onto that host-global network plane, pin it to the shared
+	 * unlabeled carrier instead of exporting a raw child-state SID.
+	 */
+	if (selinux_state_freezes_raw_network_sid_carriers(state))
+		return SECINITSID_UNLABELED;
+
+	return sid;
+}
+
+static inline u32 selinux_state_host_network_object_sid(const struct selinux_state *state,
+						      u32 sid)
+{
+	if (!state)
+		state = &selinux_state;
+
+	/*
+	 * The netport/netif/netnode policy tables are still host-owned objects with
+	 * no explicit SELinux state sidecar.  When a child state hits those checks,
+	 * pin the socket subject to the shared unlabeled carrier instead of
+	 * comparing raw child-state SIDs against host-global network object labels.
+	 */
+	return selinux_state_raw_network_sid(state, sid);
+}
+
 static inline void selinux_mark_initialized(void)
 {
 	/* do a synchronized write to avoid race conditions */
@@ -597,7 +653,14 @@ int security_bounded_transition(u32 old_sid, u32 new_sid);
 int security_bounded_transition_state(struct selinux_state *state,
 			      u32 old_sid, u32 new_sid);
 
-int security_sid_mls_copy(u32 sid, u32 mls_sid, u32 *new_sid);
+int security_sid_mls_copy_state(struct selinux_state *state, u32 sid,
+			       u32 mls_sid, u32 *new_sid);
+
+static inline int security_sid_mls_copy(u32 sid, u32 mls_sid, u32 *new_sid)
+{
+	return security_sid_mls_copy_state(&selinux_state, sid, mls_sid,
+					   new_sid);
+}
 
 int security_net_peersid_resolve(u32 nlbl_sid, u32 nlbl_type, u32 xfrm_sid,
 				 u32 *peer_sid);
