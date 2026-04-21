@@ -218,6 +218,13 @@ static void selinux_state_free(struct work_struct *work)
 						      work);
 	struct selinux_state *parent = state->parent;
 
+	if (parent) {
+		mutex_lock(&parent->children_lock);
+		if (!list_empty(&state->sibling))
+			list_del_init(&state->sibling);
+		mutex_unlock(&parent->children_lock);
+	}
+
 	if (state->status_page)
 		__free_page(state->status_page);
 
@@ -240,6 +247,9 @@ int selinux_state_create(struct selinux_state *parent,
 	INIT_WORK(&newstate->work, selinux_state_free);
 	mutex_init(&newstate->status_lock);
 	mutex_init(&newstate->policy_mutex);
+	mutex_init(&newstate->children_lock);
+	INIT_LIST_HEAD(&newstate->children);
+	INIT_LIST_HEAD(&newstate->sibling);
 	newstate->parent = get_selinux_state(parent);
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
 	if (parent)
@@ -258,6 +268,27 @@ int selinux_state_create(struct selinux_state *parent,
 void __put_selinux_state(struct selinux_state *state)
 {
 	schedule_work(&state->work);
+}
+
+void selinux_state_sync_child_enforcing_state(struct selinux_state *parent,
+					      bool enforcing)
+{
+	struct selinux_state *child;
+
+	if (!parent)
+		parent = &selinux_state;
+
+	mutex_lock(&parent->children_lock);
+	list_for_each_entry(child, &parent->children, sibling) {
+		if (selinux_state_allows_runtime_enforcing_change(child))
+			continue;
+
+		enforcing_set_state(child, enforcing);
+		if (enforcing)
+			avc_ss_reset_state(child, 0);
+		selinux_status_update_setenforce_state(child, enforcing);
+	}
+	mutex_unlock(&parent->children_lock);
 }
 
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
@@ -368,6 +399,10 @@ static int selinux_lsmns_backend_create(struct lsm_namespace *ns,
 	error = selinux_task_install_state(task, new_cred, state);
 	if (error)
 		goto fail_state;
+
+	mutex_lock(&state->parent->children_lock);
+	list_add_tail(&state->sibling, &state->parent->children);
+	mutex_unlock(&state->parent->children_lock);
 
 	backend->state = state;
 	ns->backend_data = backend;
@@ -7813,6 +7848,9 @@ static __init int selinux_init(void)
 	INIT_WORK(&selinux_state.work, selinux_state_free);
 	mutex_init(&selinux_state.status_lock);
 	mutex_init(&selinux_state.policy_mutex);
+	mutex_init(&selinux_state.children_lock);
+	INIT_LIST_HEAD(&selinux_state.children);
+	INIT_LIST_HEAD(&selinux_state.sibling);
 
 	/* Set the security state for the initial task. */
 	cred_init_security();

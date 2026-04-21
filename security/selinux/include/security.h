@@ -13,6 +13,7 @@
 #include <linux/dcache.h>
 #include <linux/magic.h>
 #include <linux/types.h>
+#include <linux/list.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
 #include <linux/workqueue.h>
@@ -106,6 +107,9 @@ struct selinux_state {
 	struct selinux_policy __rcu *policy;
 	struct selinux_avc *avc;
 	struct mutex policy_mutex;
+	struct mutex children_lock; /* Protect direct child-state tracking. */
+	struct list_head children; /* Direct child SELinux states. */
+	struct list_head sibling; /* Node in parent->children. */
 	struct selinux_state *parent;
 	refcount_t count;
 	struct work_struct work;
@@ -118,6 +122,8 @@ extern struct selinux_state selinux_state;
 int selinux_state_create(struct selinux_state *parent,
 			 struct selinux_state **state);
 void __put_selinux_state(struct selinux_state *state);
+void selinux_state_sync_child_enforcing_state(struct selinux_state *parent,
+					      bool enforcing);
 
 static inline struct selinux_state *get_selinux_state(struct selinux_state *state)
 {
@@ -159,6 +165,35 @@ static inline void selinux_mark_initialized_state(struct selinux_state *state)
 		state = &selinux_state;
 
 	smp_store_release(&state->initialized, true);
+}
+
+static inline bool selinux_state_allows_runtime_policy_mutation(struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	/*
+	 * Child SELinux states currently reuse the host object model.  Allow the
+	 * initial parent-policy clone into an uninitialized child state, but block
+	 * later policy mutations until per-object state tracking exists.
+	 *
+	 * Parent-state mutation while pinned children exist is guarded separately in
+	 * the security-server helpers.
+	 */
+	return !state->parent || !selinux_initialized_state(state);
+}
+
+static inline bool selinux_state_allows_runtime_enforcing_change(struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	/*
+	 * Child SELinux states still interpret the shared host object model and raw
+	 * SID space.  Keep their enforcing mode pinned to the inherited parent mode
+	 * until per-object state tracking exists.
+	 */
+	return !state->parent;
 }
 
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
