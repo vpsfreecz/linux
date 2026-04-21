@@ -980,6 +980,10 @@ static void *prog_fd_array_get_ptr(struct bpf_map *map,
 		bpf_prog_put(prog);
 		return ERR_PTR(-EINVAL);
 	}
+	if (bpf_prog_container_userns_lifecycle_kprobe_only(prog)) {
+		bpf_prog_put(prog);
+		return ERR_PTR(-EPERM);
+	}
 	if (!bpf_map_token_same_container_domain(map, prog->aux->token)) {
 		bpf_prog_put(prog);
 		return ERR_PTR(-EACCES);
