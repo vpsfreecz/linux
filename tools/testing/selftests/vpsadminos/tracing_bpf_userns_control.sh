@@ -204,6 +204,55 @@ check_eq container_var_stack_max_nospec 1 \
 check_eq container_var_stack_max_zero_init_count 64 \
 	"$(get_field "$out" container_var_stack_max_zero_init_count)"
 
+check_eq container_libbpf_probe_load_errno 0 \
+	"$(get_field "$out" container_libbpf_probe_load_errno)"
+check_eq container_libbpf_probe_nonprobe_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_nonprobe_errno)"
+check_eq container_libbpf_probe_name_load_errno 0 \
+	"$(get_field "$out" container_libbpf_probe_name_load_errno)"
+check_eq container_libbpf_probe_bad_name_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_bad_name_errno)"
+check_eq container_libbpf_probe_bad_license_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_bad_license_errno)"
+check_eq container_libbpf_probe_metadata_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_metadata_errno)"
+check_eq container_libbpf_probe_invalid_link_errno 9 \
+	"$(get_field "$out" container_libbpf_probe_invalid_link_errno)"
+check_eq container_libbpf_probe_valid_link_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_valid_link_errno)"
+check_eq container_libbpf_probe_info_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_info_errno)"
+check_eq container_libbpf_probe_test_run_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_test_run_errno)"
+check_eq container_libbpf_probe_attach_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_attach_errno)"
+check_eq container_libbpf_probe_pin_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_pin_errno)"
+check_eq container_libbpf_probe_map_create_errno 0 \
+	"$(get_field "$out" container_libbpf_probe_map_create_errno)"
+check_eq container_libbpf_probe_bind_map_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_bind_map_errno)"
+check_eq container_libbpf_probe_raw_tracepoint_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_raw_tracepoint_errno)"
+check_eq container_libbpf_probe_prog_array_create_errno 0 \
+	"$(get_field "$out" container_libbpf_probe_prog_array_create_errno)"
+check_eq container_libbpf_probe_prog_array_update_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_prog_array_update_errno)"
+check_eq container_libbpf_probe_stream_read_errno 1 \
+	"$(get_field "$out" container_libbpf_probe_stream_read_errno)"
+check_eq container_libbpf_probe_fdinfo_errno 0 \
+	"$(get_field "$out" container_libbpf_probe_fdinfo_errno)"
+check_eq container_libbpf_probe_fdinfo_fields 0 \
+	"$(get_field "$out" container_libbpf_probe_fdinfo_fields)"
+check_nonzero container_libbpf_probe_bad_map_fd_errno \
+	"$(get_field "$out" container_libbpf_probe_bad_map_fd_errno)"
+check_eq container_libbpf_probe_global_map_create_errno 0 \
+	"$(get_field "$out" container_libbpf_probe_global_map_create_errno)"
+check_eq container_libbpf_probe_global_load_errno 0 \
+	"$(get_field "$out" container_libbpf_probe_global_load_errno)"
+check_eq container_libbpf_probe_cleanup_errno 0 \
+	"$(get_field "$out" container_libbpf_probe_cleanup_errno)"
+
 check_eq container_cgroup_query_disallowed_errno 1 \
 	"$(get_field "$out" container_cgroup_query_disallowed_errno)"
 check_eq container_cgroup_query_peer_errno 13 \
