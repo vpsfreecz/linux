@@ -170,6 +170,10 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 				      SECURITY__SETENFORCE, NULL);
 		if (length)
 			goto out;
+		if (!selinux_state_allows_runtime_enforcing_change(fsi->state)) {
+			length = -EOPNOTSUPP;
+			goto out;
+		}
 		audit_log(audit_context(), GFP_KERNEL, AUDIT_MAC_STATUS,
 			"enforcing=%d old_enforcing=%d auid=%u ses=%u"
 			" enabled=1 old-enabled=1 lsm=selinux res=1",
@@ -181,6 +185,7 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 			avc_ss_reset_state(fsi->state, 0);
 		selinux_status_update_setenforce_state(fsi->state, new_value);
 		if (fsi->state == &selinux_state) {
+			selinux_state_sync_child_enforcing_state(fsi->state, new_value);
 			selnl_notify_setenforce(new_value);
 			if (!new_value)
 				call_blocking_lsm_notifier(LSM_POLICY_CHANGE, NULL);
@@ -604,6 +609,11 @@ static ssize_t sel_write_load(struct file *file, const char __user *buf,
 			      SECURITY__LOAD_POLICY, NULL);
 	if (length)
 		goto out;
+
+	if (!selinux_state_allows_runtime_policy_mutation(fsi->state)) {
+		length = -EOPNOTSUPP;
+		goto out;
+	}
 
 	data = vmalloc(count);
 	if (!data) {
@@ -1307,6 +1317,11 @@ static ssize_t sel_write_bool(struct file *filep, const char __user *buf,
 			      SECURITY__SETBOOL, NULL);
 	if (length)
 		goto out;
+
+	if (!selinux_state_allows_runtime_policy_mutation(fsi->state)) {
+		length = -EOPNOTSUPP;
+		goto out;
+	}
 
 	length = -EINVAL;
 	if (index >= fsi->bool_num || strcmp(name,
