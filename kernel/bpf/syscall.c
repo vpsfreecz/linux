@@ -1436,7 +1436,7 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 		return !attach_type || attach_type == BPF_CGROUP_SYSCTL;
 	case BPF_PROG_TYPE_LSM:
 		return attach_type == BPF_LSM_MAC &&
-		       bpf_lsm_is_file_open_hook(attach_btf_id);
+		       bpf_lsm_is_container_hook(attach_btf_id);
 	default:
 		return false;
 	}
@@ -1451,7 +1451,7 @@ bpf_container_prog_load_perfmon_cap_exempt(bool container_prog_allowed,
 	return container_prog_allowed &&
 	       prog_type == BPF_PROG_TYPE_LSM &&
 	       attach_type == BPF_LSM_MAC &&
-	       bpf_lsm_is_file_open_hook(attach_btf_id);
+	       bpf_lsm_is_container_hook(attach_btf_id);
 }
 
 static bool
@@ -3812,7 +3812,7 @@ static int bpf_tracing_prog_attach(struct bpf_prog *prog,
 			goto out_put_prog;
 		}
 		if (bpf_token_is_container(prog->aux->token) &&
-		    !bpf_lsm_is_file_open_hook(prog->aux->attach_btf_id)) {
+		    !bpf_lsm_is_container_hook(prog->aux->attach_btf_id)) {
 			err = -EPERM;
 			goto out_put_prog;
 		}

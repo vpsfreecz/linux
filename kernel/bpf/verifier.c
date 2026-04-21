@@ -193,6 +193,13 @@ struct bpf_verifier_stack_elem {
 };
 
 #define BPF_COMPLEXITY_LIMIT_JMP_SEQ	8192
+/*
+ * Stock systemd-nsresourced userns-restrict can exceed 262149 pending states
+ * and 2M verifier-processed instructions. Keep the larger budgets scoped to
+ * container-token nsresourced BTF shapes.
+ */
+#define BPF_COMPLEXITY_LIMIT_CONTAINER_NSRESOURCED_JMP_SEQ	524288
+#define BPF_COMPLEXITY_LIMIT_CONTAINER_NSRESOURCED_INSNS	4000000
 #define BPF_COMPLEXITY_LIMIT_STATES	64
 
 #define BPF_MAP_KEY_POISON	(1ULL << 63)
@@ -212,6 +219,9 @@ static int ref_set_non_owning(struct bpf_verifier_env *env,
 static void specialize_kfunc(struct bpf_verifier_env *env,
 			     u32 func_id, u16 offset, unsigned long *addr);
 static bool is_trusted_reg(const struct bpf_reg_state *reg);
+static bool
+container_prog_is_systemd_nsresourced_btf(const struct bpf_prog *prog);
+
 static bool verifier_container_cgroup_bind_prog(const struct bpf_prog *prog)
 {
 	return bpf_token_is_container(prog->aux->token) &&
@@ -232,10 +242,33 @@ static bool verifier_zero_inits_stack(const struct bpf_prog *prog)
 	return verifier_container_cgroup_sysctl_prog(prog);
 }
 
+static bool verifier_container_nsresourced_prog(const struct bpf_prog *prog)
+{
+	return bpf_token_is_container(prog->aux->token) &&
+	       container_prog_is_systemd_nsresourced_btf(prog);
+}
+
 static bool verifier_allows_scalar_precision(const struct bpf_verifier_env *env)
 {
 	return env->bpf_capable ||
-	       verifier_container_cgroup_bind_prog(env->prog);
+	       verifier_container_cgroup_bind_prog(env->prog) ||
+	       verifier_container_nsresourced_prog(env->prog);
+}
+
+static int verifier_jmp_seq_limit(const struct bpf_verifier_env *env)
+{
+	if (verifier_container_nsresourced_prog(env->prog))
+		return BPF_COMPLEXITY_LIMIT_CONTAINER_NSRESOURCED_JMP_SEQ;
+
+	return BPF_COMPLEXITY_LIMIT_JMP_SEQ;
+}
+
+static int verifier_insn_processed_limit(const struct bpf_verifier_env *env)
+{
+	if (verifier_container_nsresourced_prog(env->prog))
+		return BPF_COMPLEXITY_LIMIT_CONTAINER_NSRESOURCED_INSNS;
+
+	return BPF_COMPLEXITY_LIMIT_INSNS;
 }
 
 static bool bpf_map_ptr_poisoned(const struct bpf_insn_aux_data *aux)
@@ -2154,7 +2187,7 @@ static struct bpf_verifier_state *push_stack(struct bpf_verifier_env *env,
 	if (err)
 		return NULL;
 	elem->st.speculative |= speculative;
-	if (env->stack_size > BPF_COMPLEXITY_LIMIT_JMP_SEQ) {
+	if (env->stack_size > verifier_jmp_seq_limit(env)) {
 		verbose(env, "The sequence of %d jumps is too complex.\n",
 			env->stack_size);
 		return NULL;
@@ -3014,7 +3047,7 @@ static struct bpf_verifier_state *push_async_cb(struct bpf_verifier_env *env,
 	elem->log_pos = env->log.end_pos;
 	env->head = elem;
 	env->stack_size++;
-	if (env->stack_size > BPF_COMPLEXITY_LIMIT_JMP_SEQ) {
+	if (env->stack_size > verifier_jmp_seq_limit(env)) {
 		verbose(env,
 			"The sequence of %d jumps is too complex for async cb.\n",
 			env->stack_size);
@@ -7290,17 +7323,64 @@ BTF_ID_LIST_SINGLE(container_cred_id, struct, cred)
 BTF_ID_LIST_SINGLE(container_file_id, struct, file)
 BTF_ID_LIST_SINGLE(container_inode_id, struct, inode)
 BTF_ID_LIST_SINGLE(container_super_block_id, struct, super_block)
+BTF_ID_LIST_SINGLE(container_dentry_id, struct, dentry)
 BTF_ID_LIST_SINGLE(container_linux_binprm_id, struct, linux_binprm)
+BTF_ID_LIST_SINGLE(container_path_id, struct, path)
+BTF_ID_LIST_SINGLE(container_vfsmount_id, struct, vfsmount)
+BTF_ID_LIST_SINGLE(container_mount_id, struct, mount)
+BTF_ID_LIST_SINGLE(container_mnt_namespace_id, struct, mnt_namespace)
+BTF_ID_LIST_SINGLE(container_user_namespace_id, struct, user_namespace)
+BTF_ID_LIST_SINGLE(container_ns_common_id, struct, ns_common)
+BTF_ID_LIST_SINGLE(container_work_struct_id, struct, work_struct)
 
 static bool container_btf_id_matches(const struct btf *btf, u32 btf_id, const u32 *expected_id)
 {
 	return btf_is_kernel(btf) && btf_id == *expected_id;
 }
 
-static bool container_btf_scalar_access_allowed(const struct bpf_reg_state *reg)
+static bool
+container_prog_is_systemd_nsresourced_lsm(const struct bpf_prog *prog)
 {
-	return is_trusted_reg(reg) && btf_is_kernel(reg->btf) &&
-	       btf_id_set_contains(&container_tracing_scalar_types, reg->btf_id);
+	return prog->type == BPF_PROG_TYPE_LSM &&
+	       prog->expected_attach_type == BPF_LSM_MAC &&
+	       bpf_lsm_is_systemd_nsresourced_hook(prog->aux->attach_btf_id);
+}
+
+static bool
+container_prog_is_userns_lifecycle_kprobe(const struct bpf_prog *prog)
+{
+	return prog->type == BPF_PROG_TYPE_KPROBE &&
+	       prog->aux->container_userns_lifecycle_kprobe_only;
+}
+
+static bool
+container_prog_is_systemd_nsresourced_btf(const struct bpf_prog *prog)
+{
+	return container_prog_is_systemd_nsresourced_lsm(prog) ||
+	       container_prog_is_userns_lifecycle_kprobe(prog);
+}
+
+static bool
+container_btf_scalar_access_allowed(const struct bpf_verifier_env *env,
+				    const struct bpf_reg_state *reg)
+{
+	if (is_trusted_reg(reg) && btf_is_kernel(reg->btf) &&
+	    btf_id_set_contains(&container_tracing_scalar_types, reg->btf_id))
+		return true;
+
+	if (!container_prog_is_systemd_nsresourced_btf(env->prog))
+		return false;
+	if (!btf_is_kernel(reg->btf))
+		return false;
+
+	return container_btf_id_matches(reg->btf, reg->btf_id,
+					&container_cred_id[0]) ||
+	       container_btf_id_matches(reg->btf, reg->btf_id,
+					&container_mount_id[0]) ||
+	       container_btf_id_matches(reg->btf, reg->btf_id,
+					&container_user_namespace_id[0]) ||
+	       container_btf_id_matches(reg->btf, reg->btf_id,
+					&container_ns_common_id[0]);
 }
 
 static bool
@@ -7361,6 +7441,133 @@ container_restrict_fs_btf_fixed_ptr_alu_allowed(const struct bpf_verifier_env *e
 		return new_off == offsetof(struct super_block, s_magic);
 
 	return false;
+}
+
+static bool container_btf_member_offset(const struct btf *btf, u32 btf_id,
+					const char *member_name, s64 *ret)
+{
+	const struct btf_member *member;
+	const struct btf_type *t;
+	u32 i;
+
+	t = btf_type_by_id(btf, btf_id);
+	if (!t || !btf_type_is_struct(t))
+		return false;
+
+	for_each_member(i, t, member) {
+		const char *name = btf_name_by_offset(btf, member->name_off);
+
+		if (name && !strcmp(name, member_name)) {
+			*ret = __btf_member_bit_offset(t, member) / 8;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool
+container_nsresourced_btf_fixed_ptr_alu_allowed(const struct bpf_verifier_env *env,
+						const struct bpf_reg_state *ptr_reg,
+						u8 opcode, s64 off)
+{
+	s64 field_off, new_off;
+
+	if (opcode != BPF_ADD && opcode != BPF_SUB)
+		return false;
+	if (!container_prog_is_systemd_nsresourced_btf(env->prog))
+		return false;
+	if (base_type(ptr_reg->type) != PTR_TO_BTF_ID ||
+	    !is_trusted_reg(ptr_reg) || !btf_is_kernel(ptr_reg->btf))
+		return false;
+	if (!tnum_is_const(ptr_reg->var_off) || ptr_reg->var_off.value)
+		return false;
+	if (opcode == BPF_ADD) {
+		if (check_add_overflow(ptr_reg->off, off, &new_off))
+			return false;
+	} else {
+		if (check_sub_overflow(ptr_reg->off, off, &new_off))
+			return false;
+	}
+
+	if (container_btf_id_matches(ptr_reg->btf, ptr_reg->btf_id,
+				     &container_vfsmount_id[0])) {
+		if (!container_btf_member_offset(ptr_reg->btf,
+						 container_mount_id[0],
+						 "mnt", &field_off))
+			return false;
+		return new_off == -field_off;
+	}
+
+	if (container_btf_id_matches(ptr_reg->btf, ptr_reg->btf_id,
+				     &container_work_struct_id[0])) {
+		if (!container_btf_member_offset(ptr_reg->btf,
+						 container_user_namespace_id[0],
+						 "work", &field_off))
+			return false;
+		return new_off == -field_off;
+	}
+
+	return false;
+}
+
+static bool
+container_nsresourced_userns_ptr_comparison_allowed(const struct bpf_verifier_env *env,
+						    const struct bpf_reg_state *dst_reg,
+						    const struct bpf_reg_state *src_reg,
+						    u8 opcode, bool is_jmp32)
+{
+	bool dst_trusted, src_trusted;
+
+	if (is_jmp32 || (opcode != BPF_JEQ && opcode != BPF_JNE))
+		return false;
+	if (!container_prog_is_systemd_nsresourced_btf(env->prog))
+		return false;
+	if (base_type(dst_reg->type) != PTR_TO_BTF_ID ||
+	    base_type(src_reg->type) != PTR_TO_BTF_ID)
+		return false;
+	if (!btf_is_kernel(dst_reg->btf) || !btf_is_kernel(src_reg->btf))
+		return false;
+	if (!container_btf_id_matches(dst_reg->btf, dst_reg->btf_id,
+				      &container_user_namespace_id[0]) ||
+	    !container_btf_id_matches(src_reg->btf, src_reg->btf_id,
+				      &container_user_namespace_id[0]))
+		return false;
+	if (dst_reg->off || src_reg->off)
+		return false;
+	if (!tnum_is_const(dst_reg->var_off) || dst_reg->var_off.value ||
+	    !tnum_is_const(src_reg->var_off) || src_reg->var_off.value)
+		return false;
+
+	dst_trusted = is_trusted_reg(dst_reg);
+	src_trusted = is_trusted_reg(src_reg);
+
+	return dst_trusted != src_trusted;
+}
+
+static bool
+container_nsresourced_userns_null_comparison_allowed(const struct bpf_verifier_env *env,
+						     const struct bpf_reg_state *dst_reg,
+						     u8 opcode, bool is_jmp32,
+						     s32 imm)
+{
+	if (is_jmp32 || (opcode != BPF_JEQ && opcode != BPF_JNE) || imm)
+		return false;
+	if (!container_prog_is_systemd_nsresourced_btf(env->prog))
+		return false;
+	if (base_type(dst_reg->type) != PTR_TO_BTF_ID)
+		return false;
+	if (!btf_is_kernel(dst_reg->btf))
+		return false;
+	if (!container_btf_id_matches(dst_reg->btf, dst_reg->btf_id,
+				      &container_user_namespace_id[0]))
+		return false;
+	if (dst_reg->off)
+		return false;
+	if (!tnum_is_const(dst_reg->var_off) || dst_reg->var_off.value)
+		return false;
+
+	return true;
 }
 
 static bool container_btf_ptr_access_allowed(const struct bpf_reg_state *reg,
@@ -7436,6 +7643,75 @@ container_restrict_fs_btf_ptr_access_allowed(const struct bpf_verifier_env *env,
 	return false;
 }
 
+static bool
+container_nsresourced_btf_ptr_access_allowed(const struct bpf_verifier_env *env,
+					     const struct bpf_reg_state *reg,
+					     const char *field_name, u32 btf_id,
+					     enum bpf_type_flag *flag)
+{
+	enum bpf_type_flag container_flag = *flag & PTR_MAYBE_NULL;
+
+	if (!container_prog_is_systemd_nsresourced_btf(env->prog))
+		return false;
+	if (!field_name || !btf_is_kernel(reg->btf))
+		return false;
+
+	if (is_trusted_reg(reg))
+		container_flag |= PTR_TRUSTED;
+	else
+		container_flag |= PTR_UNTRUSTED;
+
+	if (container_btf_id_matches(reg->btf, reg->btf_id,
+				     &container_cred_id[0])) {
+		if (!strcmp(field_name, "user_ns") &&
+		    btf_id == container_user_namespace_id[0]) {
+			*flag = container_flag;
+			return true;
+		}
+	} else if (container_btf_id_matches(reg->btf, reg->btf_id,
+					    &container_path_id[0])) {
+		if ((!strcmp(field_name, "dentry") &&
+		     btf_id == container_dentry_id[0]) ||
+		    (!strcmp(field_name, "mnt") &&
+		     btf_id == container_vfsmount_id[0])) {
+			*flag = container_flag;
+			return true;
+		}
+	} else if (container_btf_id_matches(reg->btf, reg->btf_id,
+					    &container_dentry_id[0])) {
+		if (!strcmp(field_name, "d_inode") &&
+		    btf_id == container_inode_id[0]) {
+			*flag = container_flag;
+			return true;
+		}
+	} else if (container_btf_id_matches(reg->btf, reg->btf_id,
+					    &container_mount_id[0])) {
+		if (!strcmp(field_name, "mnt_ns") &&
+		    btf_id == container_mnt_namespace_id[0]) {
+			*flag = container_flag;
+			return true;
+		}
+	} else if (container_btf_id_matches(reg->btf, reg->btf_id,
+					    &container_mnt_namespace_id[0])) {
+		if (!strcmp(field_name, "user_ns") &&
+		    btf_id == container_user_namespace_id[0]) {
+			*flag = container_flag;
+			return true;
+		}
+	} else if (container_btf_id_matches(reg->btf, reg->btf_id,
+					    &container_user_namespace_id[0])) {
+		if ((!strcmp(field_name, "parent") &&
+		     btf_id == container_user_namespace_id[0]) ||
+		    (!strcmp(field_name, "ns") &&
+		     btf_id == container_ns_common_id[0])) {
+			*flag = container_flag;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static int check_container_btf_access(struct bpf_verifier_env *env,
 				      struct bpf_reg_state *reg,
 				      const char *field_name, u32 btf_id,
@@ -7445,6 +7721,9 @@ static int check_container_btf_access(struct bpf_verifier_env *env,
 	if (ret == PTR_TO_BTF_ID) {
 		if (container_btf_ptr_access_allowed(reg, field_name, btf_id, flag) ||
 		    container_restrict_fs_btf_ptr_access_allowed(env, reg,
+								 field_name, btf_id,
+								 flag) ||
+		    container_nsresourced_btf_ptr_access_allowed(env, reg,
 								 field_name, btf_id,
 								 flag))
 			return ret;
@@ -7464,7 +7743,7 @@ static int check_container_btf_access(struct bpf_verifier_env *env,
 							    off, size))
 		return ret;
 
-	if (!container_btf_scalar_access_allowed(reg)) {
+	if (!container_btf_scalar_access_allowed(env, reg)) {
 		verbose(env, "container tracing rejects scalar access from %s\n",
 			btf_type_name(reg->btf, reg->btf_id));
 		return -EACCES;
@@ -14465,16 +14744,28 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	if (!insn->imm)
 		return 0;
 
-	if (bpf_token_is_container(env->prog->aux->token)) {
-		verbose(env, "container tracing programs cannot call kernel functions\n");
-		return -EACCES;
-	}
-
 	err = fetch_kfunc_meta(env, insn, &meta, &func_name);
 	if (err == -EACCES && func_name)
 		verbose(env, "calling kernel function %s is not allowed\n", func_name);
 	if (err)
 		return err;
+
+	if (bpf_token_is_container(env->prog->aux->token) &&
+	    env->prog->type == BPF_PROG_TYPE_KPROBE &&
+	    meta.func_id == special_kfunc_list[KF_bpf_rdonly_cast]) {
+		env->prog->aux->container_userns_lifecycle_kprobe_only = true;
+		env->prog->aux->container_userns_lifecycle_kprobe_rdonly_cast = true;
+	}
+
+	if (bpf_token_is_container(env->prog->aux->token) &&
+	    !(meta.func_id == special_kfunc_list[KF_bpf_rdonly_cast] &&
+	      container_prog_is_systemd_nsresourced_btf(env->prog))) {
+		verbose(env,
+			"container tracing programs cannot call kernel function %s\n",
+			func_name ?: "<unknown>");
+		return -EACCES;
+	}
+
 	desc_btf = meta.btf;
 	insn_aux = &env->insn_aux_data[insn_idx];
 
@@ -15309,9 +15600,12 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	__mark_reg32_unbounded(dst_reg);
 
 	container_fixed_btf_alu = known &&
-		container_restrict_fs_btf_fixed_ptr_alu_allowed(env, ptr_reg,
-								opcode,
-								smin_val);
+		(container_restrict_fs_btf_fixed_ptr_alu_allowed(env, ptr_reg,
+								 opcode,
+								 smin_val) ||
+		 container_nsresourced_btf_fixed_ptr_alu_allowed(env, ptr_reg,
+								 opcode,
+								 smin_val));
 
 	if (sanitize_needed(opcode) && !container_fixed_btf_alu) {
 		ret = sanitize_ptr_alu(env, insn, ptr_reg, off_reg, dst_reg,
@@ -17540,7 +17834,9 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 	struct linked_regs linked_regs = {};
 	u8 opcode = BPF_OP(insn->code);
 	int insn_flags = 0;
-	bool is_jmp32;
+	bool nsresourced_userns_ptr_cmp = false;
+	bool nsresourced_userns_null_cmp = false;
+	bool is_jmp32 = BPF_CLASS(insn->code) == BPF_JMP32;
 	int pred = -1;
 	int err;
 
@@ -17592,7 +17888,12 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 			return err;
 
 		src_reg = &regs[insn->src_reg];
+		nsresourced_userns_ptr_cmp =
+			container_nsresourced_userns_ptr_comparison_allowed(env,
+									    dst_reg, src_reg,
+									    opcode, is_jmp32);
 		if (!(reg_is_pkt_pointer_any(dst_reg) && reg_is_pkt_pointer_any(src_reg)) &&
+		    !nsresourced_userns_ptr_cmp &&
 		    is_pointer_value(env, insn->src_reg)) {
 			verbose(env, "R%d pointer comparison prohibited\n",
 				insn->src_reg);
@@ -17612,6 +17913,11 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 		memset(src_reg, 0, sizeof(*src_reg));
 		src_reg->type = SCALAR_VALUE;
 		__mark_reg_known(src_reg, insn->imm);
+		nsresourced_userns_null_cmp =
+			container_nsresourced_userns_null_comparison_allowed(env,
+									     dst_reg, opcode,
+									     is_jmp32,
+									     insn->imm);
 
 		if (dst_reg->type == PTR_TO_STACK)
 			insn_flags |= INSN_F_DST_REG_STACK;
@@ -17623,7 +17929,6 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 			return err;
 	}
 
-	is_jmp32 = BPF_CLASS(insn->code) == BPF_JMP32;
 	pred = is_branch_taken(dst_reg, src_reg, opcode, is_jmp32);
 	if (pred >= 0) {
 		/* If we get here with a dst_reg pointer type it is because
@@ -17771,7 +18076,9 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 				      opcode == BPF_JNE);
 		mark_ptr_or_null_regs(other_branch, insn->dst_reg,
 				      opcode == BPF_JEQ);
-	} else if (!try_match_pkt_pointers(insn, dst_reg, &regs[insn->src_reg],
+	} else if (!nsresourced_userns_ptr_cmp &&
+		   !nsresourced_userns_null_cmp &&
+		   !try_match_pkt_pointers(insn, dst_reg, &regs[insn->src_reg],
 					   this_branch, other_branch) &&
 		   is_pointer_value(env, insn->dst_reg)) {
 		verbose(env, "R%d pointer comparison prohibited\n",
@@ -20913,7 +21220,7 @@ static int do_check(struct bpf_verifier_env *env)
 		insn = &insns[env->insn_idx];
 		insn_aux = &env->insn_aux_data[env->insn_idx];
 
-		if (++env->insn_processed > BPF_COMPLEXITY_LIMIT_INSNS) {
+		if (++env->insn_processed > verifier_insn_processed_limit(env)) {
 			verbose(env,
 				"BPF program is too large. Processed %d insn\n",
 				env->insn_processed);
@@ -24346,7 +24653,7 @@ static void print_verification_stats(struct bpf_verifier_env *env)
 	}
 	verbose(env, "processed %d insns (limit %d) max_states_per_insn %d "
 		"total_states %d peak_states %d mark_read %d\n",
-		env->insn_processed, BPF_COMPLEXITY_LIMIT_INSNS,
+		env->insn_processed, verifier_insn_processed_limit(env),
 		env->max_states_per_insn, env->total_states,
 		env->peak_states, env->longest_mark_read_walk);
 }
