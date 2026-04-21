@@ -145,7 +145,9 @@ struct sk_security_struct {
 	struct netlbl_lsm_secattr *nlbl_secattr; /* NetLabel sec attributes */
 #endif
 	u32 sid; /* SID of this object */
+	struct selinux_state *state; /* SELinux state bound to this socket */
 	u32 peer_sid; /* SID of peer */
+	struct selinux_state *peer_sid_state; /* SELinux state bound to peer_sid */
 	u16 sclass; /* sock security class */
 	enum { /* SCTP association state */
 	       SCTP_ASSOC_UNSET = 0,
