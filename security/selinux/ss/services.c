@@ -3423,10 +3423,11 @@ out:
 }
 
 /*
- * security_sid_mls_copy() - computes a new sid based on the given
+ * security_sid_mls_copy_state() - computes a new sid based on the given
  * sid and the mls portion of mls_sid.
  */
-int security_sid_mls_copy(u32 sid, u32 mls_sid, u32 *new_sid)
+int security_sid_mls_copy_state(struct selinux_state *state,
+				u32 sid, u32 mls_sid, u32 *new_sid)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -3571,8 +3572,7 @@ int security_net_peersid_resolve(u32 nlbl_sid, u32 nlbl_type,
 	 * NetLabel and packet-path XFRM peer resolution still operate on the
 	 * host-global network labeling model.  These peer SIDs do not yet carry a
 	 * per-object SELinux state tag, so keep resolution anchored to the host
-	 * policy until those raw network secid carriers grow explicit state
-	 * identity.
+	 * policy and treat child states as consumers of that host-global carrier.
 	 */
 	if (!selinux_initialized_state(state))
 		return 0;
@@ -4117,6 +4117,7 @@ static void security_netlbl_cache_add(struct netlbl_lsm_secattr *secattr,
 int security_netlbl_secattr_to_sid(struct netlbl_lsm_secattr *secattr,
 				   u32 *sid)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
@@ -4124,9 +4125,10 @@ int security_netlbl_secattr_to_sid(struct netlbl_lsm_secattr *secattr,
 	struct context *ctx;
 	struct context ctx_new;
 
-	if (!state)
-		state = &selinux_state;
-
+	/*
+	 * NetLabel secattrs travel on the wire with no attached SELinux state tag,
+	 * so secattr-to-SID resolution remains host-global.
+	 */
 	if (!selinux_initialized_state(state)) {
 		*sid = SECSID_NULL;
 		return 0;
@@ -4195,14 +4197,16 @@ out:
  */
 int security_netlbl_sid_to_secattr(u32 sid, struct netlbl_lsm_secattr *secattr)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	int rc;
 	struct context *ctx;
 
-	if (!state)
-		state = &selinux_state;
-
+	/*
+	 * NetLabel secattrs remain part of the host-global network labeling model
+	 * until raw network SIDs gain explicit SELinux state identity.
+	 */
 	if (!selinux_initialized_state(state))
 		return 0;
 
