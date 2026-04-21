@@ -180,6 +180,8 @@ static bool bpf_token_allow_container_symbol_access_name(const char *name)
 		"inet_csk_accept",
 		"udp_recvmsg",
 		"udpv6_queue_rcv_one_skb",
+		"free_user_ns",
+		"retire_userns_sysctls",
 	};
 	static const char * const syscall_names[] = {
 		"open",
@@ -401,6 +403,10 @@ bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
 		return true;
 	if (bpf_token_allow_tracing_prog_helper(prog, func_id))
 		return true;
+	if (prog->type == BPF_PROG_TYPE_LSM &&
+	    prog->expected_attach_type == BPF_LSM_MAC &&
+	    bpf_lsm_is_systemd_nsresourced_hook(prog->aux->attach_btf_id))
+		return func_id == BPF_FUNC_get_current_task_btf;
 
 	return (func_id == BPF_FUNC_probe_read ||
 		func_id == BPF_FUNC_probe_read_kernel) &&
