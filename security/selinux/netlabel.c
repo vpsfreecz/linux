@@ -71,6 +71,7 @@ static struct netlbl_lsm_secattr *selinux_netlbl_sock_genattr(struct sock *sk)
 	int rc;
 	struct sk_security_struct *sksec = selinux_sock(sk);
 	struct netlbl_lsm_secattr *secattr;
+	u32 sid;
 
 	if (sksec->nlbl_secattr != NULL)
 		return sksec->nlbl_secattr;
@@ -79,7 +80,8 @@ static struct netlbl_lsm_secattr *selinux_netlbl_sock_genattr(struct sock *sk)
 	if (secattr == NULL)
 		return ERR_PTR(-ENOMEM);
 
-	rc = security_netlbl_sid_to_secattr(sksec->sid, secattr);
+	sid = selinux_state_raw_network_sid(READ_ONCE(sksec->state), sksec->sid);
+	rc = security_netlbl_sid_to_secattr(sid, secattr);
 	if (rc != 0) {
 		netlbl_secattr_free(secattr);
 		return ERR_PTR(rc);
@@ -246,6 +248,7 @@ int selinux_netlbl_skbuff_setsid(struct sk_buff *skb,
 
 		if (sksec->nlbl_state != NLBL_REQSKB)
 			return 0;
+		sid = selinux_state_raw_network_sid(READ_ONCE(sksec->state), sid);
 		secattr = selinux_netlbl_sock_getattr(sk, sid);
 	}
 	if (secattr == NULL) {
@@ -280,6 +283,7 @@ int selinux_netlbl_sctp_assoc_request(struct sctp_association *asoc,
 	int rc;
 	struct netlbl_lsm_secattr secattr;
 	struct sk_security_struct *sksec = selinux_sock(asoc->base.sk);
+	u32 sid;
 	struct sockaddr_in addr4;
 	struct sockaddr_in6 addr6;
 
@@ -288,7 +292,8 @@ int selinux_netlbl_sctp_assoc_request(struct sctp_association *asoc,
 		return 0;
 
 	netlbl_secattr_init(&secattr);
-	rc = security_netlbl_sid_to_secattr(asoc->secid, &secattr);
+	sid = selinux_state_raw_network_sid(READ_ONCE(sksec->state), asoc->secid);
+	rc = security_netlbl_sid_to_secattr(sid, &secattr);
 	if (rc != 0)
 		goto assoc_request_return;
 
@@ -331,12 +336,18 @@ int selinux_netlbl_inet_conn_request(struct request_sock *req, u16 family)
 {
 	int rc;
 	struct netlbl_lsm_secattr secattr;
+	u32 sid = req->secid;
 
 	if (family != PF_INET && family != PF_INET6)
 		return 0;
+	if (req->rsk_listener) {
+		const struct sk_security_struct *sksec = selinux_sock(req->rsk_listener);
+
+		sid = selinux_state_raw_network_sid(READ_ONCE(sksec->state), sid);
+	}
 
 	netlbl_secattr_init(&secattr);
-	rc = security_netlbl_sid_to_secattr(req->secid, &secattr);
+	rc = security_netlbl_sid_to_secattr(sid, &secattr);
 	if (rc != 0)
 		goto inet_conn_request_return;
 	rc = netlbl_req_setattr(req, &secattr);
@@ -441,6 +452,7 @@ int selinux_netlbl_sock_rcv_skb(struct sk_security_struct *sksec,
 {
 	int rc;
 	u32 nlbl_sid;
+	u32 sk_sid;
 	u32 perm;
 	struct netlbl_lsm_secattr secattr;
 
@@ -469,7 +481,9 @@ int selinux_netlbl_sock_rcv_skb(struct sk_security_struct *sksec,
 		perm = RAWIP_SOCKET__RECVFROM;
 	}
 
-	rc = avc_has_perm(sksec->sid, nlbl_sid, sksec->sclass, perm, ad);
+	sk_sid = selinux_state_raw_network_sid(READ_ONCE(sksec->state),
+					      sksec->sid);
+	rc = avc_has_perm(sk_sid, nlbl_sid, sksec->sclass, perm, ad);
 	if (rc == 0)
 		return 0;
 

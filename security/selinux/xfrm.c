@@ -102,10 +102,10 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 	/*
 	 * XFRM contexts are still stored as raw SIDs without attached SELinux
 	 * state identity, and the flow/peer secid interfaces that consume them
-	 * still have no state carrier.  Keep child-state import frozen until that
-	 * raw network labeling path grows explicit SELinux state identity.
+	 * still have no state carrier.  Keep child-state import frozen while that
+	 * raw network labeling path remains host-global.
 	 */
-	if (selinux_state_shares_object_model(state)) {
+	if (selinux_state_freezes_raw_network_sid_carriers(state)) {
 		rc = -EOPNOTSUPP;
 		goto err;
 	}
@@ -367,9 +367,9 @@ int selinux_xfrm_state_alloc_acquire(struct xfrm_state *x,
 	/*
 	 * Child states cannot safely export raw XFRM object secctx yet because the
 	 * XFRM object and flow/peer secid paths still lack attached SELinux state
-	 * identity.
+	 * identity and remain anchored to the host-global raw network SID model.
 	 */
-	if (selinux_state_shares_object_model(state))
+	if (selinux_state_freezes_raw_network_sid_carriers(state))
 		return -EOPNOTSUPP;
 
 	rc = security_sid_to_context_state(state, secid, &ctx_str, &str_len);

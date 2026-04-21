@@ -119,15 +119,6 @@ struct selinux_lsmns_backend_data {
 /* SECMARK reference count */
 static atomic_t selinux_secmark_refcount = ATOMIC_INIT(0);
 
-/*
- * Child SELinux states still interpret shared object labels as raw SIDs
- * without attached state identity.
- */
-static bool selinux_state_shares_object_model(const struct selinux_state *state)
-{
-	return state && state != &selinux_state;
-}
-
 static void selinux_sb_bind_state(struct superblock_security_struct *sbsec,
 				  struct selinux_state *state)
 {
@@ -5128,7 +5119,8 @@ static int selinux_skb_peerlbl_sid(struct sk_buff *skb, u16 family, u32 *sid)
 }
 
 /**
- * selinux_conn_sid - Determine the child socket label for a connection
+ * selinux_conn_sid_state - Determine the child socket label for a connection
+ * @state: the owning SELinux state
  * @sk_sid: the parent socket's SID
  * @skb_sid: the packet's SID
  * @conn_sid: the resulting connection SID
@@ -5139,17 +5131,94 @@ static int selinux_skb_peerlbl_sid(struct sk_buff *skb, u16 family, u32 *sid)
  * of @sk_sid.  Returns zero on success, negative values on failure.
  *
  */
-static int selinux_conn_sid(u32 sk_sid, u32 skb_sid, u32 *conn_sid)
+static int selinux_conn_sid_state(struct selinux_state *state,
+				u32 sk_sid, u32 skb_sid, u32 *conn_sid)
 {
 	int err = 0;
 
-	if (skb_sid != SECSID_NULL)
-		err = security_sid_mls_copy(sk_sid, skb_sid,
-					    conn_sid);
-	else
+	if (skb_sid != SECSID_NULL) {
+		if (selinux_state_freezes_raw_network_sid_carriers(state) &&
+		    skb_sid != SECINITSID_UNLABELED)
+			return -EOPNOTSUPP;
+
+		err = security_sid_mls_copy_state(state, sk_sid, skb_sid,
+						 conn_sid);
+	} else {
 		*conn_sid = sk_sid;
+	}
 
 	return err;
+}
+
+static struct selinux_state *selinux_sock_state_from_sec(const struct sk_security_struct *sksec)
+{
+	struct selinux_state *state = READ_ONCE(sksec->state);
+
+	return state ?: &selinux_state;
+}
+
+static void selinux_sock_bind_state(struct sk_security_struct *sksec,
+				    struct selinux_state *state)
+{
+	struct selinux_state *old = READ_ONCE(sksec->state);
+
+	if (!state)
+		state = &selinux_state;
+	if (old == state)
+		return;
+
+	WRITE_ONCE(sksec->state, get_selinux_state(state));
+	put_selinux_state(old);
+}
+
+static bool selinux_sock_state_matches(const struct sk_security_struct *sksec,
+					   const struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	return selinux_sock_state_from_sec(sksec) == state;
+}
+
+static struct selinux_state *selinux_sock_peer_state_from_sec(const struct sk_security_struct *sksec)
+{
+	struct selinux_state *state = READ_ONCE(sksec->peer_sid_state);
+
+	return state ?: &selinux_state;
+}
+
+static bool selinux_sock_peer_state_matches(const struct sk_security_struct *sksec,
+					   const struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	return selinux_sock_peer_state_from_sec(sksec) == state;
+}
+
+static void selinux_sock_bind_peer_state(struct sk_security_struct *sksec,
+					 struct selinux_state *state)
+{
+	struct selinux_state *old = READ_ONCE(sksec->peer_sid_state);
+
+	if (!state)
+		state = &selinux_state;
+	if (old == state)
+		return;
+
+	WRITE_ONCE(sksec->peer_sid_state, get_selinux_state(state));
+	put_selinux_state(old);
+}
+
+static void selinux_sock_release_security(struct sk_security_struct *sksec)
+{
+	struct selinux_state *state = READ_ONCE(sksec->state);
+	struct selinux_state *peer_state = READ_ONCE(sksec->peer_sid_state);
+
+	WRITE_ONCE(sksec->state, NULL);
+	WRITE_ONCE(sksec->peer_sid_state, NULL);
+	put_selinux_state(state);
+	put_selinux_state(peer_state);
 }
 
 /* socket security operations */
@@ -5249,6 +5318,8 @@ static int selinux_socket_post_create(struct socket *sock, int family,
 		sksec = selinux_sock(sock->sk);
 		sksec->sclass = sclass;
 		sksec->sid = sid;
+		selinux_sock_bind_state(sksec, crsec->state);
+		selinux_sock_bind_peer_state(sksec, &selinux_state);
 		/* Allows detection of the first association on this socket */
 		if (sksec->sclass == SECCLASS_SCTP_SOCKET)
 			sksec->sctp_assoc_state = SCTP_ASSOC_UNSET;
@@ -5266,7 +5337,11 @@ static int selinux_socket_socketpair(struct socket *socka,
 	struct sk_security_struct *sksec_b = selinux_sock(sockb->sk);
 
 	sksec_a->peer_sid = sksec_b->sid;
+	selinux_sock_bind_peer_state(sksec_a,
+				     selinux_sock_state_from_sec(sksec_b));
 	sksec_b->peer_sid = sksec_a->sid;
+	selinux_sock_bind_peer_state(sksec_b,
+				     selinux_sock_state_from_sec(sksec_a));
 
 	return 0;
 }
@@ -5279,6 +5354,7 @@ static int selinux_socket_bind(struct socket *sock, struct sockaddr *address, in
 {
 	struct sock *sk = sock->sk;
 	struct sk_security_struct *sksec = selinux_sock(sk);
+	struct selinux_state *state = selinux_sock_state_from_sec(sksec);
 	u16 family;
 	int err;
 
@@ -5296,6 +5372,7 @@ static int selinux_socket_bind(struct socket *sock, struct sockaddr *address, in
 		struct sockaddr_in6 *addr6 = NULL;
 		u16 family_sa;
 		unsigned short snum;
+		u32 sk_sid;
 		u32 sid, node_perm;
 
 		/*
@@ -5346,6 +5423,7 @@ static int selinux_socket_bind(struct socket *sock, struct sockaddr *address, in
 		ad.u.net = &net;
 		ad.u.net->sport = htons(snum);
 		ad.u.net->family = family_sa;
+		sk_sid = selinux_state_host_network_object_sid(state, sksec->sid);
 
 		if (snum) {
 			int low, high;
@@ -5358,7 +5436,7 @@ static int selinux_socket_bind(struct socket *sock, struct sockaddr *address, in
 						      snum, &sid);
 				if (err)
 					goto out;
-				err = avc_has_perm(sksec->sid, sid,
+				err = avc_has_perm(sk_sid, sid,
 						   sksec->sclass,
 						   SOCKET__NAME_BIND, &ad);
 				if (err)
@@ -5393,7 +5471,7 @@ static int selinux_socket_bind(struct socket *sock, struct sockaddr *address, in
 		else
 			ad.u.net->v6info.saddr = addr6->sin6_addr;
 
-		err = avc_has_perm(sksec->sid, sid,
+		err = avc_has_perm(sk_sid, sid,
 				   sksec->sclass, node_perm, &ad);
 		if (err)
 			goto out;
@@ -5415,6 +5493,7 @@ static int selinux_socket_connect_helper(struct socket *sock,
 {
 	struct sock *sk = sock->sk;
 	struct sk_security_struct *sksec = selinux_sock(sk);
+	struct selinux_state *state = selinux_sock_state_from_sec(sksec);
 	int err;
 
 	err = sock_has_perm(sk, SOCKET__CONNECT);
@@ -5440,6 +5519,7 @@ static int selinux_socket_connect_helper(struct socket *sock,
 		struct sockaddr_in *addr4 = NULL;
 		struct sockaddr_in6 *addr6 = NULL;
 		unsigned short snum;
+		u32 sk_sid;
 		u32 sid, perm;
 
 		/* sctp_connectx(3) calls via selinux_sctp_bind_connect()
@@ -5487,7 +5567,8 @@ static int selinux_socket_connect_helper(struct socket *sock,
 		ad.u.net = &net;
 		ad.u.net->dport = htons(snum);
 		ad.u.net->family = address->sa_family;
-		err = avc_has_perm(sksec->sid, sid, sksec->sclass, perm, &ad);
+		sk_sid = selinux_state_host_network_object_sid(state, sksec->sid);
+		err = avc_has_perm(sk_sid, sid, sksec->sclass, perm, &ad);
 		if (err)
 			return err;
 	}
@@ -5591,27 +5672,36 @@ static int selinux_socket_unix_stream_connect(struct sock *sock,
 	struct sk_security_struct *sksec_sock = selinux_sock(sock);
 	struct sk_security_struct *sksec_other = selinux_sock(other);
 	struct sk_security_struct *sksec_new = selinux_sock(newsk);
+	struct selinux_state *state = selinux_sock_state_from_sec(sksec_other);
 	struct common_audit_data ad;
 	struct lsm_network_audit net;
 	int err;
 
 	ad_net_init_from_sk(&ad, &net, other);
 
-	err = avc_has_perm(sksec_sock->sid, sksec_other->sid,
-			   sksec_other->sclass,
-			   UNIX_STREAM_SOCKET__CONNECTTO, &ad);
+	if (!selinux_sock_state_matches(sksec_sock, state))
+		return -EACCES;
+
+	err = avc_has_perm_state(state, sksec_sock->sid, sksec_other->sid,
+				 sksec_other->sclass,
+				 UNIX_STREAM_SOCKET__CONNECTTO, &ad);
 	if (err)
 		return err;
 
 	/* server child socket */
 	sksec_new->peer_sid = sksec_sock->sid;
-	err = security_sid_mls_copy(sksec_other->sid,
-				    sksec_sock->sid, &sksec_new->sid);
+	selinux_sock_bind_peer_state(sksec_new,
+				     selinux_sock_state_from_sec(sksec_sock));
+	err = security_sid_mls_copy_state(state, sksec_other->sid,
+					    sksec_sock->sid, &sksec_new->sid);
 	if (err)
 		return err;
+	selinux_sock_bind_state(sksec_new, state);
 
 	/* connecting socket */
 	sksec_sock->peer_sid = sksec_new->sid;
+	selinux_sock_bind_peer_state(sksec_sock,
+				     selinux_sock_state_from_sec(sksec_new));
 
 	return 0;
 }
@@ -5638,6 +5728,12 @@ static int selinux_inet_sys_rcv_skb(struct net *ns, int ifindex,
 	u32 if_sid;
 	u32 node_sid;
 
+	/*
+	 * netif/netnode tables remain host-global objects.  Packet peer labels reach
+	 * this path only through the shared raw-network carrier, so child states have
+	 * already been projected onto SECINITSID_UNLABELED before these lookups.
+	 */
+
 	err = sel_netif_sid(ns, ifindex, &if_sid);
 	if (err)
 		return err;
@@ -5658,7 +5754,8 @@ static int selinux_sock_rcv_skb_compat(struct sock *sk, struct sk_buff *skb,
 {
 	int err = 0;
 	struct sk_security_struct *sksec = selinux_sock(sk);
-	u32 sk_sid = sksec->sid;
+	struct selinux_state *state = selinux_sock_state_from_sec(sksec);
+	u32 sk_sid = selinux_state_raw_network_sid(state, sksec->sid);
 	struct common_audit_data ad;
 	struct lsm_network_audit net;
 	char *addrp;
@@ -5678,7 +5775,7 @@ static int selinux_sock_rcv_skb_compat(struct sock *sk, struct sk_buff *skb,
 	err = selinux_netlbl_sock_rcv_skb(sksec, skb, family, &ad);
 	if (err)
 		return err;
-	err = selinux_xfrm_sock_rcv_skb(sksec->sid, skb, &ad);
+	err = selinux_xfrm_sock_rcv_skb(sk_sid, skb, &ad);
 
 	return err;
 }
@@ -5687,8 +5784,9 @@ static int selinux_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	int err, peerlbl_active, secmark_active;
 	struct sk_security_struct *sksec = selinux_sock(sk);
+	struct selinux_state *state = selinux_sock_state_from_sec(sksec);
 	u16 family = sk->sk_family;
-	u32 sk_sid = sksec->sid;
+	u32 sk_sid = selinux_state_raw_network_sid(state, sksec->sid);
 	struct common_audit_data ad;
 	struct lsm_network_audit net;
 	char *addrp;
@@ -5756,6 +5854,7 @@ static int selinux_socket_getpeersec_stream(struct socket *sock,
 	u32 scontext_len;
 	struct sk_security_struct *sksec = selinux_sock(sock->sk);
 	struct selinux_state *state = current_selinux_state();
+	struct selinux_state *peer_state;
 	u32 peer_sid = SECSID_NULL;
 
 	if (sksec->sclass == SECCLASS_UNIX_STREAM_SOCKET ||
@@ -5766,11 +5865,19 @@ static int selinux_socket_getpeersec_stream(struct socket *sock,
 		return -ENOPROTOOPT;
 
 	/*
-	 * Peer secctx export is still ambiguous while child states interpret shared
-	 * object labels as raw SIDs without attached state identity.
+	 * Local stream peers now carry an explicit SELinux state tag through the
+	 * socket peer label, so allow secctx export only from that owning state.
+	 * Packet-derived TCP/SCTP peer labels still ride the host-global raw network
+	 * SID carriers, so child states keep reporting them as unsupported.
 	 */
-	if (selinux_state_shares_object_model(state))
-		return -EOPNOTSUPP;
+	peer_state = selinux_sock_peer_state_from_sec(sksec);
+	if (!selinux_sock_peer_state_matches(sksec, state)) {
+		if (selinux_state_freezes_raw_network_sid_carriers(state) &&
+		    peer_state == &selinux_state)
+			return -EOPNOTSUPP;
+		return -EACCES;
+	}
+	state = peer_state;
 
 	err = security_sid_to_context_state(state, peer_sid, &scontext,
 					    &scontext_len);
@@ -5797,10 +5904,11 @@ static int selinux_socket_getpeersec_dgram(struct socket *sock,
 	u16 family;
 
 	/*
-	 * Child states share host raw secid space for these peer objects, so
-	 * freeze datagram peer secid export while state identity is absent.
+	 * Datagram peer export still returns a raw secid with no attached SELinux
+	 * state identity.  Keep that API frozen for child states until the generic
+	 * networking secid carrier grows an explicit state tag.
 	 */
-	if (selinux_state_shares_object_model(current_selinux_state())) {
+	if (selinux_state_freezes_raw_network_sid_carriers(current_selinux_state())) {
 		*secid = SECSID_NULL;
 		return -EOPNOTSUPP;
 	}
@@ -5835,6 +5943,10 @@ static int selinux_sk_alloc_security(struct sock *sk, int family, gfp_t priority
 
 	sksec->peer_sid = SECINITSID_UNLABELED;
 	sksec->sid = SECINITSID_UNLABELED;
+	WRITE_ONCE(sksec->state, NULL);
+	WRITE_ONCE(sksec->peer_sid_state, NULL);
+	selinux_sock_bind_state(sksec, &selinux_state);
+	selinux_sock_bind_peer_state(sksec, &selinux_state);
 	sksec->sclass = SECCLASS_SOCKET;
 	selinux_netlbl_sk_security_reset(sksec);
 
@@ -5846,6 +5958,7 @@ static void selinux_sk_free_security(struct sock *sk)
 	struct sk_security_struct *sksec = selinux_sock(sk);
 
 	selinux_netlbl_sk_security_free(sksec);
+	selinux_sock_release_security(sksec);
 }
 
 static void selinux_sk_clone_security(const struct sock *sk, struct sock *newsk)
@@ -5854,7 +5967,10 @@ static void selinux_sk_clone_security(const struct sock *sk, struct sock *newsk)
 	struct sk_security_struct *newsksec = selinux_sock(newsk);
 
 	newsksec->sid = sksec->sid;
+	selinux_sock_bind_state(newsksec, selinux_sock_state_from_sec(sksec));
 	newsksec->peer_sid = sksec->peer_sid;
+	selinux_sock_bind_peer_state(newsksec,
+				     selinux_sock_peer_state_from_sec(sksec));
 	newsksec->sclass = sksec->sclass;
 
 	selinux_netlbl_sk_security_reset(newsksec);
@@ -5866,8 +5982,17 @@ static void selinux_sk_getsecid(const struct sock *sk, u32 *secid)
 		*secid = SECINITSID_ANY_SOCKET;
 	else {
 		const struct sk_security_struct *sksec = selinux_sock(sk);
+		struct selinux_state *state = selinux_sock_state_from_sec(sksec);
 
-		*secid = sksec->sid;
+		/*
+		 * The generic networking secid carrier still exposes only a raw secid.
+		 * Keep child-state sockets on the shared unlabeled sentinel until that
+		 * API grows an explicit SELinux state tag.
+		 */
+		if (selinux_state_freezes_raw_network_sid_carriers(state))
+			*secid = SECINITSID_UNLABELED;
+		else
+			*secid = sksec->sid;
 	}
 }
 
@@ -5926,6 +6051,7 @@ static int selinux_sctp_process_new_assoc(struct sctp_association *asoc,
 		 * peer SID for getpeercon(3).
 		 */
 		sksec->peer_sid = asoc->peer_secid;
+		selinux_sock_bind_peer_state(sksec, &selinux_state);
 	} else if (sksec->peer_sid != asoc->peer_secid) {
 		/* Other association peer SIDs are checked to enforce
 		 * consistency among the peer SIDs.
@@ -5948,6 +6074,7 @@ static int selinux_sctp_assoc_request(struct sctp_association *asoc,
 				      struct sk_buff *skb)
 {
 	struct sk_security_struct *sksec = selinux_sock(asoc->base.sk);
+	struct selinux_state *state = selinux_sock_state_from_sec(sksec);
 	u32 conn_sid;
 	int err;
 
@@ -5964,7 +6091,8 @@ static int selinux_sctp_assoc_request(struct sctp_association *asoc,
 	 * socket to be generated. selinux_sctp_sk_clone() will then
 	 * plug this into the new socket.
 	 */
-	err = selinux_conn_sid(sksec->sid, asoc->peer_secid, &conn_sid);
+	err = selinux_conn_sid_state(state, sksec->sid,
+			       asoc->peer_secid, &conn_sid);
 	if (err)
 		return err;
 
@@ -6089,7 +6217,9 @@ static void selinux_sctp_sk_clone(struct sctp_association *asoc, struct sock *sk
 		return selinux_sk_clone_security(sk, newsk);
 
 	newsksec->sid = asoc->secid;
+	selinux_sock_bind_state(newsksec, selinux_sock_state_from_sec(sksec));
 	newsksec->peer_sid = asoc->peer_secid;
+	selinux_sock_bind_peer_state(newsksec, &selinux_state);
 	newsksec->sclass = sksec->sclass;
 	selinux_netlbl_sctp_sk_clone(sk, newsk);
 }
@@ -6101,6 +6231,7 @@ static int selinux_mptcp_add_subflow(struct sock *sk, struct sock *ssk)
 
 	ssksec->sclass = sksec->sclass;
 	ssksec->sid = sksec->sid;
+	selinux_sock_bind_state(ssksec, selinux_sock_state_from_sec(sksec));
 
 	/* replace the existing subflow label deleting the existing one
 	 * and re-recreating a new label using the updated context
@@ -6121,7 +6252,8 @@ static int selinux_inet_conn_request(const struct sock *sk, struct sk_buff *skb,
 	err = selinux_skb_peerlbl_sid(skb, family, &peersid);
 	if (err)
 		return err;
-	err = selinux_conn_sid(sksec->sid, peersid, &connsid);
+	err = selinux_conn_sid_state(selinux_sock_state_from_sec(sksec),
+			       sksec->sid, peersid, &connsid);
 	if (err)
 		return err;
 	req->secid = connsid;
@@ -6134,9 +6266,15 @@ static void selinux_inet_csk_clone(struct sock *newsk,
 				   const struct request_sock *req)
 {
 	struct sk_security_struct *newsksec = selinux_sock(newsk);
+	struct sk_security_struct *listenersec;
 
 	newsksec->sid = req->secid;
+	listenersec = req->rsk_listener ? selinux_sock(req->rsk_listener) : NULL;
+	selinux_sock_bind_state(newsksec, listenersec ?
+				 selinux_sock_state_from_sec(listenersec) :
+				 &selinux_state);
 	newsksec->peer_sid = req->peer_secid;
+	selinux_sock_bind_peer_state(newsksec, &selinux_state);
 	/* NOTE: Ideally, we should also get the isec->sid for the
 	   new socket in sync, but we don't have the isec available yet.
 	   So we will wait until sock_graft to do it, by which
@@ -6157,12 +6295,20 @@ static void selinux_inet_conn_established(struct sock *sk, struct sk_buff *skb)
 		family = PF_INET;
 
 	selinux_skb_peerlbl_sid(skb, family, &sksec->peer_sid);
+	selinux_sock_bind_peer_state(sksec, &selinux_state);
 }
 
 static int selinux_secmark_relabel_packet(u32 sid)
 {
-	return avc_has_perm(current_sid(), sid, SECCLASS_PACKET, PACKET__RELABELTO,
-			    NULL);
+	/*
+	 * SECMARK writes a raw packet SID with no attached SELinux state identity.
+	 * Keep child states off that host-global packet-label carrier.
+	 */
+	if (selinux_state_freezes_raw_network_sid_carriers(current_selinux_state()))
+		return -EOPNOTSUPP;
+
+	return avc_has_perm(current_sid(), sid, SECCLASS_PACKET,
+			    PACKET__RELABELTO, NULL);
 }
 
 static void selinux_secmark_refcount_inc(void)
@@ -6178,6 +6324,18 @@ static void selinux_secmark_refcount_dec(void)
 static void selinux_req_classify_flow(const struct request_sock *req,
 				      struct flowi_common *flic)
 {
+	const struct sock *listener = req->rsk_listener;
+
+	if (listener) {
+		const struct sk_security_struct *sksec = selinux_sock(listener);
+		struct selinux_state *state = selinux_sock_state_from_sec(sksec);
+
+		if (selinux_state_freezes_raw_network_sid_carriers(state)) {
+			flic->flowic_secid = SECINITSID_UNLABELED;
+			return;
+		}
+	}
+
 	flic->flowic_secid = req->secid;
 }
 
@@ -6225,6 +6383,7 @@ static int selinux_tun_dev_attach(struct sock *sk, void *security)
 	 * protocols were being used */
 
 	sksec->sid = tunsec->sid;
+	selinux_sock_bind_state(sksec, current_selinux_state());
 	sksec->sclass = SECCLASS_TUN_SOCKET;
 
 	return 0;
@@ -6354,25 +6513,29 @@ static unsigned int selinux_ip_postroute_compat(struct sk_buff *skb,
 {
 	struct sock *sk;
 	struct sk_security_struct *sksec;
+	struct selinux_state *sk_state;
 	struct common_audit_data ad;
 	struct lsm_network_audit net;
+	u32 sk_sid;
 	u8 proto = 0;
 
 	sk = skb_to_full_sk(skb);
 	if (sk == NULL)
 		return NF_ACCEPT;
 	sksec = selinux_sock(sk);
+	sk_state = selinux_sock_state_from_sec(sksec);
+	sk_sid = selinux_state_raw_network_sid(sk_state, sksec->sid);
 
 	ad_net_init_from_iif(&ad, &net, state->out->ifindex, state->pf);
 	if (selinux_parse_skb(skb, &ad, NULL, 0, &proto))
 		return NF_DROP;
 
 	if (selinux_secmark_enabled())
-		if (avc_has_perm(sksec->sid, skb->secmark,
+		if (avc_has_perm(sk_sid, skb->secmark,
 				 SECCLASS_PACKET, PACKET__SEND, &ad))
 			return NF_DROP_ERR(-ECONNREFUSED);
 
-	if (selinux_xfrm_postroute_last(sksec->sid, skb, &ad, proto))
+	if (selinux_xfrm_postroute_last(sk_sid, skb, &ad, proto))
 		return NF_DROP_ERR(-ECONNREFUSED);
 
 	return NF_ACCEPT;
@@ -6449,8 +6612,10 @@ static unsigned int selinux_ip_postroute(void *priv,
 		 * for similar problems. */
 		u32 skb_sid;
 		struct sk_security_struct *sksec;
+		struct selinux_state *sk_state;
 
 		sksec = selinux_sock(sk);
+		sk_state = selinux_sock_state_from_sec(sksec);
 		if (selinux_skb_peerlbl_sid(skb, family, &skb_sid))
 			return NF_DROP;
 		/* At this point, if the returned skb peerlbl is SECSID_NULL
@@ -6473,14 +6638,17 @@ static unsigned int selinux_ip_postroute(void *priv,
 				return NF_DROP_ERR(-ECONNREFUSED);
 			}
 		}
-		if (selinux_conn_sid(sksec->sid, skb_sid, &peer_sid))
+		if (selinux_conn_sid_state(sk_state, sksec->sid, skb_sid, &peer_sid))
 			return NF_DROP;
+		peer_sid = selinux_state_raw_network_sid(sk_state, peer_sid);
 		secmark_perm = PACKET__SEND;
 	} else {
 		/* Locally generated packet, fetch the security label from the
 		 * associated socket. */
 		struct sk_security_struct *sksec = selinux_sock(sk);
-		peer_sid = sksec->sid;
+
+		peer_sid = selinux_state_raw_network_sid(
+				selinux_sock_state_from_sec(sksec), sksec->sid);
 		secmark_perm = PACKET__SEND;
 	}
 
@@ -6497,6 +6665,12 @@ static unsigned int selinux_ip_postroute(void *priv,
 	if (peerlbl_active) {
 		u32 if_sid;
 		u32 node_sid;
+
+		/*
+		 * peer_sid is already on the shared host-global network carrier here, so
+		 * child sockets reach the host netif/netnode tables only as
+		 * SECINITSID_UNLABELED.
+		 */
 
 		if (sel_netif_sid(state->net, ifindex, &if_sid))
 			return NF_DROP;
