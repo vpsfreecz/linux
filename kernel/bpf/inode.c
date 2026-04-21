@@ -88,6 +88,8 @@ static void *bpf_fd_probe_obj(u32 ufd, enum bpf_type *type)
 	}
 	if (PTR_ERR(raw) == -EACCES)
 		err = -EACCES;
+	else if (PTR_ERR(raw) == -EPERM && err != -EACCES)
+		err = -EPERM;
 
 	raw = bpf_link_get_from_fd(ufd);
 	if (!IS_ERR(raw)) {
