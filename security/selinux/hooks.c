@@ -119,6 +119,15 @@ struct selinux_lsmns_backend_data {
 /* SECMARK reference count */
 static atomic_t selinux_secmark_refcount = ATOMIC_INIT(0);
 
+/*
+ * Child SELinux states still interpret shared object labels as raw SIDs
+ * without attached state identity.
+ */
+static bool selinux_state_shares_object_model(const struct selinux_state *state)
+{
+	return state && state != &selinux_state;
+}
+
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
 static int selinux_enforcing_boot __initdata;
 
@@ -3126,6 +3135,14 @@ static int selinux_dentry_init_security(struct dentry *dentry, int mode,
 	if (rc)
 		return rc;
 
+	/*
+	 * Child states still compute inode labels against the shared host object
+	 * model, so keep create-time secctx export frozen until object labels carry
+	 * explicit state identity.
+	 */
+	if (selinux_state_shares_object_model(current_selinux_state()))
+		return -EOPNOTSUPP;
+
 	if (xattr_name)
 		*xattr_name = XATTR_NAME_SELINUX;
 
@@ -3181,6 +3198,15 @@ static int selinux_inode_init_security(struct inode *inode, struct inode *dir,
 		isec->sid = newsid;
 		isec->initialized = LABEL_INITIALIZED;
 	}
+
+	/*
+	 * Keep the in-core inode label so local permission checks stay coherent, but
+	 * do not export a guest-local secctx into filesystem xattrs while child
+	 * states still interpret shared raw object SIDs without attached state
+	 * identity.
+	 */
+	if (selinux_state_shares_object_model(current_selinux_state()))
+		return -EOPNOTSUPP;
 
 	if (!selinux_initialized() ||
 	    !(sbsec->flags & SBLABEL_MNT))
@@ -3581,6 +3607,13 @@ static int selinux_inode_setxattr(struct mnt_idmap *idmap,
 	if (!selinux_initialized())
 		return (inode_owner_or_capable(idmap, inode) ? 0 : -EPERM);
 
+	/*
+	 * Guest-local file relabeling is still ambiguous while object labels
+	 * remain raw SIDs without state identity.
+	 */
+	if (selinux_state_shares_object_model(current_selinux_state()))
+		return -EOPNOTSUPP;
+
 	sbsec = selinux_superblock(inode->i_sb);
 	if (!(sbsec->flags & SBLABEL_MNT))
 		return -EOPNOTSUPP;
@@ -3820,6 +3853,14 @@ static int selinux_inode_getsecurity(struct mnt_idmap *idmap,
 		return -EOPNOTSUPP;
 
 	/*
+	 * Child states still share raw object SIDs with the host, so exporting an
+	 * in-core inode secctx here would pretend that the object model is already
+	 * guest-local. Let the VFS fall back to the on-disk xattr path instead.
+	 */
+	if (selinux_state_shares_object_model(current_selinux_state()))
+		return -EOPNOTSUPP;
+
+	/*
 	 * If the caller has CAP_MAC_ADMIN, then get the raw context
 	 * value even if it is not defined by current policy; otherwise,
 	 * use the in-core value under current policy.
@@ -3856,6 +3897,13 @@ static int selinux_inode_setsecurity(struct inode *inode, const char *name,
 	int rc;
 
 	if (strcmp(name, XATTR_SELINUX_SUFFIX))
+		return -EOPNOTSUPP;
+
+	/*
+	 * Guest-local secctx writes still target the shared object model, so
+	 * keep them frozen until object labels carry explicit state identity.
+	 */
+	if (selinux_state_shares_object_model(current_selinux_state()))
 		return -EOPNOTSUPP;
 
 	sbsec = selinux_superblock(inode->i_sb);
@@ -5607,6 +5655,13 @@ static int selinux_socket_getpeersec_stream(struct socket *sock,
 	if (peer_sid == SECSID_NULL)
 		return -ENOPROTOOPT;
 
+	/*
+	 * Peer secctx export is still ambiguous while child states interpret shared
+	 * object labels as raw SIDs without attached state identity.
+	 */
+	if (selinux_state_shares_object_model(current_selinux_state()))
+		return -EOPNOTSUPP;
+
 	err = security_sid_to_context(peer_sid, &scontext,
 				      &scontext_len);
 	if (err)
@@ -5630,6 +5685,15 @@ static int selinux_socket_getpeersec_dgram(struct socket *sock,
 {
 	u32 peer_secid = SECSID_NULL;
 	u16 family;
+
+	/*
+	 * Child states share host raw secid space for these peer objects, so
+	 * freeze datagram peer secid export while state identity is absent.
+	 */
+	if (selinux_state_shares_object_model(current_selinux_state())) {
+		*secid = SECSID_NULL;
+		return -EOPNOTSUPP;
+	}
 
 	if (skb && skb->protocol == htons(ETH_P_IP))
 		family = PF_INET;
@@ -6846,6 +6910,21 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 	char *str = value;
 
 	/*
+	 * Child states may still drive task-domain changes, but explicit object
+	 * label override controls remain frozen while the object model is shared.
+	 */
+	if (selinux_state_shares_object_model(state)) {
+		switch (attr) {
+		case LSM_ATTR_FSCREATE:
+		case LSM_ATTR_KEYCREATE:
+		case LSM_ATTR_SOCKCREATE:
+			return -EOPNOTSUPP;
+		default:
+			break;
+		}
+	}
+
+	/*
 	 * Basic control over ability to set these attributes at all.
 	 */
 	switch (attr) {
@@ -7199,6 +7278,14 @@ static int selinux_key_getsecurity(struct key *key, char **_buffer)
 	char *context = NULL;
 	unsigned len;
 	int rc;
+
+	/*
+	 * Child states still interpret shared key labels as raw host-owned SIDs.
+	 * Freeze guest-visible key secctx export until object state identity is
+	 * carried through the key object model.
+	 */
+	if (selinux_state_shares_object_model(current_selinux_state()))
+		return -EOPNOTSUPP;
 
 	rc = security_sid_to_context(ksec->sid,
 				     &context, &len);
