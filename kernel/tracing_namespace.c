@@ -53,6 +53,18 @@ static bool tracing_ns_user_contains(const struct tracing_namespace *ns,
 	return false;
 }
 
+static bool tracing_ns_syslog_contains(const struct tracing_namespace *ns,
+				       const struct syslog_namespace *syslog_ns)
+{
+	while (syslog_ns) {
+		if (syslog_ns == ns->syslog_ns)
+			return true;
+		syslog_ns = syslog_ns->parent;
+	}
+
+	return false;
+}
+
 static bool tracing_ns_can_bind_child(const struct tracing_namespace *old_ns,
 			      const struct user_namespace *user_ns,
 			      const struct pid_namespace *pid_ns,
@@ -87,7 +99,7 @@ bool tracing_ns_matches_task(const struct tracing_namespace *ns,
 	nsproxy = task->nsproxy;
 	cred = __task_cred(task);
 	if (nsproxy && cred && nsproxy->tracing_ns == ns &&
-	    nsproxy->syslog_ns == ns->syslog_ns)
+	    tracing_ns_syslog_contains(ns, nsproxy->syslog_ns))
 		match = tracing_ns_pid_contains(ns,
 				task_active_pid_ns((struct task_struct *)task)) &&
 			tracing_ns_user_contains(ns, cred->user_ns);
@@ -181,15 +193,15 @@ struct tracing_namespace *copy_tracing_ns(bool new_child,
 		return ERR_PTR(-EINVAL);
 
 	if (old_ns != &init_tracing_ns) {
-		pr_notice("tracing_ns: nested create request reused ns=%u for user=%u pid=%u syslog=%u\n",
+		pr_notice("tracing_ns: reject nested create request ns=%u user=%u pid=%u syslog=%u\n",
 		  old_ns->ns.inum, user_ns->ns.inum, pid_ns->ns.inum, syslog_ns->ns.inum);
-		return get_tracing_ns(old_ns);
+		return ERR_PTR(-EPERM);
 	}
 
 	if (!tracing_ns_can_bind_child(old_ns, user_ns, pid_ns, syslog_ns)) {
-		pr_notice("tracing_ns: skipped child bind on incomplete boundary user=%u pid=%u syslog=%u old=%u\n",
+		pr_notice("tracing_ns: reject create on incomplete boundary user=%u pid=%u syslog=%u old=%u\n",
 		  user_ns->ns.inum, pid_ns->ns.inum, syslog_ns->ns.inum, old_ns->ns.inum);
-		return get_tracing_ns(old_ns);
+		return ERR_PTR(-EINVAL);
 	}
 
 	return clone_tracing_ns(user_ns, pid_ns, syslog_ns, old_ns);
