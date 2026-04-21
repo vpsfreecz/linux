@@ -1354,10 +1354,7 @@ static bool kprobe_prog_is_valid_access(int off, int size, enum bpf_access_type 
 					struct bpf_insn_access_aux *info)
 {
 	if (bpf_token_is_container(prog->aux->token)) {
-		if (info && info->log)
-			bpf_log(info->log,
-				"container tracing rejects raw pt_regs access; use typed container-safe kprobe arguments\n");
-		return false;
+		prog->aux->container_userns_lifecycle_kprobe_only = true;
 	}
 
 	if (off < 0 || off >= sizeof(struct pt_regs))
