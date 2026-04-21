@@ -2020,11 +2020,12 @@ __latent_entropy struct task_struct *copy_process(
 	if (!p)
 		goto fork_out;
 	/*
-	 * Pending syslog-ns-on-next-clone state belongs to the current task and
+	 * Pending namespace-on-next-clone state belongs to the current task and
 	 * must not be inherited by the freshly duplicated child task_struct.
 	 */
 	p->syslog_ns_for_child = false;
 	p->syslog_ns_for_child_name = NULL;
+	p->tracing_ns_for_child = false;
 	p->flags &= ~PF_KTHREAD;
 	if (args->kthread)
 		p->flags |= PF_KTHREAD;
