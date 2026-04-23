@@ -2305,6 +2305,23 @@ static inline void bpf_reset_run_ctx(struct bpf_run_ctx *old_ctx)
 
 typedef u32 (*bpf_prog_run_fn)(const struct bpf_prog *prog, const void *ctx);
 
+#ifdef CONFIG_BPF_SYSCALL
+bool bpf_token_is_container(const struct bpf_token *token);
+bool bpf_token_task_match(const struct bpf_token *token,
+			  const struct task_struct *task);
+#endif
+
+static __always_inline bool bpf_prog_run_token_task_allowed(
+	const struct bpf_prog *prog)
+{
+#ifdef CONFIG_BPF_SYSCALL
+	return !bpf_token_is_container(prog->aux->token) ||
+		bpf_token_task_match(prog->aux->token, current);
+#else
+	return true;
+#endif
+}
+
 static __always_inline u32
 bpf_prog_run_array(const struct bpf_prog_array *array,
 		   const void *ctx, bpf_prog_run_fn run_prog)
@@ -2326,8 +2343,7 @@ bpf_prog_run_array(const struct bpf_prog_array *array,
 	old_run_ctx = bpf_set_run_ctx(&run_ctx.run_ctx);
 	item = &array->items[0];
 	while ((prog = READ_ONCE(item->prog))) {
-		if (bpf_token_is_container(prog->aux->token) &&
-		    !bpf_token_task_match(prog->aux->token, current)) {
+		if (!bpf_prog_run_token_task_allowed(prog)) {
 			item++;
 			continue;
 		}
@@ -2373,8 +2389,7 @@ bpf_prog_run_array_uprobe(const struct bpf_prog_array *array,
 	old_run_ctx = bpf_set_run_ctx(&run_ctx.run_ctx);
 	item = &array->items[0];
 	while ((prog = READ_ONCE(item->prog))) {
-		if (bpf_token_is_container(prog->aux->token) &&
-		    !bpf_token_task_match(prog->aux->token, current)) {
+		if (!bpf_prog_run_token_task_allowed(prog)) {
 			item++;
 			continue;
 		}
