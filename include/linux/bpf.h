@@ -2305,6 +2305,16 @@ static inline void bpf_reset_run_ctx(struct bpf_run_ctx *old_ctx)
 
 typedef u32 (*bpf_prog_run_fn)(const struct bpf_prog *prog, const void *ctx);
 
+#ifdef CONFIG_BPF_SYSCALL
+bool bpf_token_is_container(const struct bpf_token *token);
+bool bpf_token_task_match(const struct bpf_token *token,
+			  const struct task_struct *task);
+#else
+static inline bool bpf_token_is_container(const struct bpf_token *token);
+static inline bool bpf_token_task_match(const struct bpf_token *token,
+					const struct task_struct *task);
+#endif
+
 static __always_inline u32
 bpf_prog_run_array(const struct bpf_prog_array *array,
 		   const void *ctx, bpf_prog_run_fn run_prog)
