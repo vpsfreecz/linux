@@ -2,6 +2,7 @@
 #ifndef _LINUX_SYSLOG_NS_H
 #define _LINUX_SYSLOG_NS_H
 
+#include <linux/cred.h>
 #include <linux/err.h>
 #include <linux/ns_common.h>
 #include <linux/nsproxy.h>
