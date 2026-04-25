@@ -124,9 +124,9 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 {
 	bool new_syslog_ns = false;
 	bool new_tracing_ns = false;
+	bool consume_lsm_req = false;
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	bool new_lsm_ns = false;
-	bool consume_lsm_req = false;
 	struct lsm_ctx *new_lsm_ctx = NULL;
 	struct lsm_namespace *created_lsm_ns;
 #endif
