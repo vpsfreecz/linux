@@ -6500,7 +6500,7 @@ static unsigned int selinux_ip_postroute_compat(struct sk_buff *skb,
 {
 	struct sock *sk;
 	struct sk_security_struct *sksec;
-	struct selinux_state *sk_state;
+	struct selinux_state *sock_state;
 	struct common_audit_data ad;
 	struct lsm_network_audit net;
 	u32 sk_sid;
@@ -6510,8 +6510,8 @@ static unsigned int selinux_ip_postroute_compat(struct sk_buff *skb,
 	if (sk == NULL)
 		return NF_ACCEPT;
 	sksec = selinux_sock(sk);
-	sk_state = selinux_sock_state_from_sec(sksec);
-	sk_sid = selinux_state_raw_network_sid(sk_state, sksec->sid);
+	sock_state = selinux_sock_state_from_sec(sksec);
+	sk_sid = selinux_state_raw_network_sid(sock_state, sksec->sid);
 
 	ad_net_init_from_iif(&ad, &net, state->out->ifindex, state->pf);
 	if (selinux_parse_skb(skb, &ad, NULL, 0, &proto))
@@ -6599,10 +6599,10 @@ static unsigned int selinux_ip_postroute(void *priv,
 		 * for similar problems. */
 		u32 skb_sid;
 		struct sk_security_struct *sksec;
-		struct selinux_state *sk_state;
+		struct selinux_state *sock_state;
 
 		sksec = selinux_sock(sk);
-		sk_state = selinux_sock_state_from_sec(sksec);
+		sock_state = selinux_sock_state_from_sec(sksec);
 		if (selinux_skb_peerlbl_sid(skb, family, &skb_sid))
 			return NF_DROP;
 		/* At this point, if the returned skb peerlbl is SECSID_NULL
