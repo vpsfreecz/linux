@@ -25,8 +25,10 @@
 
 struct child_cfg {
 	int pipefd;
+	int startfd;
 	int readyfd;
 	int releasefd;
+	pid_t parent_pid;
 	bool nested_attempt;
 	bool setns_parent_tracing;
 	const char *nested_syslog_name;
@@ -66,6 +68,51 @@ static int emit_ns_links(int fd, const char *prefix)
 	}
 
 	return 0;
+}
+
+static int write_file(const char *path, const char *buf)
+{
+	size_t len = strlen(buf);
+	ssize_t written;
+	int fd, err = 0;
+
+	fd = open(path, O_WRONLY | O_CLOEXEC);
+	if (fd < 0)
+		return errno;
+
+	written = write(fd, buf, len);
+	if (written != (ssize_t)len)
+		err = errno ? errno : EIO;
+
+	close(fd);
+	return err;
+}
+
+static int write_child_id_map(pid_t pid, const char *name, uid_t id)
+{
+	char path[PATH_MAX];
+	char buf[64];
+
+	snprintf(path, sizeof(path), "/proc/%d/%s", pid, name);
+	snprintf(buf, sizeof(buf), "0 %u 1\n", id);
+	return write_file(path, buf);
+}
+
+static int setup_child_idmaps(pid_t pid)
+{
+	char path[PATH_MAX];
+	int err;
+
+	snprintf(path, sizeof(path), "/proc/%d/setgroups", pid);
+	err = write_file(path, "deny\n");
+	if (err && err != ENOENT)
+		return err;
+
+	err = write_child_id_map(pid, "uid_map", getuid());
+	if (err)
+		return err;
+
+	return write_child_id_map(pid, "gid_map", getgid());
 }
 
 static void maybe_hold_for_parent_probe(struct child_cfg *cfg)
@@ -219,7 +266,12 @@ static int maybe_run_nested_syslog_child(struct child_cfg *cfg)
 static int child_main(void *arg)
 {
 	struct child_cfg *cfg = arg;
+	char byte;
 	int err = 0;
+
+	while (read(cfg->startfd, &byte, 1) < 0 && errno == EINTR)
+		;
+	close(cfg->startfd);
 
 	if (emit_ns_links(cfg->pipefd, "child")) {
 		err = errno;
@@ -240,7 +292,8 @@ static int child_main(void *arg)
 		int ret;
 		int setns_errno;
 
-		snprintf(path, sizeof(path), "/proc/%d/ns/tracing", getppid());
+		snprintf(path, sizeof(path), "/proc/%d/ns/tracing",
+			 cfg->parent_pid);
 		fd = open(path, O_RDONLY | O_CLOEXEC);
 		if (fd < 0) {
 			dprintf(cfg->pipefd, "child_setns_parent_tracing_errno=%d\n", errno);
@@ -278,6 +331,7 @@ int main(int argc, char **argv)
 	const char *nested_syslog_name = NULL;
 	char *stack;
 	int pipefd[2];
+	int start_pipe[2] = { -1, -1 };
 	int ready_pipe[2] = { -1, -1 };
 	int release_pipe[2] = { -1, -1 };
 	struct child_cfg cfg;
@@ -286,6 +340,7 @@ int main(int argc, char **argv)
 	char buf[4096];
 	ssize_t nr;
 	int i;
+	int err;
 	bool need_parent_probe;
 
 	for (i = 1; i < argc; i++) {
@@ -371,10 +426,18 @@ int main(int argc, char **argv)
 		perror("pipe");
 		return 1;
 	}
+	if (pipe(start_pipe) < 0) {
+		perror("pipe");
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return 1;
+	}
 
 	if (need_parent_probe) {
 		if (pipe(ready_pipe) < 0 || pipe(release_pipe) < 0) {
 			perror("pipe");
+			close(start_pipe[0]);
+			close(start_pipe[1]);
 			return 1;
 		}
 	}
@@ -392,10 +455,12 @@ int main(int argc, char **argv)
 	}
 
 	cfg.pipefd = pipefd[1];
+	cfg.startfd = start_pipe[0];
 	cfg.readyfd = need_parent_probe ?
 		ready_pipe[1] : -1;
 	cfg.releasefd = need_parent_probe ?
 		release_pipe[0] : -1;
+	cfg.parent_pid = getpid();
 	cfg.nested_attempt = nested_attempt;
 	cfg.setns_parent_tracing = setns_parent_tracing;
 	cfg.nested_syslog_name = nested_syslog_name;
@@ -406,6 +471,8 @@ int main(int argc, char **argv)
 		dprintf(STDOUT_FILENO, "clone_errno=%d\n", errno);
 		close(pipefd[0]);
 		close(pipefd[1]);
+		close(start_pipe[0]);
+		close(start_pipe[1]);
 		if (need_parent_probe) {
 			close(ready_pipe[0]);
 			close(ready_pipe[1]);
@@ -415,6 +482,14 @@ int main(int argc, char **argv)
 		free(stack);
 		return 0;
 	}
+
+	close(start_pipe[0]);
+	err = setup_child_idmaps(pid);
+	if (err)
+		dprintf(STDOUT_FILENO, "setup_child_idmap_errno=%d\n", err);
+	if (write(start_pipe[1], "S", 1) < 0)
+		perror("write");
+	close(start_pipe[1]);
 
 	close(pipefd[1]);
 	if (need_parent_probe) {

@@ -42,6 +42,38 @@ static void consume_pending_child_ns_request(struct task_struct *task)
 	task->syslog_ns_for_child_name = NULL;
 }
 
+static void restore_child_userns_syslog_default(struct user_namespace *user_ns,
+					struct syslog_namespace *new_ns,
+					struct syslog_namespace *old_ns)
+{
+#ifdef CONFIG_SYSLOG_NS
+	if (user_ns && user_ns != current_user_ns() &&
+	    user_ns->syslog_ns == new_ns) {
+		struct syslog_namespace *drop = user_ns->syslog_ns;
+
+		get_syslog_ns(old_ns);
+		user_ns->syslog_ns = old_ns;
+		put_syslog_ns(drop);
+	}
+#endif
+}
+
+#ifdef CONFIG_TRACING_NS
+static void restore_child_userns_tracing_default(struct user_namespace *user_ns,
+					struct tracing_namespace *new_ns,
+					struct tracing_namespace *old_ns)
+{
+	if (user_ns && user_ns != current_user_ns() &&
+	    user_ns->tracing_ns == new_ns) {
+		struct tracing_namespace *drop = user_ns->tracing_ns;
+
+		get_tracing_ns(old_ns);
+		user_ns->tracing_ns = old_ns;
+		put_tracing_ns(drop);
+	}
+}
+#endif
+
 struct nsproxy init_nsproxy = {
 	.count			= REFCOUNT_INIT(1),
 	.uts_ns			= &init_uts_ns,
@@ -173,6 +205,8 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 
 #ifdef CONFIG_TRACING_NS
 out_tracing:
+	restore_child_userns_syslog_default(user_ns, new_nsp->syslog_ns,
+					    tsk->nsproxy->syslog_ns);
 	put_syslog_ns(new_nsp->syslog_ns);
 #endif
 out_syslog:

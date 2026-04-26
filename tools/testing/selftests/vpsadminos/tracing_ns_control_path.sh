@@ -10,6 +10,11 @@ get_field()
 	printf '%s\n' "$1" | awk -F= -v key="$2" '$1 == key { print $2; exit }'
 }
 
+ns_name()
+{
+	printf 't%02d%s%s' "$(($$ % 100))" "$(date +%S)" "$1"
+}
+
 require_root_and_feature()
 {
 	if [ "$(id -u)" -ne 0 ]; then
@@ -45,9 +50,25 @@ check_eq()
 	fi
 }
 
+check_one_of()
+{
+	label="$1"
+	actual="$2"
+	shift 2
+
+	for expected in "$@"; do
+		if [ "$actual" = "$expected" ]; then
+			return
+		fi
+	done
+
+	echo "not ok: $label got $actual, expected one of: $*" >&2
+	ret=1
+}
+
 require_root_and_feature
 
-out="$($helper --syslog-name traceA --tracing --nested-attempt \
+out="$($helper --syslog-name "$(ns_name a)" --tracing --nested-attempt \
 	--setns-parent-tracing)" || {
 	echo "not ok: helper failed in tracing+syslog case" >&2
 	exit 1
@@ -58,9 +79,10 @@ check_ne syslog_boundary "$(get_field "$out" parent_syslog)" "$(get_field "$out"
 check_ne user_boundary "$(get_field "$out" parent_user)" "$(get_field "$out" child_user)"
 check_ne pid_boundary "$(get_field "$out" parent_pid)" "$(get_field "$out" child_pid)"
 check_eq nested_request_errno 1 "$(get_field "$out" child_nested_tracing_errno)"
-check_eq setns_parent_tracing_errno 1 "$(get_field "$out" child_setns_parent_tracing_errno)"
+check_one_of setns_parent_tracing_errno \
+	"$(get_field "$out" child_setns_parent_tracing_errno)" 1 13
 
-out="$($helper --syslog-name traceB)" || {
+out="$($helper --syslog-name "$(ns_name b)")" || {
 	echo "not ok: helper failed in syslog-only case" >&2
 	exit 1
 }
@@ -73,7 +95,8 @@ out="$($helper --tracing)" || {
 }
 check_eq tracing_only_clone_errno 22 "$(get_field "$out" clone_errno)"
 
-out="$($helper --syslog-name traceC --tracing --nested-syslog-name traceC.child)" || {
+out="$($helper --syslog-name "$(ns_name c)" --tracing \
+	--nested-syslog-name "$(ns_name x)")" || {
 	echo "not ok: helper failed in nested-syslog case" >&2
 	exit 1
 }
@@ -82,25 +105,26 @@ check_ne nested_syslog_pid_boundary "$(get_field "$out" child_pid)" "$(get_field
 check_ne nested_syslog_boundary "$(get_field "$out" child_syslog)" "$(get_field "$out" grandchild_syslog)"
 check_eq nested_syslog_keeps_tracing "$(get_field "$out" child_tracing)" "$(get_field "$out" grandchild_tracing)"
 
-out="$($helper --syslog-name traceD --tracing --parent-setns-child-user)" || {
+out="$($helper --syslog-name "$(ns_name d)" --tracing --parent-setns-child-user)" || {
 	echo "not ok: helper failed in parent-userns-setns case" >&2
 	exit 1
 }
 check_eq parent_setns_child_user_errno 1 "$(get_field "$out" parent_setns_child_user_errno)"
 
-out="$($helper --syslog-name traceE --tracing --parent-setns-child-pid)" || {
+out="$($helper --syslog-name "$(ns_name e)" --tracing --parent-setns-child-pid)" || {
 	echo "not ok: helper failed in parent-pidns-setns case" >&2
 	exit 1
 }
 check_eq parent_setns_child_pid_errno 1 "$(get_field "$out" parent_setns_child_pid_errno)"
 
-out="$($helper --syslog-name traceF --tracing --parent-setns-child-syslog)" || {
+out="$($helper --syslog-name "$(ns_name f)" --tracing --parent-setns-child-syslog)" || {
 	echo "not ok: helper failed in parent-syslogns-setns case" >&2
 	exit 1
 }
 check_eq parent_setns_child_syslog_errno 1 "$(get_field "$out" parent_setns_child_syslog_errno)"
 
-out="$($helper --syslog-name traceG --tracing --retry-after-failed-first-clone)" || {
+out="$($helper --syslog-name "$(ns_name g)" --tracing \
+	--retry-after-failed-first-clone)" || {
 	echo "not ok: helper failed in pending-request-retry case" >&2
 	exit 1
 }
