@@ -2599,6 +2599,7 @@ static int ocontext_to_sid(struct sidtab *sidtab, struct ocontext *c,
  */
 int security_port_sid(u8 protocol, u16 port, u32 *out_sid)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
@@ -2654,6 +2655,7 @@ out:
  */
 int security_ib_pkey_sid(u64 subnet_prefix, u16 pkey_num, u32 *out_sid)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
@@ -2709,6 +2711,7 @@ out:
  */
 int security_ib_endport_sid(const char *dev_name, u8 port_num, u32 *out_sid)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
@@ -2764,6 +2767,7 @@ out:
  */
 int security_netif_sid(const char *name, u32 *if_sid)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
@@ -2839,6 +2843,7 @@ int security_node_sid(u16 domain,
 		      u32 addrlen,
 		      u32 *out_sid)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
@@ -3125,6 +3130,7 @@ int security_genfs_sid(const char *fstype,
 		       u16 orig_sclass,
 		       u32 *sid)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	int retval;
 
@@ -3162,6 +3168,7 @@ int selinux_policy_genfs_sid(struct selinux_policy *policy,
  */
 int security_fs_use(struct super_block *sb)
 {
+	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
