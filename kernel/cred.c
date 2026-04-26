@@ -16,6 +16,7 @@
 #include <linux/keyctl.h>
 #include <linux/init_task.h>
 #include <linux/security.h>
+#include <linux/lsm_namespace.h>
 #include <linux/binfmts.h>
 #include <linux/cn_proc.h>
 #include <linux/uidgid.h>
@@ -398,6 +399,12 @@ int commit_creds(struct cred *new)
 	       atomic_long_read(&new->usage));
 
 	BUG_ON(task->cred != old);
+	if (old->user_ns != new->user_ns || !uid_eq(old->uid, new->uid) ||
+	    !uid_eq(old->euid, new->euid) || !gid_eq(old->gid, new->gid) ||
+	    !gid_eq(old->egid, new->egid) || !cred_cap_issubset(old, new) ||
+	    !cred_cap_issubset(new, old))
+		lsm_ns_clear_pending_child_request(task);
+
 	BUG_ON(atomic_long_read(&new->usage) < 1);
 
 	get_cred(new); /* we will require a ref for the subj creds too */
