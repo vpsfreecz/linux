@@ -61,6 +61,7 @@
 #include <linux/oom.h>
 #include <linux/compat.h>
 #include <linux/vmalloc.h>
+#include <linux/lsm_namespace.h>
 #include <linux/io_uring.h>
 #include <linux/syscall_user_dispatch.h>
 #include <linux/coredump.h>
@@ -1105,6 +1106,9 @@ int begin_new_exec(struct linux_binprm * bprm)
 	retval = bprm_creds_from_file(bprm);
 	if (retval)
 		return retval;
+
+	/* A pending LSM namespace request is bound to the task image that armed it. */
+	lsm_ns_clear_pending_child_request(me);
 
 	/*
 	 * This tracepoint marks the point before flushing the old exec where
