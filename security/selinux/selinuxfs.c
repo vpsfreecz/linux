@@ -1540,6 +1540,7 @@ static ssize_t sel_read_sidtab_hash_stats(struct file *filp, char __user *buf,
 {
 	char *page;
 	ssize_t length;
+	struct selinux_fs_info *fsi = file_inode(filp)->i_sb->s_fs_info;
 
 	page = (char *)__get_free_page(GFP_KERNEL);
 	if (!page)
