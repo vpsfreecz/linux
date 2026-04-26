@@ -33,6 +33,7 @@
 #include "avc.h"
 #include "avc_ss.h"
 #include "classmap.h"
+#include "objsec.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/avc.h>

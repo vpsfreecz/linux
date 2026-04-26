@@ -16,6 +16,7 @@
 
 #include "include/apparmor.h"
 #include "include/audit.h"
+#include "include/cred.h"
 #include "include/policy.h"
 #include "include/policy_ns.h"
 #include "include/secid.h"
