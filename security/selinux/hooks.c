@@ -6625,9 +6625,10 @@ static unsigned int selinux_ip_postroute(void *priv,
 				return NF_DROP_ERR(-ECONNREFUSED);
 			}
 		}
-		if (selinux_conn_sid_state(sk_state, sksec->sid, skb_sid, &peer_sid))
+		if (selinux_conn_sid_state(sock_state, sksec->sid, skb_sid,
+					   &peer_sid))
 			return NF_DROP;
-		peer_sid = selinux_state_raw_network_sid(sk_state, peer_sid);
+		peer_sid = selinux_state_raw_network_sid(sock_state, peer_sid);
 		secmark_perm = PACKET__SEND;
 	} else {
 		/* Locally generated packet, fetch the security label from the
