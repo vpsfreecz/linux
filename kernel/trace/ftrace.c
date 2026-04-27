@@ -40,9 +40,6 @@
 
 #include <trace/events/sched.h>
 
-#include "trace_btf.h"
-
-
 #include <asm/sections.h>
 #include <asm/setup.h>
 
@@ -3919,11 +3916,9 @@ static bool ftrace_container_kprobe_filter_active(void)
 
 static bool ftrace_container_kprobe_allowed(unsigned long ip)
 {
-	const struct btf_type *proto;
 	unsigned long offset;
 	char str[KSYM_SYMBOL_LEN];
 	char *modname;
-	struct btf *btf;
 	char full[KSYM_SYMBOL_LEN + MODULE_NAME_LEN + 2];
 
 	if (!kallsyms_lookup(ip, NULL, &offset, &modname, str))
@@ -3933,23 +3928,12 @@ static bool ftrace_container_kprobe_allowed(unsigned long ip)
 
 	if (modname) {
 		snprintf(full, sizeof(full), "%s:%s", modname, str);
-		if (!bpf_token_current_allow_tracing_symbol(full))
+		if (!bpf_token_current_allow_tracing_symbol_discovery(full))
 			return false;
-		proto = btf_find_func_proto(full, &btf);
-		if (proto) {
-			btf_put(btf);
-			return true;
-		}
+		return true;
 	}
 
-	if (!bpf_token_current_allow_tracing_symbol(str))
-		return false;
-
-	proto = btf_find_func_proto(str, &btf);
-	if (!proto)
-		return false;
-	btf_put(btf);
-	return true;
+	return bpf_token_current_allow_tracing_symbol_discovery(str);
 }
 #else
 static bool ftrace_container_kprobe_filter_active(void)
@@ -4511,7 +4495,7 @@ static int t_show(struct seq_file *m, void *v)
 
 		ret = kallsyms_lookup(rec->ip, NULL, &offset, &modname, str);
 		if (!ret || offset > FTRACE_MCOUNT_MAX_OFFSET ||
-		    !bpf_token_current_allow_tracing_symbol(str))
+		    !bpf_token_current_allow_tracing_symbol_discovery(str))
 			return 0;
 	}
 
