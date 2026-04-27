@@ -27,6 +27,7 @@
 
 struct child_cfg {
 	int pipefd;
+	int syncfd;
 	const char *symbol;
 };
 
@@ -131,6 +132,43 @@ static int write_file(const char *path, const char *buf)
 	return 0;
 }
 
+static int map_child_userns(pid_t pid)
+{
+	char path[PATH_MAX];
+	char map[64];
+	uid_t uid = getuid();
+	gid_t gid = getgid();
+
+	snprintf(path, sizeof(path), "/proc/%d/setgroups", pid);
+	if (write_file(path, "deny") < 0 && errno != ENOENT)
+		return errno;
+
+	snprintf(path, sizeof(path), "/proc/%d/uid_map", pid);
+	snprintf(map, sizeof(map), "0 %u 1\n", uid);
+	if (write_file(path, map) < 0)
+		return errno;
+
+	snprintf(path, sizeof(path), "/proc/%d/gid_map", pid);
+	snprintf(map, sizeof(map), "0 %u 1\n", gid);
+	if (write_file(path, map) < 0)
+		return errno;
+
+	return 0;
+}
+
+static int wait_for_parent_mapping(int fd)
+{
+	char c;
+	ssize_t n;
+
+	n = read(fd, &c, 1);
+	close(fd);
+	if (n != 1)
+		return n < 0 ? errno : EIO;
+
+	return 0;
+}
+
 static int enter_nested_userns_root(void)
 {
 	char path[PATH_MAX];
@@ -167,6 +205,13 @@ static int child_main(void *arg)
 {
 	struct child_cfg *cfg = arg;
 	int err;
+
+	err = wait_for_parent_mapping(cfg->syncfd);
+	if (err) {
+		dprintf(cfg->pipefd, "child_sync_errno=%d\n", err);
+		close(cfg->pipefd);
+		return 1;
+	}
 
 	if (emit_ns_links(cfg->pipefd, "child")) {
 		err = errno;
@@ -211,6 +256,7 @@ int main(int argc, char **argv)
 	const char *symbol = "copy_process";
 	char *stack;
 	int pipefd[2];
+	int syncfd[2];
 	pid_t pid;
 	int status;
 	char buf[4096];
@@ -263,11 +309,22 @@ int main(int argc, char **argv)
 		perror("pipe");
 		return 1;
 	}
+	if (pipe(syncfd) < 0) {
+		perror("sync pipe");
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return 1;
+	}
 
 	cfg.pipefd = pipefd[1];
+	cfg.syncfd = syncfd[0];
 	stack = malloc(STACK_SIZE);
 	if (!stack) {
 		perror("malloc");
+		close(pipefd[0]);
+		close(pipefd[1]);
+		close(syncfd[0]);
+		close(syncfd[1]);
 		return 1;
 	}
 
@@ -277,12 +334,45 @@ int main(int argc, char **argv)
 		printf("clone_errno=%d\n", errno);
 		close(pipefd[0]);
 		close(pipefd[1]);
+		close(syncfd[0]);
+		close(syncfd[1]);
 		free(stack);
 		return 1;
 	}
 
 	close(pipefd[1]);
-	n = read(pipefd[0], buf, sizeof(buf) - 1);
+	close(syncfd[0]);
+	i = map_child_userns(pid);
+	if (i) {
+		printf("map_child_errno=%d\n", i);
+		close(syncfd[1]);
+		close(pipefd[0]);
+		waitpid(pid, &status, 0);
+		free(stack);
+		return 1;
+	}
+	if (write(syncfd[1], "x", 1) != 1) {
+		perror("sync write");
+		close(syncfd[1]);
+		close(pipefd[0]);
+		waitpid(pid, &status, 0);
+		free(stack);
+		return 1;
+	}
+	close(syncfd[1]);
+
+	for (n = 0; n < (ssize_t)sizeof(buf) - 1;) {
+		ssize_t r;
+
+		r = read(pipefd[0], buf + n, sizeof(buf) - 1 - n);
+		if (r < 0) {
+			n = -1;
+			break;
+		}
+		if (r == 0)
+			break;
+		n += r;
+	}
 	if (n < 0) {
 		perror("read");
 		close(pipefd[0]);

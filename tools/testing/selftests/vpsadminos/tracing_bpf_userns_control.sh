@@ -63,7 +63,7 @@ if [ "$(cat /proc/sys/kernel/unprivileged_bpf_disabled)" = "0" ]; then
 fi
 
 symbol="copy_process"
-out="$($helper --syslog-name traceH --symbol "$symbol")" || {
+out="$($helper --syslog-name "traceH$$" --symbol "$symbol")" || {
 	echo "not ok: helper failed" >&2
 	exit 1
 }
