@@ -731,9 +731,9 @@ static int s_show(struct seq_file *m, void *p)
 
 		if (iter->module_name[0]) {
 			snprintf(full, sizeof(full), "%s:%s", iter->module_name, iter->name);
-			if (!bpf_token_current_allow_tracing_symbol(full))
+			if (!bpf_token_current_allow_tracing_symbol_discovery(full))
 				return 0;
-		} else if (!bpf_token_current_allow_tracing_symbol(iter->name)) {
+		} else if (!bpf_token_current_allow_tracing_symbol_discovery(iter->name)) {
 			return 0;
 		}
 	}
