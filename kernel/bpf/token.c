@@ -270,6 +270,19 @@ bool bpf_token_current_allow_tracing_symbol(const char *name)
 	return bpf_token_allow_container_symbol_discovery_name(name);
 }
 
+/*
+ * /proc/kallsyms walks every symbol, so keep bulk discovery on a static,
+ * bounded allowlist. Explicit kprobe/ftrace lookups can still use the BTF
+ * backed check above for the single symbol the caller requested.
+ */
+bool bpf_token_current_allow_tracing_symbol_discovery(const char *name)
+{
+	if (!bpf_token_current_restrict_tracing_symbols())
+		return true;
+
+	return bpf_token_allow_container_symbol_access_name(name);
+}
+
 bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
 				      const char *name)
 {
