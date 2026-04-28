@@ -312,7 +312,7 @@ static int syslogns_install(struct nsset *nsset, struct ns_common *new)
 	if (ns == nsproxy->syslog_ns)
 		return 0;
 
-	ret = tracing_ns_check_syslogns_setns(ns);
+	ret = tracing_ns_check_syslogns_setns_from(ns, nsproxy->tracing_ns);
 	if (ret)
 		return ret;
 

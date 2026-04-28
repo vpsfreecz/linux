@@ -18,6 +18,9 @@
 #ifndef SYSLOG_ACTION_NEW_TRACING_NS
 #define SYSLOG_ACTION_NEW_TRACING_NS 12
 #endif
+#ifndef __NR_pidfd_open
+#define __NR_pidfd_open SYS_pidfd_open
+#endif
 
 #ifndef STACK_SIZE
 #define STACK_SIZE (1024 * 1024)
@@ -198,6 +201,56 @@ static int probe_syslogns_setns_errno(pid_t pid)
 	return probe_ns_setns_errno(pid, "syslog", 0);
 }
 
+static int probe_pidfd_setns_errno(pid_t pid)
+{
+	int pipefd[2];
+	pid_t probe;
+	int status;
+	int err = 0;
+
+	if (pipe(pipefd) < 0)
+		return errno;
+
+	probe = fork();
+	if (probe < 0) {
+		err = errno;
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return err;
+	}
+
+	if (probe == 0) {
+		int fd, ret, setns_errno = 0;
+
+		close(pipefd[0]);
+		fd = syscall(__NR_pidfd_open, pid, 0);
+		if (fd < 0) {
+			setns_errno = errno;
+		} else {
+			ret = setns(fd, CLONE_NEWUSER | CLONE_NEWPID);
+			setns_errno = ret < 0 ? errno : 0;
+			close(fd);
+		}
+		if (write(pipefd[1], &setns_errno, sizeof(setns_errno)) != sizeof(setns_errno))
+			;
+		close(pipefd[1]);
+		_exit(0);
+	}
+
+	close(pipefd[1]);
+	if (read(pipefd[0], &err, sizeof(err)) != sizeof(err))
+		err = EIO;
+	close(pipefd[0]);
+
+	if (waitpid(probe, &status, 0) < 0)
+		return errno;
+
+	if (!WIFEXITED(status))
+		return ECHILD;
+
+	return err;
+}
+
 static int noop_child_main(void *arg)
 {
 	return 0;
@@ -326,6 +379,7 @@ int main(int argc, char **argv)
 	bool parent_setns_child_user = false;
 	bool parent_setns_child_pid = false;
 	bool parent_setns_child_syslog = false;
+	bool parent_pidfd_setns_child = false;
 	bool retry_after_failed_first_clone = false;
 	const char *syslog_name = NULL;
 	const char *nested_syslog_name = NULL;
@@ -363,6 +417,8 @@ int main(int argc, char **argv)
 			parent_setns_child_pid = true;
 		} else if (!strcmp(argv[i], "--parent-setns-child-syslog")) {
 			parent_setns_child_syslog = true;
+		} else if (!strcmp(argv[i], "--parent-pidfd-setns-child")) {
+			parent_pidfd_setns_child = true;
 		} else if (!strcmp(argv[i], "--retry-after-failed-first-clone")) {
 			retry_after_failed_first_clone = true;
 		} else if (!strcmp(argv[i], "--nested-syslog-name")) {
@@ -420,7 +476,7 @@ int main(int argc, char **argv)
 	}
 
 	need_parent_probe = parent_setns_child_user || parent_setns_child_pid ||
-		parent_setns_child_syslog;
+		parent_setns_child_syslog || parent_pidfd_setns_child;
 
 	if (pipe(pipefd) < 0) {
 		perror("pipe");
@@ -515,6 +571,9 @@ int main(int argc, char **argv)
 		if (parent_setns_child_syslog)
 			dprintf(STDOUT_FILENO, "parent_setns_child_syslog_errno=%d\n",
 				probe_syslogns_setns_errno(pid));
+		if (parent_pidfd_setns_child)
+			dprintf(STDOUT_FILENO, "parent_pidfd_setns_child_errno=%d\n",
+				probe_pidfd_setns_errno(pid));
 
 		if (write(release_pipe[1], "R", 1) < 0)
 			perror("write");

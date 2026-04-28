@@ -1455,10 +1455,11 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (tracing_ns_check_userns_setns(user_ns))
+	if (tracing_ns_check_userns_setns_from(user_ns,
+					      nsset->nsproxy->tracing_ns))
 		return -EPERM;
 
-	if (lsm_ns_check_userns_setns(user_ns))
+	if (lsm_ns_check_userns_setns_from(user_ns, nsset->lsm_ns))
 		return -EPERM;
 
 	cred = nsset_cred(nsset);
