@@ -123,6 +123,12 @@ out="$($helper --syslog-name "$(ns_name f)" --tracing --parent-setns-child-syslo
 }
 check_eq parent_setns_child_syslog_errno 1 "$(get_field "$out" parent_setns_child_syslog_errno)"
 
+out="$($helper --syslog-name "$(ns_name p)" --tracing --parent-pidfd-setns-child)" || {
+	echo "not ok: helper failed in parent-pidfd-setns case" >&2
+	exit 1
+}
+check_eq parent_pidfd_setns_child_errno 0 "$(get_field "$out" parent_pidfd_setns_child_errno)"
+
 out="$($helper --syslog-name "$(ns_name g)" --tracing \
 	--retry-after-failed-first-clone)" || {
 	echo "not ok: helper failed in pending-request-retry case" >&2

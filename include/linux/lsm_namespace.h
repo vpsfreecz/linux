@@ -44,6 +44,8 @@ struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns
 int setup_lsm_namespace(struct lsm_namespace *ns, struct task_struct *task,
 			struct cred *new_cred, const struct lsm_ctx *ctx);
 void free_lsm_ns(struct lsm_namespace *ns);
+int lsm_ns_check_userns_setns_from(const struct user_namespace *user_ns,
+				   const struct lsm_namespace *current_ns);
 int lsm_ns_check_userns_setns(const struct user_namespace *user_ns);
 int register_lsm_namespace_backend(const struct lsm_namespace_backend *backend);
 int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx);
@@ -94,6 +96,13 @@ static inline int setup_lsm_namespace(struct lsm_namespace *ns,
 
 static inline void free_lsm_ns(struct lsm_namespace *ns)
 {
+}
+
+static inline int lsm_ns_check_userns_setns_from(
+	const struct user_namespace *user_ns,
+	const struct lsm_namespace *current_ns)
+{
+	return 0;
 }
 
 static inline int lsm_ns_check_userns_setns(const struct user_namespace *user_ns)

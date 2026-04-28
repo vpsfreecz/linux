@@ -255,14 +255,16 @@ void free_lsm_ns(struct lsm_namespace *ns)
 }
 EXPORT_SYMBOL_GPL(free_lsm_ns);
 
-int lsm_ns_check_userns_setns(const struct user_namespace *user_ns)
+int lsm_ns_check_userns_setns_from(const struct user_namespace *user_ns,
+				   const struct lsm_namespace *current_ns)
 {
-	struct lsm_namespace *target_ns, *current_ns;
+	struct lsm_namespace *target_ns;
 
 	if (!user_ns)
 		return -EINVAL;
 
-	current_ns = current_lsm_ns();
+	if (!current_ns)
+		current_ns = current_lsm_ns();
 	target_ns = user_ns->lsm_ns ? user_ns->lsm_ns : &init_lsm_ns;
 	if (target_ns == current_ns)
 		return 0;
@@ -272,6 +274,12 @@ int lsm_ns_check_userns_setns(const struct user_namespace *user_ns)
 		  user_ns->ns.inum,
 		  target_ns->ns.inum);
 	return -EPERM;
+}
+EXPORT_SYMBOL_GPL(lsm_ns_check_userns_setns_from);
+
+int lsm_ns_check_userns_setns(const struct user_namespace *user_ns)
+{
+	return lsm_ns_check_userns_setns_from(user_ns, current_lsm_ns());
 }
 EXPORT_SYMBOL_GPL(lsm_ns_check_userns_setns);
 

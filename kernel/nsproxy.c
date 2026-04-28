@@ -169,6 +169,7 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 	new_nsp = create_nsproxy();
 	if (!new_nsp)
 		return ERR_PTR(-ENOMEM);
+	new_nsp->tracing_ns = NULL;
 
 	new_nsp->mnt_ns = copy_mnt_ns(flags, tsk->nsproxy->mnt_ns, user_ns, new_fs);
 	if (IS_ERR(new_nsp->mnt_ns)) {
@@ -519,6 +520,8 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 	if (!nsset->cred)
 		goto out;
 
+	nsset->lsm_ns = current_lsm_ns();
+
 	/* Only create a temporary copy of fs_struct if we really need to. */
 	if (flags == CLONE_NEWNS) {
 		nsset->fs = me->fs;
@@ -534,6 +537,92 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 out:
 	put_nsset(nsset);
 	return -ENOMEM;
+}
+
+static int pidfd_install_vpsadminos_tracing_ns(struct nsset *nsset,
+					       struct tracing_namespace *ns,
+					       struct user_namespace *user_ns,
+					       struct pid_namespace *pid_ns)
+{
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *old_ns;
+
+	if (!ns)
+		ns = &init_tracing_ns;
+
+	if (nsset->nsproxy->tracing_ns == ns)
+		return 0;
+
+	if (ns != &init_tracing_ns) {
+		if (!user_ns || ns->user_ns != user_ns)
+			return -EPERM;
+		if (!pid_ns || ns->pid_ns != pid_ns)
+			return -EPERM;
+	}
+
+	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN) ||
+	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	old_ns = nsset->nsproxy->tracing_ns;
+	nsset->nsproxy->tracing_ns = get_tracing_ns(ns);
+	put_tracing_ns(old_ns);
+#endif
+	return 0;
+}
+
+static int pidfd_install_vpsadminos_syslog_ns(struct nsset *nsset,
+					      struct syslog_namespace *ns)
+{
+#ifdef CONFIG_SYSLOG_NS
+	int ret;
+
+	if (!ns)
+		ns = &init_syslog_ns;
+
+	if (nsset->nsproxy->syslog_ns == ns)
+		return 0;
+
+	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN) ||
+	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	ret = tracing_ns_check_syslogns_setns_from(ns,
+						   nsset->nsproxy->tracing_ns);
+	if (ret)
+		return ret;
+
+	put_syslog_ns(nsset->nsproxy->syslog_ns);
+	nsset->nsproxy->syslog_ns = get_syslog_ns(ns);
+#endif
+	return 0;
+}
+
+static int pidfd_prepare_vpsadminos_namespaces(struct nsset *nsset,
+					       struct nsproxy *target,
+					       struct user_namespace *user_ns,
+					       struct pid_namespace *pid_ns)
+{
+	int ret;
+
+	if (!(nsset->flags & CLONE_NEWUSER))
+		return 0;
+
+	ret = pidfd_install_vpsadminos_tracing_ns(nsset, target->tracing_ns,
+						  user_ns, pid_ns);
+	if (ret)
+		return ret;
+
+	ret = pidfd_install_vpsadminos_syslog_ns(nsset, target->syslog_ns);
+	if (ret)
+		return ret;
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	nsset->lsm_ns = user_ns && user_ns->lsm_ns ?
+		user_ns->lsm_ns : &init_lsm_ns;
+#endif
+
+	return 0;
 }
 
 static inline int validate_ns(struct nsset *nsset, struct ns_common *ns)
@@ -597,6 +686,10 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 		user_ns = get_user_ns(__task_cred(tsk)->user_ns);
 #endif
 	rcu_read_unlock();
+
+	ret = pidfd_prepare_vpsadminos_namespaces(nsset, nsp, user_ns, pid_ns);
+	if (ret)
+		goto out;
 
 	/*
 	 * Install requested namespaces. The caller will have
