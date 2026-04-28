@@ -172,9 +172,11 @@ EXPORT_SYMBOL_GPL(lsm_ns_current_syslog_routes_lsm);
 
 int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 {
+	const struct lsm_namespace_backend *backend;
 	struct lsm_ctx *copy;
 	u64 lsmid;
 	u64 required_len;
+	int err;
 
 	if (!ctx || ctx->len < sizeof(*ctx))
 		return -EINVAL;
@@ -183,14 +185,25 @@ int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 	if (check_add_overflow(sizeof(*ctx), ctx->ctx_len, &required_len) ||
 	    ctx->len != required_len)
 		return -EINVAL;
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
 	if (current_lsm_ns() != &init_lsm_ns)
 		return -EPERM;
 
 	lsmid = ctx->id;
 	if (!lsm_ns_valid_lsmid(lsmid))
 		return -EOPNOTSUPP;
+
+	backend = lsm_ns_backend_lookup(lsmid);
+	if (!backend)
+		return -EOPNOTSUPP;
+
+	if (!capable(CAP_SYS_ADMIN)) {
+		if (!backend->prepare_unshare)
+			return -EPERM;
+
+		err = backend->prepare_unshare(ctx);
+		if (err)
+			return err;
+	}
 
 	copy = kmemdup(ctx, ctx->len, GFP_KERNEL);
 	if (!copy)
