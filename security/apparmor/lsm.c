@@ -2332,6 +2332,27 @@ static int aa_lsmns_install_task_label(struct task_struct *task,
 	return aa_lsmns_install_cred_label(task, new_cred, child);
 }
 
+static int aa_lsmns_backend_prepare_unshare(const struct lsm_ctx *ctx)
+{
+	const char *name;
+	size_t len;
+
+	if (!apparmor_enabled || !apparmor_initialized || !root_ns)
+		return -EOPNOTSUPP;
+
+	if (!unprivileged_userns_apparmor_policy)
+		return -EPERM;
+
+	if (ctx->ctx_len) {
+		name = (const char *)ctx->ctx;
+		len = strnlen(name, ctx->ctx_len);
+		if (len + 1 != ctx->ctx_len || !aa_lsmns_valid_name(name))
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int aa_lsmns_backend_create(struct lsm_namespace *ns,
 				   struct task_struct *task,
 				   struct cred *new_cred,
@@ -2396,6 +2417,7 @@ static void aa_lsmns_backend_destroy(struct lsm_namespace *ns)
 
 static const struct lsm_namespace_backend aa_lsmns_backend = {
 	.lsmid = LSM_ID_APPARMOR,
+	.prepare_unshare = aa_lsmns_backend_prepare_unshare,
 	.create = aa_lsmns_backend_create,
 	.destroy = aa_lsmns_backend_destroy,
 };

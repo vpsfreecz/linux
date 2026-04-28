@@ -16,6 +16,7 @@ struct user_namespace;
 
 struct lsm_namespace_backend {
 	u64 lsmid;
+	int (*prepare_unshare)(const struct lsm_ctx *ctx);
 	int (*create)(struct lsm_namespace *ns, struct task_struct *task,
 		      struct cred *new_cred, const struct lsm_ctx *ctx);
 	void (*destroy)(struct lsm_namespace *ns);
