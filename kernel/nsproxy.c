@@ -560,8 +560,7 @@ static int pidfd_install_vpsadminos_tracing_ns(struct nsset *nsset,
 			return -EPERM;
 	}
 
-	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN) ||
-	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
+	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
 	old_ns = nsset->nsproxy->tracing_ns;
@@ -572,7 +571,8 @@ static int pidfd_install_vpsadminos_tracing_ns(struct nsset *nsset,
 }
 
 static int pidfd_install_vpsadminos_syslog_ns(struct nsset *nsset,
-					      struct syslog_namespace *ns)
+					      struct syslog_namespace *ns,
+					      struct user_namespace *user_ns)
 {
 #ifdef CONFIG_SYSLOG_NS
 	int ret;
@@ -583,8 +583,10 @@ static int pidfd_install_vpsadminos_syslog_ns(struct nsset *nsset,
 	if (nsset->nsproxy->syslog_ns == ns)
 		return 0;
 
-	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN) ||
-	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
+	if (ns != &init_syslog_ns && ns->user_ns != user_ns)
+		return -EPERM;
+
+	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
 	ret = tracing_ns_check_syslogns_setns_from(ns,
@@ -613,7 +615,8 @@ static int pidfd_prepare_vpsadminos_namespaces(struct nsset *nsset,
 	if (ret)
 		return ret;
 
-	ret = pidfd_install_vpsadminos_syslog_ns(nsset, target->syslog_ns);
+	ret = pidfd_install_vpsadminos_syslog_ns(nsset, target->syslog_ns,
+						 user_ns);
 	if (ret)
 		return ret;
 
