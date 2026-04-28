@@ -401,9 +401,6 @@ static int selinux_lsmns_backend_create(struct lsm_namespace *ns,
 	if (!ns || ns->lsmid != LSM_ID_SELINUX)
 		return -EINVAL;
 
-	if (!selinux_enabled_boot)
-		return -EOPNOTSUPP;
-
 	if (ns->backend_data)
 		return -EBUSY;
 
