@@ -108,6 +108,18 @@ void *bpf_map_fd_get_ptr(struct bpf_map *map,
 	else
 		inner_map = ERR_PTR(-EINVAL);
 
+	if (!IS_ERR(inner_map)) {
+		bool outer_container = bpf_token_is_container(map->token);
+		bool inner_container = bpf_token_is_container(inner_map->token);
+
+		if ((outer_container || inner_container) &&
+		    (!outer_container || !inner_container ||
+		     !bpf_token_same_container_domain(map->token, inner_map->token))) {
+			bpf_map_put(inner_map);
+			inner_map = ERR_PTR(-EACCES);
+		}
+	}
+
 	return inner_map;
 }
 
