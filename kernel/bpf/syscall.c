@@ -885,6 +885,7 @@ void bpf_obj_free_fields(const struct btf_record *rec, void *obj)
 static void bpf_map_free(struct bpf_map *map)
 {
 	struct btf_record *rec = map->record;
+	struct bpf_token *token = map->token;
 	struct btf *btf = map->btf;
 
 	/* implementation dependent freeing. Disabling migration to simplify
@@ -910,7 +911,7 @@ static void bpf_map_free(struct bpf_map *map)
 	 * struct_meta info which will be freed with btf_put().
 	 */
 	btf_put(btf);
-	bpf_token_put(map->token);
+	bpf_token_put(token);
 }
 
 /* called from workqueue */
