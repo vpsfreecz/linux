@@ -129,6 +129,14 @@ out="$($helper --syslog-name "$(ns_name p)" --tracing --parent-pidfd-setns-child
 }
 check_eq parent_pidfd_setns_child_errno 0 "$(get_field "$out" parent_pidfd_setns_child_errno)"
 
+out="$($helper --syslog-name "$(ns_name q)" --tracing \
+	--parent-pidfd-setns-child-without-source-cap)" || {
+	echo "not ok: helper failed in parent-pidfd-setns-without-source-cap case" >&2
+	exit 1
+}
+check_eq parent_pidfd_setns_child_without_source_cap_errno 0 \
+	"$(get_field "$out" parent_pidfd_setns_child_without_source_cap_errno)"
+
 out="$($helper --syslog-name "$(ns_name g)" --tracing \
 	--retry-after-failed-first-clone)" || {
 	echo "not ok: helper failed in pending-request-retry case" >&2
