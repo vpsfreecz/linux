@@ -2422,8 +2422,13 @@ struct sched_class {
 
 	void (*wakeup_preempt)(struct rq *rq, struct task_struct *p, int flags);
 
-	int (*balance)(struct rq *rq, struct task_struct *prev, struct rq_flags *rf);
+	/*
+	 * schedule/pick_next_task/prev_balance: rq->lock
+	 */
+	int (*balance)(struct rq *rq, struct rq_flags *rf);
+
 	struct task_struct *(*pick_task)(struct rq *rq);
+
 	/*
 	 * Optional! When implemented pick_next_task() should be equivalent to:
 	 *

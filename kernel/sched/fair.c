@@ -8879,7 +8879,7 @@ static void set_cpus_allowed_fair(struct task_struct *p, struct affinity_context
 }
 
 static int
-balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+balance_fair(struct rq *rq, struct rq_flags *rf)
 {
 	if (sched_fair_runnable(rq))
 		return 1;
@@ -9210,8 +9210,11 @@ idle:
 		if (new_tasks < 0)
 			return RETRY_TASK;
 
-		if (new_tasks > 0)
+		if (new_tasks > 0) {
+			/* sched_balance_newidle() may have return-migrated the donor. */
+			prev = rq->donor;
 			goto again;
+		}
 	}
 
 	return NULL;
