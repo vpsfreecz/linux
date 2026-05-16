@@ -26,14 +26,12 @@ fs_initcall(vpsadminos_init);
 
 struct mem_cgroup *get_current_most_limited_memcg(void)
 {
-	struct mem_cgroup *root_memcg, *walk_memcg, *res_memcg = NULL;
+	struct cgroup_subsys_state *css;
+	struct mem_cgroup *walk_memcg, *res_memcg = NULL;
 	unsigned long limit = PAGE_COUNTER_MAX;
 
-	rcu_read_lock();
-
-	root_memcg = walk_memcg = mem_cgroup_from_task(current);
-	if (!root_memcg)
-		goto not_found;
+	css = task_get_css(current, memory_cgrp_id);
+	walk_memcg = mem_cgroup_from_css(css);
 
 	while ((walk_memcg != root_mem_cgroup) && (walk_memcg != NULL)) {
 		unsigned long max = mem_cgroup_get_max(walk_memcg);
@@ -48,12 +46,12 @@ struct mem_cgroup *get_current_most_limited_memcg(void)
 	if (limit == PAGE_COUNTER_MAX)
 		goto not_found;
 
-	WARN_ON(!css_tryget(&res_memcg->css));
-	rcu_read_unlock();
+	css_get(&res_memcg->css);
+	css_put(css);
 	return res_memcg;
 
 not_found:
-	rcu_read_unlock();
+	css_put(css);
 	return NULL;
 }
 
@@ -508,4 +506,3 @@ u64 fake_cputime_readout_idle(u64 timestamp, struct task_struct *p)
 
 	return (timestamp * cpus) - user - system;
 }
-

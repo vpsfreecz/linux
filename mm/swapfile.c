@@ -3036,7 +3036,6 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 	memsw = READ_ONCE(memcg->memsw.max);
 	memsw_usage = page_counter_read(&memcg->memsw);
 	proactive_usedswap = mem_cgroup_proactive_swap_usage(memcg) * PAGE_SIZE;
-	mem_cgroup_put(memcg);
 
 	if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
 		if (!memsw || (memsw == totalram)) {
@@ -3097,8 +3096,12 @@ static int swaps_open(struct inode *inode, struct file *file)
 	struct mem_cgroup *memcg;
 
 	memcg = get_current_most_limited_memcg();
-	if (memcg)
-		return single_open(file, fake_swap_show, memcg);
+	if (memcg) {
+		ret = single_open(file, fake_swap_show, memcg);
+		if (ret)
+			mem_cgroup_put(memcg);
+		return ret;
+	}
 
 	ret = seq_open(file, &swaps_op);
 	if (ret)
@@ -3109,12 +3112,25 @@ static int swaps_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int swaps_release(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq = file->private_data;
+
+	if (seq && seq->private) {
+		mem_cgroup_put(seq->private);
+		seq->private = NULL;
+		return single_release(inode, file);
+	}
+
+	return seq_release(inode, file);
+}
+
 static const struct proc_ops swaps_proc_ops = {
 	.proc_flags	= PROC_ENTRY_PERMANENT,
 	.proc_open	= swaps_open,
 	.proc_read	= seq_read,
 	.proc_lseek	= seq_lseek,
-	.proc_release	= seq_release,
+	.proc_release	= swaps_release,
 	.proc_poll	= swaps_poll,
 };
 
