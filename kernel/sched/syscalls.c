@@ -1272,7 +1272,7 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 		return -EINVAL;
 
 	if (current->nsproxy && current->nsproxy->cgroup_ns != &init_cgroup_ns) {
-		struct cpumask fake_mask;
+		struct cpumask fake_mask, new_mask;
 		if (!fake_online_cpumask(p, &fake_mask))
 			goto orig;
 		if (!check_same_owner(p)) {
@@ -1283,9 +1283,10 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 			}
 			rcu_read_unlock();
 		}
-		if (!cpumask_subset(in_mask, &fake_mask))
+		cpumask_and(&new_mask, in_mask, &fake_mask);
+		if (cpumask_empty(&new_mask))
 			return -EINVAL;
-		set_fake_affinity_cpumask(p, in_mask);
+		set_fake_affinity_cpumask(p, &new_mask);
 		return 0;
 	}
 
