@@ -30,7 +30,23 @@ struct mem_cgroup *get_current_most_limited_memcg(void)
 	struct mem_cgroup *walk_memcg, *res_memcg = NULL;
 	unsigned long limit = PAGE_COUNTER_MAX;
 
-	css = task_get_css(current, memory_cgrp_id);
+	if (mem_cgroup_disabled())
+		return NULL;
+
+	rcu_read_lock();
+	while (true) {
+		css = task_css(current, memory_cgrp_id);
+		if (!css) {
+			rcu_read_unlock();
+			return NULL;
+		}
+
+		if (likely(css_tryget(css)))
+			break;
+		cpu_relax();
+	}
+	rcu_read_unlock();
+
 	walk_memcg = mem_cgroup_from_css(css);
 
 	while ((walk_memcg != root_mem_cgroup) && (walk_memcg != NULL)) {
