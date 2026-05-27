@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/namei.h>
 #include <linux/idr.h>
+#include <linux/kstrtox.h>
 #include <linux/slab.h>
 #include <linux/security.h>
 #include <linux/hash.h>
@@ -2054,6 +2055,43 @@ static struct kernfs_node *kernfs_dir_next_pos(const void *ns,
 	return pos;
 }
 
+static bool kernfs_vpsa_segment_eq(const char *segment, u16 len,
+				   const char *want)
+{
+	return strlen(want) == len && !strncmp(segment, want, len);
+}
+
+static bool kernfs_vpsa_cpu_dir_entry_hidden_locked(struct kernfs_node *parent,
+						    const char *name)
+{
+	const char *segments[VPSA_KERNFS_FILTER_MAX_DEPTH];
+	u16 lens[VPSA_KERNFS_FILTER_MAX_DEPTH];
+	struct cpumask cpu_fake_mask;
+	unsigned int id;
+	u16 depth;
+
+	if (!current->nsproxy || current->nsproxy->cgroup_ns == &init_cgroup_ns)
+		return false;
+
+	if (strncmp(name, "cpu", 3) || kstrtouint(name + 3, 10, &id))
+		return false;
+
+	if (!kernfs_vpsa_kernfs_filter_path_build_locked(parent, NULL, segments,
+							lens, &depth))
+		return false;
+
+	if (depth != 3 ||
+	    !kernfs_vpsa_segment_eq(segments[0], lens[0], "devices") ||
+	    !kernfs_vpsa_segment_eq(segments[1], lens[1], "system") ||
+	    !kernfs_vpsa_segment_eq(segments[2], lens[2], "cpu"))
+		return false;
+
+	if (!fake_online_cpumask(current, &cpu_fake_mask))
+		return false;
+
+	return !cpumask_test_cpu(id, &cpu_fake_mask);
+}
+
 static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 {
 	struct kernfs_vpsa_kernfs_filter_dir_state *state = kernfs_vpsa_kernfs_filter_dir_state(file);
@@ -2089,6 +2127,9 @@ static int kernfs_fop_readdir(struct file *file, struct dir_context *ctx)
 		if (kernfs_vpsa_kernfs_filter_kn_decide_locked_view(pos, NULL, MAY_READ,
 						   view) ==
 		    VPSA_KERNFS_FILTER_DECISION_HIDE)
+			continue;
+
+		if (kernfs_vpsa_cpu_dir_entry_hidden_locked(parent, name))
 			continue;
 
 		if (!dir_emit(ctx, name, len, ino, type)) {
