@@ -437,6 +437,14 @@ fail_backend:
 	return error;
 }
 
+static int selinux_lsmns_backend_prepare_unshare(const struct lsm_ctx *ctx)
+{
+	if (ctx->ctx_len)
+		return -EINVAL;
+
+	return 0;
+}
+
 static void selinux_lsmns_backend_destroy(struct lsm_namespace *ns)
 {
 	struct selinux_lsmns_backend_data *backend = ns->backend_data;
@@ -451,6 +459,7 @@ static void selinux_lsmns_backend_destroy(struct lsm_namespace *ns)
 
 static const struct lsm_namespace_backend selinux_lsmns_backend = {
 	.lsmid = LSM_ID_SELINUX,
+	.prepare_unshare = selinux_lsmns_backend_prepare_unshare,
 	.create = selinux_lsmns_backend_create,
 	.destroy = selinux_lsmns_backend_destroy,
 };
