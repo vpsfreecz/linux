@@ -1438,6 +1438,7 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 {
 	struct user_namespace *user_ns = to_user_ns(ns);
 	struct cred *cred;
+	int ret;
 
 	/* Don't allow gaining capabilities by reentering
 	 * the same user namespace.
@@ -1468,6 +1469,10 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 
 	put_user_ns(cred->user_ns);
 	set_cred_user_ns(cred, get_user_ns(user_ns));
+
+	ret = lsm_ns_install_userns(user_ns, current, cred);
+	if (ret)
+		return ret;
 
 	if (set_cred_ucounts(cred) < 0)
 		return -EINVAL;

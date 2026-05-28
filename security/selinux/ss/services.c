@@ -2239,16 +2239,20 @@ bad:
 	return 0;
 }
 
-static void security_load_policycaps(struct selinux_policy *policy)
+static void security_load_policycaps(struct selinux_state *state,
+				     struct selinux_policy *policy)
 {
 	struct policydb *p;
 	unsigned int i;
 	struct ebitmap_node *node;
 
+	if (!state)
+		state = &selinux_state;
+
 	p = &policy->policydb;
 
-	for (i = 0; i < ARRAY_SIZE(selinux_state.policycap); i++)
-		WRITE_ONCE(selinux_state.policycap[i],
+	for (i = 0; i < ARRAY_SIZE(state->policycap); i++)
+		WRITE_ONCE(state->policycap[i],
 			ebitmap_get_bit(&p->policycaps, i));
 
 	for (i = 0; i < ARRAY_SIZE(selinux_policycap_names); i++)
@@ -2404,7 +2408,7 @@ void selinux_policy_commit_state(struct selinux_state *state,
 	}
 
 	/* Load the policycaps from the new policy */
-	security_load_policycaps(newpolicy);
+	security_load_policycaps(state, newpolicy);
 
 	if (!selinux_initialized_state(state)) {
 		/*
@@ -2454,7 +2458,7 @@ int security_load_policy_state(struct selinux_state *state,
 	if (!state)
 		state = &selinux_state;
 
-	if (!selinux_state_allows_runtime_policy_mutation(state))
+	if (!selinux_state_allows_runtime_policy_load(state))
 		return -EOPNOTSUPP;
 
 	if (!selinux_state_allows_parent_policy_mutation(state))

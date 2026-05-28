@@ -99,6 +99,7 @@ struct selinux_state {
 	bool enforcing;
 #endif
 	bool initialized;
+	bool child_policy_load_allowed;
 	bool policycap[__POLICYDB_CAP_MAX];
 
 	struct page *status_page;
@@ -237,6 +238,31 @@ static inline bool selinux_state_allows_runtime_policy_mutation(struct selinux_s
 	 * the security-server helpers.
 	 */
 	return !state->parent || !selinux_initialized_state(state);
+}
+
+static inline bool selinux_state_allows_runtime_policy_load(struct selinux_state *state)
+{
+	if (!state)
+		state = &selinux_state;
+
+	if (!state->parent)
+		return true;
+	if (!selinux_initialized_state(state))
+		return true;
+
+	return READ_ONCE(state->child_policy_load_allowed);
+}
+
+static inline void selinux_state_allow_child_policy_load(struct selinux_state *state)
+{
+	if (state && state->parent)
+		WRITE_ONCE(state->child_policy_load_allowed, true);
+}
+
+static inline void selinux_state_clear_child_policy_load(struct selinux_state *state)
+{
+	if (state && state->parent)
+		WRITE_ONCE(state->child_policy_load_allowed, false);
 }
 
 static inline bool selinux_state_allows_runtime_enforcing_change(struct selinux_state *state)

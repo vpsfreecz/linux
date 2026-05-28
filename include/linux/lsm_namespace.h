@@ -19,6 +19,8 @@ struct lsm_namespace_backend {
 	int (*prepare_unshare)(const struct lsm_ctx *ctx);
 	int (*create)(struct lsm_namespace *ns, struct task_struct *task,
 		      struct cred *new_cred, const struct lsm_ctx *ctx);
+	int (*install)(struct lsm_namespace *ns, struct task_struct *task,
+		       struct cred *new_cred);
 	void (*destroy)(struct lsm_namespace *ns);
 };
 
@@ -49,6 +51,8 @@ int lsm_ns_check_userns_setns_from(const struct user_namespace *user_ns,
 int lsm_ns_check_userns_setns(const struct user_namespace *user_ns);
 int register_lsm_namespace_backend(const struct lsm_namespace_backend *backend);
 int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx);
+int lsm_ns_install_userns(struct user_namespace *user_ns,
+			  struct task_struct *task, struct cred *new_cred);
 void lsm_ns_clear_pending_child_request(struct task_struct *task);
 bool lsm_ns_visible_lsmid(u64 lsmid);
 bool lsm_ns_current_syslog_routes_lsm(u64 lsmid);
@@ -118,6 +122,13 @@ static inline int register_lsm_namespace_backend(const struct lsm_namespace_back
 static inline int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline int lsm_ns_install_userns(struct user_namespace *user_ns,
+					struct task_struct *task,
+					struct cred *new_cred)
+{
+	return 0;
 }
 
 static inline void lsm_ns_clear_pending_child_request(struct task_struct *task)

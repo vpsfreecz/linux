@@ -614,7 +614,7 @@ static ssize_t sel_write_load(struct file *file, const char __user *buf,
 	if (length)
 		goto out;
 
-	if (!selinux_state_allows_runtime_policy_mutation(fsi->state)) {
+	if (!selinux_state_allows_runtime_policy_load(fsi->state)) {
 		length = -EOPNOTSUPP;
 		goto out;
 	}
@@ -643,6 +643,7 @@ static ssize_t sel_write_load(struct file *file, const char __user *buf,
 	}
 
 	selinux_policy_commit_state(fsi->state, &load_state);
+	selinux_state_clear_child_policy_load(fsi->state);
 	length = count;
 	audit_log(audit_context(), GFP_KERNEL, AUDIT_MAC_POLICY_LOAD,
 		"auid=%u ses=%u lsm=selinux res=1",

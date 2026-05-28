@@ -382,8 +382,10 @@ out_unlock_parent:
 	memset(&load_state, 0, sizeof(load_state));
 	mutex_lock(&child->policy_mutex);
 	error = security_load_policy_state(child, data, len, &load_state);
-	if (!error)
+	if (!error) {
 		selinux_policy_commit_state(child, &load_state);
+		selinux_state_allow_child_policy_load(child);
+	}
 	mutex_unlock(&child->policy_mutex);
 	vfree(data);
 	return error;
@@ -445,6 +447,22 @@ static int selinux_lsmns_backend_prepare_unshare(const struct lsm_ctx *ctx)
 	return 0;
 }
 
+static int selinux_lsmns_backend_install(struct lsm_namespace *ns,
+					 struct task_struct *task,
+					 struct cred *new_cred)
+{
+	struct selinux_lsmns_backend_data *backend;
+
+	if (!ns || ns->lsmid != LSM_ID_SELINUX)
+		return -EINVAL;
+
+	backend = ns->backend_data;
+	if (!backend || !backend->state)
+		return -EINVAL;
+
+	return selinux_task_install_state(task, new_cred, backend->state);
+}
+
 static void selinux_lsmns_backend_destroy(struct lsm_namespace *ns)
 {
 	struct selinux_lsmns_backend_data *backend = ns->backend_data;
@@ -461,6 +479,7 @@ static const struct lsm_namespace_backend selinux_lsmns_backend = {
 	.lsmid = LSM_ID_SELINUX,
 	.prepare_unshare = selinux_lsmns_backend_prepare_unshare,
 	.create = selinux_lsmns_backend_create,
+	.install = selinux_lsmns_backend_install,
 	.destroy = selinux_lsmns_backend_destroy,
 };
 #endif

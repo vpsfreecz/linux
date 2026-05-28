@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <sched.h>
 #include <stdint.h>
@@ -17,6 +18,14 @@
 #define __NR_lsm_set_self_attr 570
 #else
 #define __NR_lsm_set_self_attr 460
+#endif
+#endif
+
+#ifndef __NR_pidfd_open
+#ifdef __alpha__
+#define __NR_pidfd_open 544
+#else
+#define __NR_pidfd_open 434
 #endif
 #endif
 
@@ -54,6 +63,7 @@ struct child_result {
 
 struct child_cfg {
 	int pipefd;
+	int waitfd;
 	int mount_selinuxfs;
 };
 
@@ -166,10 +176,53 @@ static int try_mount_selinuxfs(void)
 	return rmdir(path);
 }
 
+static int try_invalid_policy_load(void)
+{
+	char path[] = "/tmp/vpsadminos-selinuxfs-load-XXXXXX";
+	char load_path[PATH_MAX];
+	int fd = -1;
+	int ret = -1;
+	int saved_errno;
+
+	if (!mkdtemp(path))
+		return -1;
+
+	if (mount("selinuxfs", path, "selinuxfs", 0, NULL)) {
+		saved_errno = errno;
+		goto out_rmdir;
+	}
+
+	snprintf(load_path, sizeof(load_path), "%s/load", path);
+	fd = open(load_path, O_WRONLY | O_CLOEXEC);
+	if (fd < 0) {
+		saved_errno = errno;
+		goto out_umount;
+	}
+
+	if (write(fd, "x", 1) < 0) {
+		saved_errno = errno;
+		ret = (saved_errno == EBUSY || saved_errno == EOPNOTSUPP) ? -1 : 0;
+	} else {
+		saved_errno = EIO;
+	}
+
+	close(fd);
+out_umount:
+	if (umount2(path, MNT_DETACH) && ret == 0) {
+		saved_errno = errno;
+		ret = -1;
+	}
+out_rmdir:
+	rmdir(path);
+	errno = saved_errno;
+	return ret;
+}
+
 static int child_main(void *arg)
 {
 	struct child_cfg *cfg = arg;
 	struct child_result result = { .err = 0 };
+	char release;
 
 	if (read_ns_link("user", result.user_ns, sizeof(result.user_ns)) ||
 	    read_ns_link("lsm", result.lsm_ns, sizeof(result.lsm_ns)))
@@ -184,32 +237,53 @@ static int child_main(void *arg)
 		result.err = errno ? errno : EIO;
 	close(cfg->pipefd);
 
+	if (cfg->waitfd >= 0) {
+		while (read(cfg->waitfd, &release, 1) < 0 && errno == EINTR)
+			;
+		close(cfg->waitfd);
+	}
+
 	return result.err ? 1 : 0;
 }
 
-static int clone_child(struct child_result *result, int mount_selinuxfs)
+static pid_t clone_child_wait(struct child_result *result, int mount_selinuxfs,
+			      int *release_fd)
 {
 	struct child_cfg cfg;
 	char *stack;
 	char *stack_top;
 	int pipefd[2];
+	int waitfd[2] = { -1, -1 };
 	pid_t pid;
-	int status;
 	int saved_errno;
 	int clone_flags = CLONE_NEWUSER | SIGCHLD;
 
 	if (pipe(pipefd) < 0)
 		return -1;
 
-	stack = malloc(STACK_SIZE);
-	if (!stack) {
+	if (release_fd && pipe(waitfd) < 0) {
+		saved_errno = errno;
 		close(pipefd[0]);
 		close(pipefd[1]);
-		errno = ENOMEM;
+		errno = saved_errno;
+		return -1;
+	}
+
+	stack = malloc(STACK_SIZE);
+	if (!stack) {
+		saved_errno = ENOMEM;
+		close(pipefd[0]);
+		close(pipefd[1]);
+		if (release_fd) {
+			close(waitfd[0]);
+			close(waitfd[1]);
+		}
+		errno = saved_errno;
 		return -1;
 	}
 
 	cfg.pipefd = pipefd[1];
+	cfg.waitfd = release_fd ? waitfd[0] : -1;
 	cfg.mount_selinuxfs = mount_selinuxfs;
 	stack_top = stack + STACK_SIZE;
 	if (mount_selinuxfs)
@@ -218,9 +292,13 @@ static int clone_child(struct child_result *result, int mount_selinuxfs)
 	pid = clone(child_main, stack_top, clone_flags, &cfg);
 	saved_errno = errno;
 	close(pipefd[1]);
+	if (release_fd)
+		close(waitfd[0]);
 
 	if (pid < 0) {
 		close(pipefd[0]);
+		if (release_fd)
+			close(waitfd[1]);
 		free(stack);
 		errno = saved_errno;
 		return -1;
@@ -232,20 +310,124 @@ static int clone_child(struct child_result *result, int mount_selinuxfs)
 		result->lsm_ns[0] = '\0';
 	}
 	close(pipefd[0]);
+	free(stack);
 
-	if (waitpid(pid, &status, 0) < 0) {
-		free(stack);
+	if (result->err) {
+		if (release_fd) {
+			write(waitfd[1], "x", 1);
+			close(waitfd[1]);
+		}
+		waitpid(pid, NULL, 0);
+		errno = result->err;
 		return -1;
 	}
 
-	free(stack);
+	if (release_fd) {
+		*release_fd = waitfd[1];
+		return pid;
+	}
+
+	return pid;
+}
+
+static int release_child(pid_t pid, int release_fd)
+{
+	int status;
+
+	if (release_fd >= 0) {
+		write(release_fd, "x", 1);
+		close(release_fd);
+	}
+	if (waitpid(pid, &status, 0) < 0) {
+		return -1;
+	}
 
 	if (!WIFEXITED(status)) {
 		errno = ECHILD;
 		return -1;
 	}
-	if (WEXITSTATUS(status) || result->err) {
-		errno = result->err ? result->err : ECHILD;
+	if (WEXITSTATUS(status)) {
+		errno = ECHILD;
+		return -1;
+	}
+
+	return 0;
+}
+
+static int clone_child(struct child_result *result, int mount_selinuxfs)
+{
+	pid_t pid = clone_child_wait(result, mount_selinuxfs, NULL);
+
+	if (pid < 0)
+		return -1;
+
+	return release_child(pid, -1);
+}
+
+static int pidfd_setns_invalid_load(pid_t target)
+{
+	int pipefd[2];
+	pid_t pid;
+	int err;
+	int status;
+
+	if (pipe(pipefd) < 0)
+		return -1;
+
+	pid = fork();
+	if (pid < 0) {
+		err = errno;
+		close(pipefd[0]);
+		close(pipefd[1]);
+		errno = err;
+		return -1;
+	}
+
+	if (pid == 0) {
+		int pidfd;
+
+		close(pipefd[0]);
+		pidfd = syscall(__NR_pidfd_open, target, 0);
+		if (pidfd < 0) {
+			err = errno;
+			write_full(pipefd[1], &err, sizeof(err));
+			_exit(1);
+		}
+
+		if (setns(pidfd, CLONE_NEWUSER | CLONE_NEWNS)) {
+			err = errno;
+			close(pidfd);
+			write_full(pipefd[1], &err, sizeof(err));
+			_exit(1);
+		}
+		close(pidfd);
+
+		if (try_invalid_policy_load()) {
+			err = errno;
+			write_full(pipefd[1], &err, sizeof(err));
+			_exit(1);
+		}
+
+		err = 0;
+		write_full(pipefd[1], &err, sizeof(err));
+		_exit(0);
+	}
+
+	close(pipefd[1]);
+	if (read_full(pipefd[0], &err, sizeof(err)))
+		err = errno ? errno : EIO;
+	close(pipefd[0]);
+
+	if (waitpid(pid, &status, 0) < 0)
+		return -1;
+
+	if (err) {
+		errno = err;
+		return -1;
+	}
+
+	if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+		errno = ECHILD;
 		return -1;
 	}
 
@@ -317,11 +499,77 @@ static int run_lsm_ns_test(int nr, const char *label, uint64_t lsm_id,
 	return 0;
 }
 
+static int run_selinux_pidfd_setns_test(int nr, const char *parent_user_ns,
+					const char *parent_lsm_ns)
+{
+	struct child_result child = { 0 };
+	int release_fd = -1;
+	pid_t pid;
+
+	if (request_lsm_ns(LSM_ID_SELINUX, NULL)) {
+		if (skip_errno(errno)) {
+			printf("ok %d # SKIP cannot arm SELinux LSM namespace request: %s\n",
+			       nr, strerror(errno));
+			return KSFT_SKIP;
+		}
+
+		printf("not ok %d failed to arm SELinux LSM namespace request\n", nr);
+		perror("lsm_set_self_attr(LSM_ATTR_UNSHARE)");
+		return 1;
+	}
+
+	pid = clone_child_wait(&child, 0, &release_fd);
+	if (pid < 0) {
+		if (skip_errno(errno)) {
+			printf("ok %d # SKIP cannot create child SELinux LSM namespace: %s\n",
+			       nr, strerror(errno));
+			return KSFT_SKIP;
+		}
+
+		printf("not ok %d failed to create waiting SELinux LSM namespace child\n",
+		       nr);
+		perror("clone(CLONE_NEWUSER)");
+		return 1;
+	}
+
+	if (!strcmp(parent_user_ns, child.user_ns) ||
+	    !strcmp(parent_lsm_ns, child.lsm_ns)) {
+		printf("not ok %d waiting child did not enter child user/LSM namespace\n",
+		       nr);
+		release_child(pid, release_fd);
+		return 1;
+	}
+
+	if (pidfd_setns_invalid_load(pid)) {
+		int err = errno;
+
+		release_child(pid, release_fd);
+		if (err == ENOSYS) {
+			printf("ok %d # SKIP pidfd_open unavailable\n", nr);
+			return KSFT_SKIP;
+		}
+
+		printf("not ok %d pidfd setns SELinux child policy load used wrong state: %s\n",
+		       nr, strerror(err));
+		return 1;
+	}
+
+	if (release_child(pid, release_fd)) {
+		printf("not ok %d waiting SELinux child did not exit cleanly\n", nr);
+		perror("waitpid");
+		return 1;
+	}
+
+	printf("ok %d pidfd setns uses child SELinux state for selinuxfs policy load\n",
+	       nr);
+	return 0;
+}
+
 int main(void)
 {
 	char parent_user_ns[NS_LINK_SIZE];
 	char parent_lsm_ns[NS_LINK_SIZE];
-	int apparmor_ret, selinux_ret;
+	int apparmor_ret, selinux_ret, selinux_setns_ret;
 
 	if (read_ns_link("lsm", parent_lsm_ns, sizeof(parent_lsm_ns))) {
 		printf("TAP version 13\n1..0 # SKIP no lsm namespace file\n");
@@ -333,17 +581,20 @@ int main(void)
 	}
 
 	printf("TAP version 13\n");
-	printf("1..2\n");
+	printf("1..3\n");
 
 	apparmor_ret = run_lsm_ns_test(1, "AppArmor", LSM_ID_APPARMOR,
 				       "selftest-lsmns", parent_user_ns,
 				       parent_lsm_ns, 0);
 	selinux_ret = run_lsm_ns_test(2, "SELinux", LSM_ID_SELINUX, NULL,
 				      parent_user_ns, parent_lsm_ns, 1);
+	selinux_setns_ret = run_selinux_pidfd_setns_test(3, parent_user_ns,
+							 parent_lsm_ns);
 
-	if (apparmor_ret == 1 || selinux_ret == 1)
+	if (apparmor_ret == 1 || selinux_ret == 1 || selinux_setns_ret == 1)
 		return 1;
-	if (apparmor_ret == KSFT_SKIP && selinux_ret == KSFT_SKIP)
+	if (apparmor_ret == KSFT_SKIP && selinux_ret == KSFT_SKIP &&
+	    selinux_setns_ret == KSFT_SKIP)
 		return KSFT_SKIP;
 	return 0;
 }

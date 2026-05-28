@@ -221,6 +221,29 @@ int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 }
 EXPORT_SYMBOL_GPL(lsm_ns_prepare_unshare);
 
+int lsm_ns_install_userns(struct user_namespace *user_ns,
+			  struct task_struct *task, struct cred *new_cred)
+{
+	const struct lsm_namespace_backend *backend;
+	struct lsm_namespace *ns;
+
+	if (!user_ns || !task || !new_cred)
+		return -EINVAL;
+
+	ns = user_ns->lsm_ns ? user_ns->lsm_ns : &init_lsm_ns;
+	if (ns == &init_lsm_ns)
+		return 0;
+
+	backend = lsm_ns_backend_lookup(ns->lsmid);
+	if (!backend)
+		return -EOPNOTSUPP;
+	if (!backend->install)
+		return 0;
+
+	return backend->install(ns, task, new_cred);
+}
+EXPORT_SYMBOL_GPL(lsm_ns_install_userns);
+
 static void delayed_free_lsm_ns(struct rcu_head *head)
 {
 	struct ns_common *common = container_of(head, struct ns_common, ns_rcu);
