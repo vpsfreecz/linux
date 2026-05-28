@@ -22,6 +22,9 @@
 #ifndef LSM_ID_APPARMOR
 #define LSM_ID_APPARMOR 104
 #endif
+#ifndef LSM_ID_SELINUX
+#define LSM_ID_SELINUX 101
+#endif
 #ifndef LSM_ATTR_UNSHARE
 #define LSM_ATTR_UNSHARE 106
 #endif
@@ -113,10 +116,10 @@ static int read_full(int fd, void *buf, size_t size)
 	return 0;
 }
 
-static int request_apparmor_lsm_ns(const char *name)
+static int request_lsm_ns(uint64_t lsm_id, const char *name)
 {
 	struct lsm_ctx *ctx;
-	size_t name_len = strlen(name) + 1;
+	size_t name_len = name ? strlen(name) + 1 : 0;
 	size_t size = sizeof(*ctx) + name_len;
 	int ret;
 
@@ -124,10 +127,11 @@ static int request_apparmor_lsm_ns(const char *name)
 	if (!ctx)
 		return -1;
 
-	ctx->id = LSM_ID_APPARMOR;
+	ctx->id = lsm_id;
 	ctx->len = size;
 	ctx->ctx_len = name_len;
-	memcpy(ctx->ctx, name, name_len);
+	if (name_len)
+		memcpy(ctx->ctx, name, name_len);
 
 	ret = syscall(__NR_lsm_set_self_attr, LSM_ATTR_UNSHARE, ctx, size, 0);
 	free(ctx);
@@ -210,11 +214,67 @@ static int clone_child(struct child_result *result)
 	return 0;
 }
 
-int main(void)
+static int skip_errno(int err)
+{
+	return err == EOPNOTSUPP || err == EPERM;
+}
+
+static int run_lsm_ns_test(int nr, const char *label, uint64_t lsm_id,
+			   const char *name, const char *parent_user_ns,
+			   const char *parent_lsm_ns)
 {
 	struct child_result child = { 0 };
+
+	if (request_lsm_ns(lsm_id, name)) {
+		if (skip_errno(errno)) {
+			printf("ok %d # SKIP cannot arm %s LSM namespace request: %s\n",
+			       nr, label, strerror(errno));
+			return KSFT_SKIP;
+		}
+
+		printf("not ok %d failed to arm %s LSM namespace request\n",
+		       nr, label);
+		perror("lsm_set_self_attr(LSM_ATTR_UNSHARE)");
+		return 1;
+	}
+
+	if (clone_child(&child)) {
+		if (skip_errno(errno)) {
+			printf("ok %d # SKIP cannot create child %s LSM namespace: %s\n",
+			       nr, label, strerror(errno));
+			return KSFT_SKIP;
+		}
+
+		printf("not ok %d failed to create child %s LSM namespace\n",
+		       nr, label);
+		perror("clone(CLONE_NEWUSER)");
+		return 1;
+	}
+
+	if (!strcmp(parent_user_ns, child.user_ns)) {
+		printf("not ok %d child stayed in parent user namespace\n", nr);
+		fprintf(stderr, "child stayed in parent user namespace %s\n",
+			parent_user_ns);
+		return 1;
+	}
+
+	if (!strcmp(parent_lsm_ns, child.lsm_ns)) {
+		printf("not ok %d child stayed in parent LSM namespace\n", nr);
+		fprintf(stderr, "child stayed in parent LSM namespace %s\n",
+			parent_lsm_ns);
+		return 1;
+	}
+
+	printf("ok %d child user namespace consumed %s LSM namespace request\n",
+	       nr, label);
+	return 0;
+}
+
+int main(void)
+{
 	char parent_user_ns[NS_LINK_SIZE];
 	char parent_lsm_ns[NS_LINK_SIZE];
+	int apparmor_ret, selinux_ret;
 
 	if (read_ns_link("lsm", parent_lsm_ns, sizeof(parent_lsm_ns))) {
 		printf("TAP version 13\n1..0 # SKIP no lsm namespace file\n");
@@ -225,44 +285,18 @@ int main(void)
 		return 1;
 	}
 
-	if (request_apparmor_lsm_ns("selftest-lsmns")) {
-		if (errno == EOPNOTSUPP || errno == EPERM) {
-			printf("TAP version 13\n");
-			printf("1..0 # SKIP cannot arm AppArmor LSM namespace request: %s\n",
-			       strerror(errno));
-			return KSFT_SKIP;
-		}
-
-		perror("lsm_set_self_attr(LSM_ATTR_UNSHARE)");
-		return 1;
-	}
-
-	if (clone_child(&child)) {
-		if (errno == EOPNOTSUPP || errno == EPERM) {
-			printf("TAP version 13\n");
-			printf("1..0 # SKIP cannot create child LSM namespace: %s\n",
-			       strerror(errno));
-			return KSFT_SKIP;
-		}
-
-		perror("clone(CLONE_NEWUSER)");
-		return 1;
-	}
-
-	if (!strcmp(parent_user_ns, child.user_ns)) {
-		fprintf(stderr, "child stayed in parent user namespace %s\n",
-			parent_user_ns);
-		return 1;
-	}
-
-	if (!strcmp(parent_lsm_ns, child.lsm_ns)) {
-		fprintf(stderr, "child stayed in parent LSM namespace %s\n",
-			parent_lsm_ns);
-		return 1;
-	}
-
 	printf("TAP version 13\n");
-	printf("1..1\n");
-	printf("ok 1 child user namespace consumed AppArmor LSM namespace request\n");
+	printf("1..2\n");
+
+	apparmor_ret = run_lsm_ns_test(1, "AppArmor", LSM_ID_APPARMOR,
+				       "selftest-lsmns", parent_user_ns,
+				       parent_lsm_ns);
+	selinux_ret = run_lsm_ns_test(2, "SELinux", LSM_ID_SELINUX, NULL,
+				      parent_user_ns, parent_lsm_ns);
+
+	if (apparmor_ret == 1 || selinux_ret == 1)
+		return 1;
+	if (apparmor_ret == KSFT_SKIP && selinux_ret == KSFT_SKIP)
+		return KSFT_SKIP;
 	return 0;
 }

@@ -412,9 +412,11 @@ static int selinux_lsmns_backend_create(struct lsm_namespace *ns,
 	if (error)
 		goto fail_backend;
 
-	error = selinux_lsmns_clone_parent_policy(state, current_selinux_state());
-	if (error)
-		goto fail_state;
+	if (selinux_initialized_state(current_selinux_state())) {
+		error = selinux_lsmns_clone_parent_policy(state, current_selinux_state());
+		if (error)
+			goto fail_state;
+	}
 
 	error = selinux_task_install_state(task, new_cred, state);
 	if (error)
