@@ -313,12 +313,14 @@ static pid_t clone_child_wait(struct child_result *result, int mount_selinuxfs,
 	free(stack);
 
 	if (result->err) {
+		saved_errno = result->err;
 		if (release_fd) {
-			write(waitfd[1], "x", 1);
+			if (write_full(waitfd[1], "x", 1) && !saved_errno)
+				saved_errno = errno ? errno : EIO;
 			close(waitfd[1]);
 		}
 		waitpid(pid, NULL, 0);
-		errno = result->err;
+		errno = saved_errno;
 		return -1;
 	}
 
@@ -333,12 +335,18 @@ static pid_t clone_child_wait(struct child_result *result, int mount_selinuxfs,
 static int release_child(pid_t pid, int release_fd)
 {
 	int status;
+	int saved_errno = 0;
 
 	if (release_fd >= 0) {
-		write(release_fd, "x", 1);
+		if (write_full(release_fd, "x", 1))
+			saved_errno = errno ? errno : EIO;
 		close(release_fd);
 	}
 	if (waitpid(pid, &status, 0) < 0) {
+		return -1;
+	}
+	if (saved_errno) {
+		errno = saved_errno;
 		return -1;
 	}
 
