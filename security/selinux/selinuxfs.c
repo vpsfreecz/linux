@@ -31,6 +31,10 @@
 #include <linux/uaccess.h>
 #include <linux/kobject.h>
 #include <linux/ctype.h>
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+#include <linux/lsm_namespace.h>
+#include <linux/user_namespace.h>
+#endif
 
 /* selinuxfs pseudo filesystem for exporting the security policy API.
    Based on the proc code and the fs/nfsd/nfsctl.c code. */
@@ -2162,9 +2166,30 @@ err:
 	return ret;
 }
 
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+static bool selinuxfs_userns_mount_allowed(struct fs_context *fc)
+{
+	struct lsm_namespace *ns;
+
+	if (fc->user_ns == &init_user_ns)
+		return true;
+
+	ns = current_lsm_ns();
+	return ns && ns != &init_lsm_ns && ns->lsmid == LSM_ID_SELINUX;
+}
+#else
+static bool selinuxfs_userns_mount_allowed(struct fs_context *fc)
+{
+	return true;
+}
+#endif
+
 static int sel_get_tree(struct fs_context *fc)
 {
-	return get_tree_single(fc, sel_fill_super);
+	if (!selinuxfs_userns_mount_allowed(fc))
+		return -EPERM;
+
+	return get_tree_nodev(fc, sel_fill_super);
 }
 
 static const struct fs_context_operations sel_context_ops = {
@@ -2187,6 +2212,9 @@ static struct file_system_type sel_fs_type = {
 	.name		= "selinuxfs",
 	.init_fs_context = sel_init_fs_context,
 	.kill_sb	= sel_kill_sb,
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	.fs_flags	= FS_USERNS_MOUNT,
+#endif
 };
 
 struct path selinux_null __ro_after_init;

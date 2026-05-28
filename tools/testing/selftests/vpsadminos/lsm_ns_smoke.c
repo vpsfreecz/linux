@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -46,12 +47,14 @@ struct lsm_ctx {
 
 struct child_result {
 	int err;
+	int selinuxfs_err;
 	char user_ns[NS_LINK_SIZE];
 	char lsm_ns[NS_LINK_SIZE];
 };
 
 struct child_cfg {
 	int pipefd;
+	int mount_selinuxfs;
 };
 
 static int read_ns_link(const char *name, char *buf, size_t size)
@@ -138,6 +141,31 @@ static int request_lsm_ns(uint64_t lsm_id, const char *name)
 	return ret;
 }
 
+static int try_mount_selinuxfs(void)
+{
+	char path[] = "/tmp/vpsadminos-selinuxfs-XXXXXX";
+	int saved_errno;
+
+	if (!mkdtemp(path))
+		return -1;
+
+	if (mount("selinuxfs", path, "selinuxfs", 0, NULL)) {
+		saved_errno = errno;
+		rmdir(path);
+		errno = saved_errno;
+		return -1;
+	}
+
+	if (umount2(path, MNT_DETACH)) {
+		saved_errno = errno;
+		rmdir(path);
+		errno = saved_errno;
+		return -1;
+	}
+
+	return rmdir(path);
+}
+
 static int child_main(void *arg)
 {
 	struct child_cfg *cfg = arg;
@@ -147,6 +175,11 @@ static int child_main(void *arg)
 	    read_ns_link("lsm", result.lsm_ns, sizeof(result.lsm_ns)))
 		result.err = errno ? errno : EIO;
 
+	if (!result.err && cfg->mount_selinuxfs && try_mount_selinuxfs()) {
+		result.selinuxfs_err = errno ? errno : EIO;
+		result.err = result.selinuxfs_err;
+	}
+
 	if (write_full(cfg->pipefd, &result, sizeof(result)) && !result.err)
 		result.err = errno ? errno : EIO;
 	close(cfg->pipefd);
@@ -154,7 +187,7 @@ static int child_main(void *arg)
 	return result.err ? 1 : 0;
 }
 
-static int clone_child(struct child_result *result)
+static int clone_child(struct child_result *result, int mount_selinuxfs)
 {
 	struct child_cfg cfg;
 	char *stack;
@@ -163,6 +196,7 @@ static int clone_child(struct child_result *result)
 	pid_t pid;
 	int status;
 	int saved_errno;
+	int clone_flags = CLONE_NEWUSER | SIGCHLD;
 
 	if (pipe(pipefd) < 0)
 		return -1;
@@ -176,8 +210,12 @@ static int clone_child(struct child_result *result)
 	}
 
 	cfg.pipefd = pipefd[1];
+	cfg.mount_selinuxfs = mount_selinuxfs;
 	stack_top = stack + STACK_SIZE;
-	pid = clone(child_main, stack_top, CLONE_NEWUSER | SIGCHLD, &cfg);
+	if (mount_selinuxfs)
+		clone_flags |= CLONE_NEWNS;
+
+	pid = clone(child_main, stack_top, clone_flags, &cfg);
 	saved_errno = errno;
 	close(pipefd[1]);
 
@@ -221,7 +259,7 @@ static int skip_errno(int err)
 
 static int run_lsm_ns_test(int nr, const char *label, uint64_t lsm_id,
 			   const char *name, const char *parent_user_ns,
-			   const char *parent_lsm_ns)
+			   const char *parent_lsm_ns, int mount_selinuxfs)
 {
 	struct child_result child = { 0 };
 
@@ -238,7 +276,15 @@ static int run_lsm_ns_test(int nr, const char *label, uint64_t lsm_id,
 		return 1;
 	}
 
-	if (clone_child(&child)) {
+	if (clone_child(&child, mount_selinuxfs)) {
+		if (child.selinuxfs_err) {
+			printf("not ok %d failed to mount selinuxfs in child "
+			       "SELinux LSM namespace\n", nr);
+			errno = child.selinuxfs_err;
+			perror("mount(selinuxfs)");
+			return 1;
+		}
+
 		if (skip_errno(errno)) {
 			printf("ok %d # SKIP cannot create child %s LSM namespace: %s\n",
 			       nr, label, strerror(errno));
@@ -265,8 +311,9 @@ static int run_lsm_ns_test(int nr, const char *label, uint64_t lsm_id,
 		return 1;
 	}
 
-	printf("ok %d child user namespace consumed %s LSM namespace request\n",
-	       nr, label);
+	printf("ok %d child user namespace consumed %s LSM namespace request%s\n",
+	       nr, label,
+	       mount_selinuxfs ? " and mounted selinuxfs" : "");
 	return 0;
 }
 
@@ -290,9 +337,9 @@ int main(void)
 
 	apparmor_ret = run_lsm_ns_test(1, "AppArmor", LSM_ID_APPARMOR,
 				       "selftest-lsmns", parent_user_ns,
-				       parent_lsm_ns);
+				       parent_lsm_ns, 0);
 	selinux_ret = run_lsm_ns_test(2, "SELinux", LSM_ID_SELINUX, NULL,
-				      parent_user_ns, parent_lsm_ns);
+				      parent_user_ns, parent_lsm_ns, 1);
 
 	if (apparmor_ret == 1 || selinux_ret == 1)
 		return 1;
