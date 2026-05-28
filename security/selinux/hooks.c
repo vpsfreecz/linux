@@ -5166,13 +5166,33 @@ static void selinux_sock_bind_state(struct sk_security_struct *sksec,
 	put_selinux_state(old);
 }
 
-static bool selinux_sock_state_matches(const struct sk_security_struct *sksec,
-					   const struct selinux_state *state)
+static bool selinux_states_match_or_both_uninitialized(struct selinux_state *a,
+						       struct selinux_state *b)
 {
-	if (!state)
-		state = &selinux_state;
+	if (!a)
+		a = &selinux_state;
+	if (!b)
+		b = &selinux_state;
 
-	return selinux_sock_state_from_sec(sksec) == state;
+	/*
+	 * Empty child SELinux states are bootstrap shells: AVC decisions already
+	 * allow everything until a policy is loaded.  Keep local state-tagged
+	 * socket handshakes usable during that bootstrap phase so container setup
+	 * hooks can talk to host coordination sockets.  Once either side has a
+	 * policy, raw SIDs can no longer be compared safely across state
+	 * boundaries and strict state identity is required again.
+	 */
+	if (!selinux_initialized_state(a) && !selinux_initialized_state(b))
+		return true;
+
+	return a == b;
+}
+
+static bool selinux_sock_state_matches(const struct sk_security_struct *sksec,
+					   struct selinux_state *state)
+{
+	return selinux_states_match_or_both_uninitialized(
+		selinux_sock_state_from_sec(sksec), state);
 }
 
 static struct selinux_state *selinux_sock_peer_state_from_sec(const struct sk_security_struct *sksec)
@@ -5183,12 +5203,10 @@ static struct selinux_state *selinux_sock_peer_state_from_sec(const struct sk_se
 }
 
 static bool selinux_sock_peer_state_matches(const struct sk_security_struct *sksec,
-					   const struct selinux_state *state)
+					   struct selinux_state *state)
 {
-	if (!state)
-		state = &selinux_state;
-
-	return selinux_sock_peer_state_from_sec(sksec) == state;
+	return selinux_states_match_or_both_uninitialized(
+		selinux_sock_peer_state_from_sec(sksec), state);
 }
 
 static void selinux_sock_bind_peer_state(struct sk_security_struct *sksec,
