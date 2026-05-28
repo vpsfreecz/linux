@@ -245,11 +245,12 @@ static inline bool selinux_state_allows_runtime_enforcing_change(struct selinux_
 		state = &selinux_state;
 
 	/*
-	 * Child SELinux states still interpret the shared host object model and raw
-	 * SID space.  Keep their enforcing mode pinned to the inherited parent mode
-	 * until per-object state tracking exists.
+	 * Empty child SELinux states still mirror their parent during bootstrap.
+	 * After the first policy load, a child state owns its AVC/enforcing view
+	 * and can switch between enforcing and permissive without mutating the
+	 * policy or boolean tables that remain frozen separately.
 	 */
-	return !state->parent;
+	return !state->parent || selinux_initialized_state(state);
 }
 
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
