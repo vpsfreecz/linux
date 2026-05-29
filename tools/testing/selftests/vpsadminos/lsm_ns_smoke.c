@@ -526,8 +526,21 @@ static int run_selinux_pidfd_setns_test(int nr, const char *parent_user_ns,
 		return 1;
 	}
 
-	pid = clone_child_wait(&child, 0, &release_fd);
+	/*
+	 * The pidfd attach probe needs a child-owned mount namespace.  Joining
+	 * a child user namespace while keeping the parent-owned mount namespace
+	 * correctly leaves the helper without CAP_SYS_ADMIN for new mounts.
+	 */
+	pid = clone_child_wait(&child, 1, &release_fd);
 	if (pid < 0) {
+		if (child.selinuxfs_err) {
+			printf("not ok %d failed to prepare child SELinux mount namespace\n",
+			       nr);
+			errno = child.selinuxfs_err;
+			perror("mount(selinuxfs)");
+			return 1;
+		}
+
 		if (skip_errno(errno)) {
 			printf("ok %d # SKIP cannot create child SELinux LSM namespace: %s\n",
 			       nr, strerror(errno));
