@@ -258,18 +258,9 @@ unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
 	}
 	task_unlock(p);
 
-	if (!cgns->root_cset) {
-		put_cgroup_ns(cgns);
-		rcu_read_unlock();
-		return 0;
-	}
-	css = cgns->root_cset->subsys[cpu_cgrp_id];
-	if (!css || !css_tryget_online(css)) {
-		put_cgroup_ns(cgns);
-		rcu_read_unlock();
-		return 0;
-	}
 	rcu_read_unlock();
+
+	css = task_get_css(p, cpu_cgrp_id);
 
 up:
 	quota = cpu_cfs_quota_read_s64(css, NULL);
