@@ -962,7 +962,7 @@ static inline bool check_anonymous_mnt(struct mount *mnt)
 		return false;
 
 	seq = mnt->mnt_ns->seq_origin;
-	return !seq || (seq == current->nsproxy->mnt_ns->ns.ns_id);
+	return !seq || (seq == current->nsproxy->mnt_ns->seq);
 }
 
 /*
@@ -2141,7 +2141,7 @@ static bool mnt_ns_loop(struct dentry *dentry)
 	if (!mnt_ns)
 		return false;
 
-	return current->nsproxy->mnt_ns->ns.ns_id >= mnt_ns->ns.ns_id;
+	return current->nsproxy->mnt_ns->seq >= mnt_ns->seq;
 }
 
 struct mount *copy_tree(struct mount *src_root, struct dentry *dentry,
@@ -3020,7 +3020,7 @@ static struct mnt_namespace *get_detached_copy(const struct path *path, bool rec
 		if (is_anon_ns(src_mnt_ns))
 			ns->seq_origin = src_mnt_ns->seq_origin;
 		else
-			ns->seq_origin = src_mnt_ns->ns.ns_id;
+			ns->seq_origin = src_mnt_ns->seq;
 	}
 
 	mnt = __do_loopback(path, recursive);
@@ -4059,6 +4059,15 @@ static void free_mnt_ns(struct mnt_namespace *ns)
 	mnt_ns_tree_remove(ns);
 }
 
+/*
+ * Assign a sequence number so we can detect when we attempt to bind
+ * mount a reference to an older mount namespace into the current
+ * mount namespace, preventing reference counting loops.  A 64bit
+ * number incrementing at 10Ghz will take 12,427 years to wrap which
+ * is effectively never, so we can ignore the possibility.
+ */
+static atomic64_t mnt_ns_seq = ATOMIC64_INIT(1);
+
 static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns, bool anon)
 {
 	struct mnt_namespace *new_ns;
@@ -4084,8 +4093,10 @@ static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns, bool a
 		dec_mnt_namespaces(ucounts);
 		return ERR_PTR(ret);
 	}
-	if (!anon)
+	if (!anon) {
 		ns_tree_gen_id(&new_ns->ns);
+		new_ns->seq = atomic64_inc_return(&mnt_ns_seq);
+	}
 	refcount_set(&new_ns->passive, 1);
 	new_ns->mounts = RB_ROOT;
 	init_waitqueue_head(&new_ns->poll);
@@ -5997,6 +6008,7 @@ static void __init init_mount_tree(void)
 		panic("Can't create rootfs");
 
 	m = real_mount(mnt);
+	init_mnt_ns.seq = atomic64_inc_return(&mnt_ns_seq);
 	init_mnt_ns.root = m;
 	init_mnt_ns.nr_mounts = 1;
 	mnt_add_to_ns(&init_mnt_ns, m);
