@@ -17,6 +17,7 @@ struct mnt_namespace {
 	};
 	struct user_namespace	*user_ns;
 	struct ucounts		*ucounts;
+	u64			seq; /* Sequence number to prevent loops */
 	wait_queue_head_t	poll;
 	u64			seq_origin; /* Sequence number of origin mount namespace */
 	u64 event;
