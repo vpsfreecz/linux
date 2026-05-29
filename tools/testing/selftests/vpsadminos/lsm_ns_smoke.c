@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/syscall.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -127,6 +128,63 @@ static int read_full(int fd, void *buf, size_t size)
 	}
 
 	return 0;
+}
+
+static int write_text_file(const char *path, const char *text)
+{
+	int fd;
+	int saved_errno;
+
+	fd = open(path, O_WRONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+
+	if (write_full(fd, text, strlen(text))) {
+		saved_errno = errno ? errno : EIO;
+		close(fd);
+		errno = saved_errno;
+		return -1;
+	}
+
+	return close(fd);
+}
+
+static int write_child_proc_file(pid_t pid, const char *name, const char *text)
+{
+	char path[PATH_MAX];
+	int ret;
+
+	ret = snprintf(path, sizeof(path), "/proc/%d/%s", pid, name);
+	if (ret < 0 || (size_t)ret >= sizeof(path)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+
+	return write_text_file(path, text);
+}
+
+static int map_child_root(pid_t pid)
+{
+	char map[64];
+	int ret;
+
+	if (write_child_proc_file(pid, "setgroups", "deny\n") && errno != ENOENT)
+		return -1;
+
+	ret = snprintf(map, sizeof(map), "0 %lu 1\n", (unsigned long)getuid());
+	if (ret < 0 || (size_t)ret >= sizeof(map)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	if (write_child_proc_file(pid, "uid_map", map))
+		return -1;
+
+	ret = snprintf(map, sizeof(map), "0 %lu 1\n", (unsigned long)getgid());
+	if (ret < 0 || (size_t)ret >= sizeof(map)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	return write_child_proc_file(pid, "gid_map", map);
 }
 
 static int request_lsm_ns(uint64_t lsm_id, const char *name)
@@ -558,6 +616,27 @@ static int run_selinux_pidfd_setns_test(int nr, const char *parent_user_ns,
 		printf("not ok %d waiting child did not enter child user/LSM namespace\n",
 		       nr);
 		release_child(pid, release_fd);
+		return 1;
+	}
+
+	/*
+	 * The helper enters the child's user namespace before mounting
+	 * selinuxfs.  Give that namespace the minimal root id mapping a CT-level
+	 * attach path has, otherwise DAC rejects opening selinuxfs/load before
+	 * the probe reaches SELinux state selection.
+	 */
+	if (map_child_root(pid)) {
+		int err = errno;
+
+		release_child(pid, release_fd);
+		if (err == EPERM || err == EACCES) {
+			printf("ok %d # SKIP cannot map child user namespace ids: %s\n",
+			       nr, strerror(err));
+			return KSFT_SKIP;
+		}
+
+		printf("not ok %d failed to map child user namespace ids: %s\n",
+		       nr, strerror(err));
 		return 1;
 	}
 
