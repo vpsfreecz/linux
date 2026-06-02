@@ -1130,6 +1130,8 @@ static void __invalidate_reclaim_iterators(struct mem_cgroup *from,
 
 	for_each_node(nid) {
 		mz = from->nodeinfo[nid];
+		if (!mz)
+			continue;
 		iter = &mz->iter;
 		cmpxchg(&iter->position, dead_memcg, NULL);
 	}
@@ -1139,6 +1141,15 @@ static void invalidate_reclaim_iterators(struct mem_cgroup *dead_memcg)
 {
 	struct mem_cgroup *memcg = dead_memcg;
 	struct mem_cgroup *last;
+
+	/*
+	 * css_released runs on cgroup_release_wq, but css_free_rwork_fn
+	 * (which frees ancestor memcgs and their nodeinfo) runs on
+	 * cgroup_free_wq after an RCU grace period. Hold rcu_read_lock()
+	 * to prevent ancestors from being freed while walking the parent
+	 * chain.
+	 */
+	rcu_read_lock();
 
 	do {
 		__invalidate_reclaim_iterators(memcg, dead_memcg);
@@ -1154,6 +1165,8 @@ static void invalidate_reclaim_iterators(struct mem_cgroup *dead_memcg)
 	if (!mem_cgroup_is_root(last))
 		__invalidate_reclaim_iterators(root_mem_cgroup,
 						dead_memcg);
+
+	rcu_read_unlock();
 }
 
 /**
