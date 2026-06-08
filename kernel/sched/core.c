@@ -1416,13 +1416,28 @@ static void nohz_csd_func(void *info)
 #ifdef CONFIG_NO_HZ_FULL
 static inline bool __need_bw_check(struct rq *rq, struct task_struct *p)
 {
-	if (rq->nr_running != 1)
+	bool proxy_current = sched_proxy_exec() && task_current(rq, p) &&
+			     p != rq->donor;
+
+	/*
+	 * A proxy split normally leaves both the blocked donor and its runnable
+	 * owner counted on the rq.  The ordinary single-runnable-task condition
+	 * therefore applies only when the execution and scheduling contexts
+	 * have not split.
+	 */
+	if (!proxy_current && rq->nr_running != 1)
 		return false;
 
 	if (p->sched_class != &fair_sched_class)
 		return false;
 
-	if (!task_on_rq_queued(p))
+	/*
+	 * Proxy execution can run a fair lock owner as the execution context
+	 * while the donor remains the scheduling context.  Such an owner can be
+	 * off-rq during the throttled proxy-service window, but it still needs
+	 * bandwidth tick pressure while it is actual-current.
+	 */
+	if (!task_on_rq_queued(p) && !proxy_current)
 		return false;
 
 	return true;
@@ -1431,6 +1446,15 @@ static inline bool __need_bw_check(struct rq *rq, struct task_struct *p)
 bool sched_can_stop_tick(struct rq *rq)
 {
 	int fifo_nr_running;
+
+	/*
+	 * A proxy-serviced fair owner can be the actual execution context even
+	 * when the donor is RT. Preserve CFS bandwidth tick pressure before the
+	 * RT single-task shortcuts below decide that the tick can stop.
+	 */
+	if (__need_bw_check(rq, rq->curr) &&
+	    cfs_task_bw_constrained(rq->curr))
+		return false;
 
 	/* Deadline tasks, even if single, need the tick */
 	if (rq->dl.dl_nr_running)
@@ -1465,18 +1489,6 @@ bool sched_can_stop_tick(struct rq *rq)
 
 	if (rq->cfs.h_nr_queued > 1)
 		return false;
-
-	/*
-	 * If there is one task and it has CFS runtime bandwidth constraints
-	 * and it's on the cpu now we don't want to stop the tick.
-	 * This check prevents clearing the bit if a newly enqueued task here is
-	 * dequeued by migrating while the constrained task continues to run.
-	 * E.g. going from 2->1 without going through pick_next_task().
-	 */
-	if (__need_bw_check(rq, rq->curr)) {
-		if (cfs_task_bw_constrained(rq->curr))
-			return false;
-	}
 
 	return true;
 }
@@ -5636,23 +5648,28 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 	 * If we race with it leaving CPU, we'll take a lock. So we're correct.
 	 * If we race with it entering CPU, unaccounted time is 0. This is
 	 * indistinguishable from the read occurring a few cycles earlier.
-	 * If we see ->on_cpu without ->on_rq, the task is leaving, and has
-	 * been accounted, so we're correct here as well.
+	 * Proxy execution can run a throttled owner while it is off-rq, so
+	 * ->on_cpu tasks need the locked path even when !task_on_rq_queued().
 	 */
-	if (!p->on_cpu || !task_on_rq_queued(p))
+	if (!p->on_cpu)
 		return p->se.sum_exec_runtime;
 #endif
 
 	rq = task_rq_lock(p, &rf);
 	/*
-	 * Must be ->curr _and_ ->on_rq.  If dequeued, we would
-	 * project cycles that may never be accounted to this
-	 * thread, breaking clock_gettime().
+	 * Update pending runtime when @p is either the scheduling context or
+	 * the actual execution context.  Proxy-serviced owners can be ->curr
+	 * without being ->donor or ->on_rq, while ordinary dequeued tasks that
+	 * are merely leaving the CPU will fail the ->curr check below.
 	 */
-	if (task_current_donor(rq, p) && task_on_rq_queued(p)) {
-		prefetch_curr_exec_start(p);
+	if (task_current(rq, p) ||
+	    (task_current_donor(rq, p) && task_on_rq_queued(p))) {
+		struct task_struct *donor = rq->donor;
+
+		if (donor->sched_class == &fair_sched_class)
+			prefetch_curr_exec_start(donor);
 		update_rq_clock(rq);
-		p->sched_class->update_curr(rq);
+		donor->sched_class->update_curr(rq);
 	}
 	ns = p->se.sum_exec_runtime;
 	task_rq_unlock(rq, p, &rf);
@@ -5713,7 +5730,7 @@ void sched_tick(void)
 {
 	int cpu = smp_processor_id();
 	struct rq *rq = cpu_rq(cpu);
-	/* accounting goes to the donor task */
+	struct task_struct *curr;
 	struct task_struct *donor;
 	struct rq_flags rf;
 	unsigned long hw_pressure;
@@ -5725,6 +5742,7 @@ void sched_tick(void)
 	sched_clock_tick();
 
 	rq_lock(rq, &rf);
+	curr = rq->curr;
 	donor = rq->donor;
 
 	psi_account_irqtime(rq, donor, NULL);
@@ -5741,7 +5759,8 @@ void sched_tick(void)
 		resched_latency = cpu_resched_latency(rq);
 	calc_global_load_tick(rq);
 	sched_core_tick(rq);
-	task_tick_mm_cid(rq, donor);
+	/* mm-cid state follows the actual execution context. */
+	task_tick_mm_cid(rq, curr);
 	scx_tick(rq);
 
 	rq_unlock(rq, &rf);
@@ -5751,8 +5770,8 @@ void sched_tick(void)
 
 	perf_event_task_tick();
 
-	if (donor->flags & PF_WQ_WORKER)
-		wq_worker_tick(donor);
+	if (curr->flags & PF_WQ_WORKER)
+		wq_worker_tick(curr);
 
 	if (!scx_switched_all()) {
 		rq->idle_balance = idle_cpu(cpu);
@@ -5815,14 +5834,15 @@ static void sched_tick_remote(struct work_struct *work)
 	if (tick_nohz_tick_stopped_cpu(cpu)) {
 		guard(rq_lock_irq)(rq);
 		struct task_struct *curr = rq->curr;
+		struct task_struct *donor = rq->donor;
 
 		if (cpu_online(cpu)) {
 			/*
-			 * Since this is a remote tick for full dynticks mode,
-			 * we are always sure that there is no proxy (only a
-			 * single task is running).
+			 * Proxy execution can split the execution context from
+			 * the scheduling context even in full dynticks mode.
+			 * Tick the donor class; shared runtime accounting will
+			 * account the actual running task from rq->curr.
 			 */
-			WARN_ON_ONCE(rq->curr != rq->donor);
 			update_rq_clock(rq);
 
 			if (!is_idle_task(curr)) {
@@ -5833,7 +5853,7 @@ static void sched_tick_remote(struct work_struct *work)
 				u64 delta = rq_clock_task(rq) - curr->se.exec_start;
 				WARN_ON_ONCE(delta > (u64)NSEC_PER_SEC * 3);
 			}
-			curr->sched_class->task_tick(rq, curr, 0);
+			donor->sched_class->task_tick(rq, donor, 0);
 
 			calc_load_nohz_remote(rq);
 		}
@@ -6390,7 +6410,7 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 		/* Did we break L1TF mitigation requirements? */
 		WARN_ON_ONCE(!cookie_match(next, rq_i->core_pick));
 
-		if (rq_i->curr == rq_i->core_pick) {
+		if (rq_i->donor == rq_i->core_pick) {
 			rq_i->core_pick = NULL;
 			rq_i->core_dl_server = NULL;
 			continue;
@@ -6429,7 +6449,8 @@ static bool try_steal_cookie(int this, int that)
 		return false;
 
 	do {
-		if (p == src->core_pick || p == src->curr)
+		if (p == src->core_pick || p == src->curr ||
+		    task_current_donor(src, p))
 			goto next;
 
 		if (!is_cpu_allowed(p, this))
@@ -7130,7 +7151,23 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			goto deactivate;
 
 		if (!READ_ONCE(owner->on_rq)) {
-			/* XXX Don't handle blocked/off-rq owners yet */
+			bool owner_running = READ_ONCE(owner->__state) == TASK_RUNNING;
+
+			/*
+			 * The rq lock no longer owns an off-rq owner, so proxy
+			 * execution must not return @owner from here.  If the
+			 * owner is still TASK_RUNNING on another CPU, move the
+			 * blocked scheduling context toward that CPU and let the
+			 * normal queued-owner path handle it after the owner is
+			 * visible again.  Same-CPU off-rq owners remain ineligible:
+			 * task-based CFS throttling should not leave a lock-holding
+			 * owner in throttled limbo, and running arbitrary off-rq
+			 * owners directly would bypass scheduler ownership rules.
+			 */
+			owner_cpu = task_cpu(owner);
+			if (owner_running && owner_cpu != this_cpu && !p_current) {
+				goto migrate_task;
+			}
 			if (curr_in_chain) {
 				owner = proxy_resched_idle(rq);
 				proxy_put_task_ref(&owner_ref);
@@ -7369,8 +7406,7 @@ static void __sched notrace __schedule(int sched_mode)
 		 * for selection with proxy-exec (without proxy-exec
 		 * task_is_blocked() will always be false).
 		 */
-		try_to_block_task(rq, prev, &prev_state,
-				  !task_is_blocked(prev));
+		try_to_block_task(rq, prev, &prev_state, !task_is_blocked(prev));
 		switch_count = &prev->nvcsw;
 	}
 
