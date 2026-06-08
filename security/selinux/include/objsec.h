@@ -180,6 +180,7 @@ struct key_security_struct {
 
 struct ib_security_struct {
 	u32 sid; /* SID of the queue pair or MAD agent */
+	struct selinux_state *state; /* SELinux state bound to this object */
 };
 
 struct pkey_security_struct {
@@ -190,10 +191,12 @@ struct pkey_security_struct {
 
 struct bpf_security_struct {
 	u32 sid; /* SID of bpf obj creator */
+	struct selinux_state *state; /* SELinux state bound to this object */
 };
 
 struct perf_event_security_struct {
 	u32 sid; /* SID of perf_event obj creator */
+	struct selinux_state *state; /* SELinux state bound to this object */
 };
 
 extern struct lsm_blob_sizes selinux_blob_sizes;

@@ -3343,11 +3343,21 @@ static void binder_transaction(struct binder_proc *proc,
 			     (u64)extra_buffers_size);
 
 	if (target_node && target_node->txn_security_ctx) {
+#ifdef CONFIG_SECURITY_SELINUX
+		struct lsm_prop prop = { };
+#else
 		u32 secid;
+#endif
 		size_t added_size;
 
+#ifdef CONFIG_SECURITY_SELINUX
+		security_cred_getlsmprop(proc->cred, &prop);
+		ret = security_lsmprop_to_secctx(&prop, &lsmctx,
+						 LSM_ID_SELINUX);
+#else
 		security_cred_getsecid(proc->cred, &secid);
 		ret = security_secid_to_secctx(secid, &lsmctx);
+#endif
 		if (ret < 0) {
 			binder_txn_error("%d:%d failed to get security context\n",
 				thread->pid, proc->pid);

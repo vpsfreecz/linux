@@ -139,7 +139,7 @@ static void ip_cmsg_recv_security(struct msghdr *msg, struct sk_buff *skb)
 
 #ifdef CONFIG_SECURITY_SELINUX
 	if (prop.selinux.state)
-		err = security_lsmprop_to_secctx(&prop, &ctx, LSM_ID_UNDEF);
+		err = security_lsmprop_to_secctx(&prop, &ctx, LSM_ID_SELINUX);
 	else {
 #endif
 		err = security_secid_to_secctx(secid, &ctx);

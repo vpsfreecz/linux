@@ -444,7 +444,7 @@ static void scm_passec(struct sock *sk, struct msghdr *msg, struct scm_cookie *s
 
 			prop.selinux = scm->selinux;
 			err = security_lsmprop_to_secctx(&prop, &ctx,
-							 LSM_ID_UNDEF);
+							 LSM_ID_SELINUX);
 		} else {
 #endif
 			err = security_secid_to_secctx(scm->secid, &ctx);

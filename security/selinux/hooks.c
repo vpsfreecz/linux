@@ -9602,12 +9602,43 @@ static int selinux_watch_key(struct key *key)
 #endif
 
 #ifdef CONFIG_SECURITY_INFINIBAND
+static struct selinux_state *selinux_ib_state_from_sec(
+	const struct ib_security_struct *sec)
+{
+	struct selinux_state *state = READ_ONCE(sec->state);
+
+	return state ?: &selinux_state;
+}
+
+static void selinux_ib_bind_state(struct ib_security_struct *sec,
+				  struct selinux_state *state)
+{
+	struct selinux_state *old = READ_ONCE(sec->state);
+
+	if (!state)
+		state = &selinux_state;
+	if (old == state)
+		return;
+
+	WRITE_ONCE(sec->state, get_selinux_state(state));
+	put_selinux_state(old);
+}
+
+static void selinux_ib_release_security(struct ib_security_struct *sec)
+{
+	struct selinux_state *state = READ_ONCE(sec->state);
+
+	WRITE_ONCE(sec->state, NULL);
+	put_selinux_state(state);
+}
+
 static int selinux_ib_pkey_access(void *ib_sec, u64 subnet_prefix, u16 pkey_val)
 {
 	struct common_audit_data ad;
 	int err;
 	u32 sid = 0;
 	struct ib_security_struct *sec = ib_sec;
+	struct selinux_state *state = selinux_ib_state_from_sec(sec);
 	struct lsm_ibpkey_audit ibpkey;
 
 	err = sel_ib_pkey_sid(subnet_prefix, pkey_val, &sid);
@@ -9618,9 +9649,9 @@ static int selinux_ib_pkey_access(void *ib_sec, u64 subnet_prefix, u16 pkey_val)
 	ibpkey.subnet_prefix = subnet_prefix;
 	ibpkey.pkey = pkey_val;
 	ad.u.ibpkey = &ibpkey;
-	return avc_has_perm(sec->sid, sid,
-			    SECCLASS_INFINIBAND_PKEY,
-			    INFINIBAND_PKEY__ACCESS, &ad);
+	return avc_has_perm_state(state, sec->sid, sid,
+				  SECCLASS_INFINIBAND_PKEY,
+				  INFINIBAND_PKEY__ACCESS, &ad);
 }
 
 static int selinux_ib_endport_manage_subnet(void *ib_sec, const char *dev_name,
@@ -9630,6 +9661,7 @@ static int selinux_ib_endport_manage_subnet(void *ib_sec, const char *dev_name,
 	int err;
 	u32 sid = 0;
 	struct ib_security_struct *sec = ib_sec;
+	struct selinux_state *state = selinux_ib_state_from_sec(sec);
 	struct lsm_ibendport_audit ibendport;
 
 	err = security_ib_endport_sid(dev_name, port_num,
@@ -9642,9 +9674,9 @@ static int selinux_ib_endport_manage_subnet(void *ib_sec, const char *dev_name,
 	ibendport.dev_name = dev_name;
 	ibendport.port = port_num;
 	ad.u.ibendport = &ibendport;
-	return avc_has_perm(sec->sid, sid,
-			    SECCLASS_INFINIBAND_ENDPORT,
-			    INFINIBAND_ENDPORT__MANAGE_SUBNET, &ad);
+	return avc_has_perm_state(state, sec->sid, sid,
+				  SECCLASS_INFINIBAND_ENDPORT,
+				  INFINIBAND_ENDPORT__MANAGE_SUBNET, &ad);
 }
 
 static int selinux_ib_alloc_security(void *ib_sec)
@@ -9652,25 +9684,94 @@ static int selinux_ib_alloc_security(void *ib_sec)
 	struct ib_security_struct *sec = selinux_ib(ib_sec);
 
 	sec->sid = current_sid_for_global();
+	selinux_ib_bind_state(sec, current_selinux_state_for_global());
 	return 0;
+}
+
+static void selinux_ib_free_security(void *ib_sec)
+{
+	selinux_ib_release_security(selinux_ib(ib_sec));
 }
 #endif
 
 #ifdef CONFIG_BPF_SYSCALL
+static struct selinux_state *selinux_bpf_state_from_sec(
+	const struct bpf_security_struct *bpfsec)
+{
+	struct selinux_state *state = READ_ONCE(bpfsec->state);
+
+	return state ?: &selinux_state;
+}
+
+static void selinux_bpf_bind_state(struct bpf_security_struct *bpfsec,
+				   struct selinux_state *state)
+{
+	struct selinux_state *old = READ_ONCE(bpfsec->state);
+
+	if (!state)
+		state = &selinux_state;
+	if (old == state)
+		return;
+
+	WRITE_ONCE(bpfsec->state, get_selinux_state(state));
+	put_selinux_state(old);
+}
+
+static void selinux_bpf_release_security(struct bpf_security_struct *bpfsec)
+{
+	struct selinux_state *state = READ_ONCE(bpfsec->state);
+
+	WRITE_ONCE(bpfsec->state, NULL);
+	put_selinux_state(state);
+}
+
+static int selinux_bpf_has_perm(const struct bpf_security_struct *bpfsec,
+				const struct cred *cred, u32 perms)
+{
+	struct selinux_state *state = selinux_bpf_state_from_sec(bpfsec);
+	u32 sid;
+
+	if (!cred_sid_for_state(cred, state, &sid))
+		return -EACCES;
+
+	return avc_has_perm_state(state, sid, bpfsec->sid, SECCLASS_BPF,
+				  perms, NULL);
+}
+
+static int selinux_bpf_token_has_perm(const struct bpf_token *token,
+				      const struct cred *cred, u32 perms)
+{
+	return selinux_bpf_has_perm(
+		selinux_bpf_token_security((struct bpf_token *)token),
+		cred, perms);
+}
+
+static u32 bpf_token_to_av(const struct bpf_token *token)
+{
+	u32 av = 0;
+
+	if (token->allowed_cmds & BIT_ULL(BPF_MAP_CREATE))
+		av |= BPF__MAP_CREATE;
+	if (token->allowed_cmds & BIT_ULL(BPF_PROG_LOAD))
+		av |= BPF__PROG_LOAD;
+	return av ?: BPF__MAP_READ;
+}
+
 static int selinux_bpf(int cmd, union bpf_attr *attr,
 		       unsigned int size, bool kernel)
 {
+	struct selinux_state *state = current_selinux_state_for_global();
 	u32 sid = current_sid_for_global();
 	int ret;
 
 	switch (cmd) {
 	case BPF_MAP_CREATE:
-		ret = avc_has_perm(sid, sid, SECCLASS_BPF, BPF__MAP_CREATE,
-				   NULL);
+		ret = avc_has_perm_state(state, sid, sid, SECCLASS_BPF,
+					 BPF__MAP_CREATE, NULL);
 		break;
 	case BPF_PROG_LOAD:
-		ret = avc_has_perm(sid, sid, SECCLASS_BPF, BPF__PROG_LOAD,
-				   NULL);
+		ret = avc_has_perm_state(state, sid, sid, SECCLASS_BPF,
+					 BPF__PROG_LOAD, NULL);
 		break;
 	default:
 		ret = 0;
@@ -9704,21 +9805,26 @@ static int bpf_fd_pass(const struct file *file, const struct cred *cred)
 	struct bpf_security_struct *bpfsec;
 	struct bpf_prog *prog;
 	struct bpf_map *map;
-	u32 sid = cred_sid_for_global(cred);
 	int ret;
 
 	if (file->f_op == &bpf_map_fops) {
 		map = file->private_data;
 		bpfsec = selinux_bpf_map_security(map);
-		ret = avc_has_perm(sid, bpfsec->sid, SECCLASS_BPF,
-				   bpf_map_fmode_to_av(file->f_mode), NULL);
+		ret = selinux_bpf_has_perm(bpfsec, cred,
+					   bpf_map_fmode_to_av(file->f_mode));
 		if (ret)
 			return ret;
 	} else if (file->f_op == &bpf_prog_fops) {
 		prog = file->private_data;
 		bpfsec = selinux_bpf_prog_security(prog);
-		ret = avc_has_perm(sid, bpfsec->sid, SECCLASS_BPF,
-				   BPF__PROG_RUN, NULL);
+		ret = selinux_bpf_has_perm(bpfsec, cred, BPF__PROG_RUN);
+		if (ret)
+			return ret;
+	} else if (file->f_op == &bpf_token_fops) {
+		struct bpf_token *token = file->private_data;
+
+		ret = selinux_bpf_token_has_perm(token, cred,
+						 bpf_token_to_av(token));
 		if (ret)
 			return ret;
 	}
@@ -9727,31 +9833,37 @@ static int bpf_fd_pass(const struct file *file, const struct cred *cred)
 
 static int selinux_bpf_map(struct bpf_map *map, fmode_t fmode)
 {
-	u32 sid = current_sid_for_global();
 	struct bpf_security_struct *bpfsec;
 
 	bpfsec = selinux_bpf_map_security(map);
-	return avc_has_perm(sid, bpfsec->sid, SECCLASS_BPF,
-			    bpf_map_fmode_to_av(fmode), NULL);
+	return selinux_bpf_has_perm(bpfsec, current_cred(),
+				    bpf_map_fmode_to_av(fmode));
 }
 
 static int selinux_bpf_prog(struct bpf_prog *prog)
 {
-	u32 sid = current_sid_for_global();
 	struct bpf_security_struct *bpfsec;
 
 	bpfsec = selinux_bpf_prog_security(prog);
-	return avc_has_perm(sid, bpfsec->sid, SECCLASS_BPF,
-			    BPF__PROG_RUN, NULL);
+	return selinux_bpf_has_perm(bpfsec, current_cred(), BPF__PROG_RUN);
 }
 
 static int selinux_bpf_map_create(struct bpf_map *map, union bpf_attr *attr,
 				  struct bpf_token *token, bool kernel)
 {
 	struct bpf_security_struct *bpfsec;
+	int ret;
+
+	if (token) {
+		ret = selinux_bpf_token_has_perm(token, current_cred(),
+						 BPF__MAP_CREATE);
+		if (ret)
+			return ret;
+	}
 
 	bpfsec = selinux_bpf_map_security(map);
 	bpfsec->sid = current_sid_for_global();
+	selinux_bpf_bind_state(bpfsec, current_selinux_state_for_global());
 
 	return 0;
 }
@@ -9760,9 +9872,18 @@ static int selinux_bpf_prog_load(struct bpf_prog *prog, union bpf_attr *attr,
 				 struct bpf_token *token, bool kernel)
 {
 	struct bpf_security_struct *bpfsec;
+	int ret;
+
+	if (token) {
+		ret = selinux_bpf_token_has_perm(token, current_cred(),
+						 BPF__PROG_LOAD);
+		if (ret)
+			return ret;
+	}
 
 	bpfsec = selinux_bpf_prog_security(prog);
 	bpfsec->sid = current_sid_for_global();
+	selinux_bpf_bind_state(bpfsec, current_selinux_state_for_global());
 
 	return 0;
 }
@@ -9774,8 +9895,24 @@ static int selinux_bpf_token_create(struct bpf_token *token, union bpf_attr *att
 
 	bpfsec = selinux_bpf_token_security(token);
 	bpfsec->sid = current_sid_for_global();
+	selinux_bpf_bind_state(bpfsec, current_selinux_state_for_global());
 
 	return 0;
+}
+
+static void selinux_bpf_map_free(struct bpf_map *map)
+{
+	selinux_bpf_release_security(selinux_bpf_map_security(map));
+}
+
+static void selinux_bpf_prog_free(struct bpf_prog *prog)
+{
+	selinux_bpf_release_security(selinux_bpf_prog_security(prog));
+}
+
+static void selinux_bpf_token_free(struct bpf_token *token)
+{
+	selinux_bpf_release_security(selinux_bpf_token_security(token));
 }
 #endif
 
@@ -9801,8 +9938,55 @@ struct lsm_blob_sizes selinux_blob_sizes __ro_after_init = {
 };
 
 #ifdef CONFIG_PERF_EVENTS
+static struct selinux_state *selinux_perf_event_state_from_sec(
+	const struct perf_event_security_struct *perfsec)
+{
+	struct selinux_state *state = READ_ONCE(perfsec->state);
+
+	return state ?: &selinux_state;
+}
+
+static void selinux_perf_event_bind_state(
+	struct perf_event_security_struct *perfsec,
+	struct selinux_state *state)
+{
+	struct selinux_state *old = READ_ONCE(perfsec->state);
+
+	if (!state)
+		state = &selinux_state;
+	if (old == state)
+		return;
+
+	WRITE_ONCE(perfsec->state, get_selinux_state(state));
+	put_selinux_state(old);
+}
+
+static void selinux_perf_event_release_security(
+	struct perf_event_security_struct *perfsec)
+{
+	struct selinux_state *state = READ_ONCE(perfsec->state);
+
+	WRITE_ONCE(perfsec->state, NULL);
+	put_selinux_state(state);
+}
+
+static int selinux_perf_event_has_perm(struct perf_event *event, u32 perms)
+{
+	struct perf_event_security_struct *perfsec =
+		selinux_perf_event(event->security);
+	struct selinux_state *state = selinux_perf_event_state_from_sec(perfsec);
+	u32 sid;
+
+	if (!cred_sid_for_state(current_cred(), state, &sid))
+		return -EACCES;
+
+	return avc_has_perm_state(state, sid, perfsec->sid,
+				  SECCLASS_PERF_EVENT, perms, NULL);
+}
+
 static int selinux_perf_event_open(int type)
 {
+	struct selinux_state *state = current_selinux_state_for_global();
 	u32 requested, sid = current_sid_for_global();
 
 	if (type == PERF_SECURITY_OPEN)
@@ -9816,8 +10000,8 @@ static int selinux_perf_event_open(int type)
 	else
 		return -EINVAL;
 
-	return avc_has_perm(sid, sid, SECCLASS_PERF_EVENT,
-			    requested, NULL);
+	return avc_has_perm_state(state, sid, sid, SECCLASS_PERF_EVENT,
+				  requested, NULL);
 }
 
 static int selinux_perf_event_alloc(struct perf_event *event)
@@ -9826,26 +10010,25 @@ static int selinux_perf_event_alloc(struct perf_event *event)
 
 	perfsec = selinux_perf_event(event->security);
 	perfsec->sid = current_sid_for_global();
+	selinux_perf_event_bind_state(perfsec,
+				      current_selinux_state_for_global());
 
 	return 0;
 }
 
 static int selinux_perf_event_read(struct perf_event *event)
 {
-	struct perf_event_security_struct *perfsec = event->security;
-	u32 sid = current_sid_for_global();
-
-	return avc_has_perm(sid, perfsec->sid,
-			    SECCLASS_PERF_EVENT, PERF_EVENT__READ, NULL);
+	return selinux_perf_event_has_perm(event, PERF_EVENT__READ);
 }
 
 static int selinux_perf_event_write(struct perf_event *event)
 {
-	struct perf_event_security_struct *perfsec = event->security;
-	u32 sid = current_sid_for_global();
+	return selinux_perf_event_has_perm(event, PERF_EVENT__WRITE);
+}
 
-	return avc_has_perm(sid, perfsec->sid,
-			    SECCLASS_PERF_EVENT, PERF_EVENT__WRITE, NULL);
+static void selinux_perf_event_free(struct perf_event *event)
+{
+	selinux_perf_event_release_security(selinux_perf_event(event->security));
 }
 #endif
 
@@ -10143,6 +10326,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(ib_pkey_access, selinux_ib_pkey_access),
 	LSM_HOOK_INIT(ib_endport_manage_subnet,
 		      selinux_ib_endport_manage_subnet),
+	LSM_HOOK_INIT(ib_free_security, selinux_ib_free_security),
 #endif
 #ifdef CONFIG_SECURITY_NETWORK_XFRM
 	LSM_HOOK_INIT(xfrm_policy_free_security, selinux_xfrm_policy_free),
@@ -10174,12 +10358,16 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(bpf, selinux_bpf),
 	LSM_HOOK_INIT(bpf_map, selinux_bpf_map),
 	LSM_HOOK_INIT(bpf_prog, selinux_bpf_prog),
+	LSM_HOOK_INIT(bpf_map_free, selinux_bpf_map_free),
+	LSM_HOOK_INIT(bpf_prog_free, selinux_bpf_prog_free),
+	LSM_HOOK_INIT(bpf_token_free, selinux_bpf_token_free),
 #endif
 
 #ifdef CONFIG_PERF_EVENTS
 	LSM_HOOK_INIT(perf_event_open, selinux_perf_event_open),
 	LSM_HOOK_INIT(perf_event_read, selinux_perf_event_read),
 	LSM_HOOK_INIT(perf_event_write, selinux_perf_event_write),
+	LSM_HOOK_INIT(perf_event_free, selinux_perf_event_free),
 #endif
 
 #ifdef CONFIG_IO_URING

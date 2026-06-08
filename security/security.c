@@ -5452,6 +5452,7 @@ EXPORT_SYMBOL(security_ib_alloc_security);
  */
 void security_ib_free_security(void *sec)
 {
+	call_void_hook(ib_free_security, sec);
 	kfree(sec);
 }
 EXPORT_SYMBOL(security_ib_free_security);
@@ -6154,6 +6155,7 @@ int security_perf_event_alloc(struct perf_event *event)
  */
 void security_perf_event_free(struct perf_event *event)
 {
+	call_void_hook(perf_event_free, event);
 	kfree(event->security);
 	event->security = NULL;
 }

@@ -385,6 +385,7 @@ LSM_HOOK(int, 0, ib_pkey_access, void *sec, u64 subnet_prefix, u16 pkey)
 LSM_HOOK(int, 0, ib_endport_manage_subnet, void *sec, const char *dev_name,
 	 u8 port_num)
 LSM_HOOK(int, 0, ib_alloc_security, void *sec)
+LSM_HOOK(void, LSM_RET_VOID, ib_free_security, void *sec)
 #endif /* CONFIG_SECURITY_INFINIBAND */
 
 #ifdef CONFIG_SECURITY_NETWORK_XFRM
@@ -454,6 +455,7 @@ LSM_HOOK(int, 0, perf_event_open, int type)
 LSM_HOOK(int, 0, perf_event_alloc, struct perf_event *event)
 LSM_HOOK(int, 0, perf_event_read, struct perf_event *event)
 LSM_HOOK(int, 0, perf_event_write, struct perf_event *event)
+LSM_HOOK(void, LSM_RET_VOID, perf_event_free, struct perf_event *event)
 #endif /* CONFIG_PERF_EVENTS */
 
 #ifdef CONFIG_IO_URING
