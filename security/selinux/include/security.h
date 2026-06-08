@@ -55,14 +55,15 @@
 #define POLICYDB_VERSION_MAX POLICYDB_VERSION_NEVERAUDIT
 
 /* Mask for just the mount related flags */
-#define SE_MNTMASK 0x0f
+#define SE_MNTMASK 0x1f
 /* Super block security struct flags for mount options */
 /* BE CAREFUL, these need to be the low order bits for selinux_get_mnt_opts */
 #define CONTEXT_MNT	0x01
 #define FSCONTEXT_MNT	0x02
 #define ROOTCONTEXT_MNT 0x04
 #define DEFCONTEXT_MNT	0x08
-#define SBLABEL_MNT	0x10
+#define OUTERCONTEXT_MNT 0x10
+#define SBLABEL_MNT	0x20
 /* Non-mount related flags */
 #define SE_SBINITIALIZED 0x0100
 #define SE_SBPROC	 0x0200
@@ -74,6 +75,7 @@
 #define FSCONTEXT_STR	"fscontext"
 #define ROOTCONTEXT_STR "rootcontext"
 #define DEFCONTEXT_STR	"defcontext"
+#define OUTERCONTEXT_STR "outercontext"
 #define SECLABEL_STR	"seclabel"
 
 struct netlbl_lsm_secattr;

@@ -68,6 +68,48 @@ struct child_cfg {
 	int mount_selinuxfs;
 };
 
+enum setns_probe_stage {
+	SETNS_PROBE_NONE,
+	SETNS_PROBE_PIDFD_OPEN,
+	SETNS_PROBE_SETNS,
+	SETNS_PROBE_MKDTEMP,
+	SETNS_PROBE_MOUNT_SELINUXFS,
+	SETNS_PROBE_OPEN_LOAD,
+	SETNS_PROBE_WRITE_LOAD,
+	SETNS_PROBE_UMOUNT_SELINUXFS,
+	SETNS_PROBE_READ_RESULT,
+};
+
+struct setns_probe_result {
+	enum setns_probe_stage stage;
+	int err;
+};
+
+static const char *setns_probe_stage_name(enum setns_probe_stage stage)
+{
+	switch (stage) {
+	case SETNS_PROBE_PIDFD_OPEN:
+		return "pidfd_open";
+	case SETNS_PROBE_SETNS:
+		return "setns";
+	case SETNS_PROBE_MKDTEMP:
+		return "mkdtemp";
+	case SETNS_PROBE_MOUNT_SELINUXFS:
+		return "mount_selinuxfs";
+	case SETNS_PROBE_OPEN_LOAD:
+		return "open_load";
+	case SETNS_PROBE_WRITE_LOAD:
+		return "write_load";
+	case SETNS_PROBE_UMOUNT_SELINUXFS:
+		return "umount_selinuxfs";
+	case SETNS_PROBE_READ_RESULT:
+		return "read_result";
+	case SETNS_PROBE_NONE:
+	default:
+		return "unknown";
+	}
+}
+
 static int read_ns_link(const char *name, char *buf, size_t size)
 {
 	char path[PATH_MAX];
@@ -234,7 +276,7 @@ static int try_mount_selinuxfs(void)
 	return rmdir(path);
 }
 
-static int try_invalid_policy_load(void)
+static int try_invalid_policy_load(enum setns_probe_stage *stage)
 {
 	char path[] = "/tmp/vpsadminos-selinuxfs-load-XXXXXX";
 	char load_path[PATH_MAX];
@@ -242,11 +284,14 @@ static int try_invalid_policy_load(void)
 	int ret = -1;
 	int saved_errno;
 
-	if (!mkdtemp(path))
+	if (!mkdtemp(path)) {
+		*stage = SETNS_PROBE_MKDTEMP;
 		return -1;
+	}
 
 	if (mount("selinuxfs", path, "selinuxfs", 0, NULL)) {
 		saved_errno = errno;
+		*stage = SETNS_PROBE_MOUNT_SELINUXFS;
 		goto out_rmdir;
 	}
 
@@ -254,26 +299,36 @@ static int try_invalid_policy_load(void)
 	fd = open(load_path, O_WRONLY | O_CLOEXEC);
 	if (fd < 0) {
 		saved_errno = errno;
+		*stage = SETNS_PROBE_OPEN_LOAD;
 		goto out_umount;
 	}
 
 	if (write(fd, "x", 1) < 0) {
 		saved_errno = errno;
 		ret = (saved_errno == EBUSY || saved_errno == EOPNOTSUPP) ? -1 : 0;
+		if (ret)
+			*stage = SETNS_PROBE_WRITE_LOAD;
 	} else {
 		saved_errno = EIO;
+		*stage = SETNS_PROBE_WRITE_LOAD;
 	}
 
 	close(fd);
 out_umount:
 	if (umount2(path, MNT_DETACH) && ret == 0) {
 		saved_errno = errno;
+		*stage = SETNS_PROBE_UMOUNT_SELINUXFS;
 		ret = -1;
 	}
 out_rmdir:
 	rmdir(path);
 	errno = saved_errno;
 	return ret;
+}
+
+static int host_selinux_active(void)
+{
+	return access("/sys/fs/selinux/enforce", F_OK) == 0;
 }
 
 static int child_main(void *arg)
@@ -430,13 +485,15 @@ static int clone_child(struct child_result *result, int mount_selinuxfs)
 	return release_child(pid, -1);
 }
 
-static int pidfd_setns_invalid_load(pid_t target)
+static int pidfd_setns_invalid_load(pid_t target, enum setns_probe_stage *stage)
 {
+	struct setns_probe_result result = { 0 };
 	int pipefd[2];
 	pid_t pid;
 	int err;
 	int status;
 
+	*stage = SETNS_PROBE_NONE;
 	if (pipe(pipefd) < 0)
 		return -1;
 
@@ -451,44 +508,49 @@ static int pidfd_setns_invalid_load(pid_t target)
 
 	if (pid == 0) {
 		int pidfd;
+		struct setns_probe_result child_result = { 0 };
 
 		close(pipefd[0]);
 		pidfd = syscall(__NR_pidfd_open, target, 0);
 		if (pidfd < 0) {
-			err = errno;
-			write_full(pipefd[1], &err, sizeof(err));
+			child_result.stage = SETNS_PROBE_PIDFD_OPEN;
+			child_result.err = errno;
+			write_full(pipefd[1], &child_result, sizeof(child_result));
 			_exit(1);
 		}
 
 		if (setns(pidfd, CLONE_NEWUSER | CLONE_NEWNS)) {
-			err = errno;
+			child_result.stage = SETNS_PROBE_SETNS;
+			child_result.err = errno;
 			close(pidfd);
-			write_full(pipefd[1], &err, sizeof(err));
+			write_full(pipefd[1], &child_result, sizeof(child_result));
 			_exit(1);
 		}
 		close(pidfd);
 
-		if (try_invalid_policy_load()) {
-			err = errno;
-			write_full(pipefd[1], &err, sizeof(err));
+		if (try_invalid_policy_load(&child_result.stage)) {
+			child_result.err = errno;
+			write_full(pipefd[1], &child_result, sizeof(child_result));
 			_exit(1);
 		}
 
-		err = 0;
-		write_full(pipefd[1], &err, sizeof(err));
+		write_full(pipefd[1], &child_result, sizeof(child_result));
 		_exit(0);
 	}
 
 	close(pipefd[1]);
-	if (read_full(pipefd[0], &err, sizeof(err)))
-		err = errno ? errno : EIO;
+	if (read_full(pipefd[0], &result, sizeof(result))) {
+		result.err = errno ? errno : EIO;
+		result.stage = SETNS_PROBE_READ_RESULT;
+	}
 	close(pipefd[0]);
 
 	if (waitpid(pid, &status, 0) < 0)
 		return -1;
 
-	if (err) {
-		errno = err;
+	if (result.err) {
+		*stage = result.stage;
+		errno = result.err;
 		return -1;
 	}
 
@@ -569,6 +631,7 @@ static int run_selinux_pidfd_setns_test(int nr, const char *parent_user_ns,
 					const char *parent_lsm_ns)
 {
 	struct child_result child = { 0 };
+	enum setns_probe_stage stage;
 	int release_fd = -1;
 	pid_t pid;
 
@@ -640,7 +703,7 @@ static int run_selinux_pidfd_setns_test(int nr, const char *parent_user_ns,
 		return 1;
 	}
 
-	if (pidfd_setns_invalid_load(pid)) {
+	if (pidfd_setns_invalid_load(pid, &stage)) {
 		int err = errno;
 
 		release_child(pid, release_fd);
@@ -649,8 +712,8 @@ static int run_selinux_pidfd_setns_test(int nr, const char *parent_user_ns,
 			return KSFT_SKIP;
 		}
 
-		printf("not ok %d pidfd setns SELinux child policy load used wrong state: %s\n",
-		       nr, strerror(err));
+		printf("not ok %d pidfd setns SELinux child policy load failed at %s: %s\n",
+		       nr, setns_probe_stage_name(stage), strerror(err));
 		return 1;
 	}
 
@@ -665,11 +728,62 @@ static int run_selinux_pidfd_setns_test(int nr, const char *parent_user_ns,
 	return 0;
 }
 
+static int run_selinux_invalid_outer_context_test(int nr)
+{
+	struct child_result child = { 0 };
+	const char *invalid = "not-a-valid-selinux-context";
+	int err;
+
+	if (!host_selinux_active()) {
+		printf("ok %d # SKIP host SELinux is not active\n", nr);
+		return KSFT_SKIP;
+	}
+
+	if (request_lsm_ns(LSM_ID_SELINUX, invalid)) {
+		err = errno;
+		if (err == EINVAL) {
+			printf("ok %d invalid SELinux outer context rejected at arm time\n",
+			       nr);
+			return 0;
+		}
+		if (skip_errno(err)) {
+			printf("ok %d # SKIP cannot arm SELinux LSM namespace request: %s\n",
+			       nr, strerror(err));
+			return KSFT_SKIP;
+		}
+
+		printf("not ok %d unexpected failure arming invalid SELinux outer context: %s\n",
+		       nr, strerror(err));
+		return 1;
+	}
+
+	if (clone_child(&child, 0)) {
+		err = errno;
+		if (err == EINVAL) {
+			printf("ok %d invalid SELinux outer context rejected at child creation\n",
+			       nr);
+			return 0;
+		}
+		if (skip_errno(err)) {
+			printf("ok %d # SKIP cannot create child SELinux LSM namespace: %s\n",
+			       nr, strerror(err));
+			return KSFT_SKIP;
+		}
+
+		printf("not ok %d unexpected child creation failure for invalid SELinux outer context: %s\n",
+		       nr, strerror(err));
+		return 1;
+	}
+
+	printf("not ok %d invalid SELinux outer context was accepted\n", nr);
+	return 1;
+}
+
 int main(void)
 {
 	char parent_user_ns[NS_LINK_SIZE];
 	char parent_lsm_ns[NS_LINK_SIZE];
-	int apparmor_ret, selinux_ret, selinux_setns_ret;
+	int apparmor_ret, selinux_ret, selinux_setns_ret, selinux_outer_ret;
 
 	if (read_ns_link("lsm", parent_lsm_ns, sizeof(parent_lsm_ns))) {
 		printf("TAP version 13\n1..0 # SKIP no lsm namespace file\n");
@@ -681,7 +795,7 @@ int main(void)
 	}
 
 	printf("TAP version 13\n");
-	printf("1..3\n");
+	printf("1..4\n");
 
 	apparmor_ret = run_lsm_ns_test(1, "AppArmor", LSM_ID_APPARMOR,
 				       "selftest-lsmns", parent_user_ns,
@@ -690,11 +804,13 @@ int main(void)
 				      parent_user_ns, parent_lsm_ns, 1);
 	selinux_setns_ret = run_selinux_pidfd_setns_test(3, parent_user_ns,
 							 parent_lsm_ns);
+	selinux_outer_ret = run_selinux_invalid_outer_context_test(4);
 
-	if (apparmor_ret == 1 || selinux_ret == 1 || selinux_setns_ret == 1)
+	if (apparmor_ret == 1 || selinux_ret == 1 || selinux_setns_ret == 1 ||
+	    selinux_outer_ret == 1)
 		return 1;
 	if (apparmor_ret == KSFT_SKIP && selinux_ret == KSFT_SKIP &&
-	    selinux_setns_ret == KSFT_SKIP)
+	    selinux_setns_ret == KSFT_SKIP && selinux_outer_ret == KSFT_SKIP)
 		return KSFT_SKIP;
 	return 0;
 }

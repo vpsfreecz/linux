@@ -45,6 +45,9 @@ struct cred_security_struct {
 	u32 keycreate_sid; /* keycreate SID */
 	u32 sockcreate_sid; /* fscreate SID */
 	struct selinux_state *state; /* SELinux state carried by these creds */
+	u32 outer_sid; /* immutable host SID for child LSM namespace payloads */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
 } __randomize_layout;
 
 struct task_security_struct {
@@ -93,9 +96,11 @@ struct superblock_security_struct {
 	u32 sid; /* SID of file system superblock */
 	u32 def_sid; /* default SID for labeling */
 	u32 mntpoint_sid; /* SECURITY_FS_USE_MNTPOINT context for files */
+	u32 outer_sid; /* synthetic host SID for outer container data checks */
 	unsigned short behavior; /* labeling behavior */
 	unsigned short flags; /* which mount options were specified */
 	struct selinux_state *state; /* SELinux state bound to this superblock */
+	struct selinux_state *outer_state; /* host state bound to outer_sid */
 	struct mutex lock;
 	struct list_head isec_head;
 	spinlock_t isec_lock;

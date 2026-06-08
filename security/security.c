@@ -4384,12 +4384,11 @@ int security_getprocattr(struct task_struct *p, int lsmid, const char *name,
 	lsm_for_each_hook(scall, getprocattr) {
 		if (lsmid != 0 && lsmid != scall->hl->lsmid->id)
 			continue;
-		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id))
+		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id) &&
+		    (lsmid == 0 || lsmid != LSM_ID_SELINUX))
 			continue;
 		return scall->hl->hook.getprocattr(p, name, value);
 	}
-	if (lsmid != 0 && !lsm_ns_visible_lsmid(lsmid))
-		return -EOPNOTSUPP;
 	return LSM_RET_DEFAULT(getprocattr);
 }
 
@@ -4412,12 +4411,11 @@ int security_setprocattr(int lsmid, const char *name, void *value, size_t size)
 	lsm_for_each_hook(scall, setprocattr) {
 		if (lsmid != 0 && lsmid != scall->hl->lsmid->id)
 			continue;
-		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id))
+		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id) &&
+		    (lsmid == 0 || lsmid != LSM_ID_SELINUX))
 			continue;
 		return scall->hl->hook.setprocattr(name, value, size);
 	}
-	if (lsmid != 0 && !lsm_ns_visible_lsmid(lsmid))
-		return -EOPNOTSUPP;
 	return LSM_RET_DEFAULT(setprocattr);
 }
 
