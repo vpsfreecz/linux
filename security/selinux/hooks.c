@@ -1185,6 +1185,33 @@ static void selinux_free_mnt_opts(void *mnt_opts)
 	kfree(opts);
 }
 
+static bool selinux_mnt_opts_outercontext_only(const struct selinux_mnt_opts *opts)
+{
+	return opts &&
+	       opts->outercontext_sid &&
+	       !opts->fscontext_sid &&
+	       !opts->context_sid &&
+	       !opts->rootcontext_sid &&
+	       !opts->defcontext_sid;
+}
+
+static bool selinux_sb_state_matches_mnt_opts(
+	const struct superblock_security_struct *sbsec,
+	const struct selinux_mnt_opts *opts)
+{
+	if (selinux_sb_state_matches(sbsec, current_selinux_state()))
+		return true;
+
+	/*
+	 * outercontext= is the one SELinux mount option whose SID can be
+	 * intentionally parsed in the credential's immutable host/outer state
+	 * while the task's current SELinux state is a child namespace.
+	 */
+	return selinux_mnt_opts_outercontext_only(opts) &&
+	       opts->outercontext_state &&
+	       selinux_sb_state_matches(sbsec, opts->outercontext_state);
+}
+
 enum {
 	Opt_error = -1,
 	Opt_context = 0,
@@ -1542,7 +1569,7 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 		goto out;
 
 	if (sbsec->flags & SE_SBINITIALIZED) {
-		if (!selinux_sb_state_matches(sbsec, current_selinux_state())) {
+		if (!selinux_sb_state_matches_mnt_opts(sbsec, opts)) {
 			rc = -EBUSY;
 			pr_warn("SELinux: mount invalid.  Same superblock, different SELinux states for (dev %s, type %s)\n",
 				sb->s_id, sb->s_type->name);
@@ -4269,7 +4296,7 @@ static int selinux_sb_mnt_opts_compat(struct super_block *sb, void *mnt_opts)
 		return opts ? 1 : 0;
 
 	if ((sbsec->flags & SE_SBINITIALIZED) &&
-	    !selinux_sb_state_matches(sbsec, current_selinux_state()))
+	    !selinux_sb_state_matches_mnt_opts(sbsec, opts))
 		return 1;
 
 	/*
@@ -4322,7 +4349,7 @@ static int selinux_sb_remount(struct super_block *sb, void *mnt_opts)
 
 	mutex_lock(&sbsec->lock);
 
-	if (!selinux_sb_state_matches(sbsec, current_selinux_state())) {
+	if (!selinux_sb_state_matches_mnt_opts(sbsec, opts)) {
 		pr_warn("SELinux: unable to remount superblock from a different SELinux state (dev %s, type=%s)\n",
 			sb->s_id, sb->s_type->name);
 		rc = -EBUSY;
