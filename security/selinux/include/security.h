@@ -720,7 +720,7 @@ static inline int security_get_allow_unknown(void)
 #define SECURITY_FS_USE_NATIVE	 7 /* use native label support */
 #define SECURITY_FS_USE_MAX	 7 /* Highest SECURITY_FS_USE_XXX */
 
-int security_fs_use(struct super_block *sb);
+int security_fs_use_state(struct selinux_state *state, struct super_block *sb);
 
 int security_genfs_sid(const char *fstype, const char *path, u16 sclass,
 		       u32 *sid);

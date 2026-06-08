@@ -3167,12 +3167,12 @@ int selinux_policy_genfs_sid(struct selinux_policy *policy,
 }
 
 /**
- * security_fs_use - Determine how to handle labeling for a filesystem.
+ * security_fs_use_state - Determine how to handle labeling for a filesystem.
+ * @state: SELinux state that owns the superblock
  * @sb: superblock in question
  */
-int security_fs_use(struct super_block *sb)
+int security_fs_use_state(struct selinux_state *state, struct super_block *sb)
 {
-	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;

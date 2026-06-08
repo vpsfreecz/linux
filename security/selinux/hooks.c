@@ -1635,7 +1635,8 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 		 * Determine the labeling behavior to use for this
 		 * filesystem type.
 		 */
-		rc = security_fs_use(sb);
+		rc = security_fs_use_state(selinux_superblock_state_from_sec(sbsec),
+					   sb);
 		if (rc) {
 			pr_warn("%s: security_fs_use(%s) returned %d\n",
 					__func__, sb->s_type->name, rc);
@@ -1862,7 +1863,8 @@ static int selinux_sb_clone_mnt_opts(const struct super_block *oldsb,
 
 	if (newsbsec->behavior == SECURITY_FS_USE_NATIVE &&
 		!(kern_flags & SECURITY_LSM_NATIVE_LABELS) && !set_context) {
-		rc = security_fs_use(newsb);
+		rc = security_fs_use_state(
+			selinux_superblock_state_from_sec(newsbsec), newsb);
 		if (rc)
 			goto out;
 	}
@@ -4499,7 +4501,18 @@ static int selinux_fs_context_parse_param(struct fs_context *fc,
 static int selinux_inode_alloc_security(struct inode *inode)
 {
 	struct inode_security_struct *isec = selinux_inode(inode);
-	u32 sid = current_sid();
+	struct superblock_security_struct *sbsec =
+		selinux_superblock(inode->i_sb);
+	u32 sid;
+
+	if (sbsec->flags & SE_SBINITIALIZED) {
+		if (!cred_sid_for_state(current_cred(),
+					selinux_superblock_state_from_sec(sbsec),
+					&sid))
+			return -EACCES;
+	} else {
+		sid = current_sid();
+	}
 
 	spin_lock_init(&isec->lock);
 	INIT_LIST_HEAD(&isec->list);
