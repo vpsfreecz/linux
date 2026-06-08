@@ -15,6 +15,7 @@
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/random.h>
+#include <linux/security.h>
 #include <linux/smp.h>
 #include <linux/static_key.h>
 #include <net/dst.h>
@@ -639,11 +640,16 @@ int nft_meta_set_init(const struct nft_ctx *ctx,
 	switch (priv->key) {
 	case NFT_META_MARK:
 	case NFT_META_PRIORITY:
-#ifdef CONFIG_NETWORK_SECMARK
-	case NFT_META_SECMARK:
-#endif
 		len = sizeof(u32);
 		break;
+#ifdef CONFIG_NETWORK_SECMARK
+	case NFT_META_SECMARK:
+		err = security_secmark_raw_set();
+		if (err)
+			return err;
+		len = sizeof(u32);
+		break;
+#endif
 	case NFT_META_NFTRACE:
 		len = sizeof(u8);
 		break;

@@ -7958,6 +7958,18 @@ static int selinux_secmark_relabel_packet(u32 sid)
 			    PACKET__RELABELTO, NULL);
 }
 
+static int selinux_secmark_raw_set(void)
+{
+	/*
+	 * Raw nftables secmark setters copy an integer from a register into
+	 * skb->secmark or ct->secmark.  There is no stable security context to
+	 * authorize at rule load time, no per-rule secmark refcount, and no
+	 * attached SELinux state identity for child namespaces.  Require the
+	 * context-backed SECMARK/nft_secmark paths instead.
+	 */
+	return -EOPNOTSUPP;
+}
+
 static void selinux_secmark_refcount_inc(void)
 {
 	atomic_inc(&selinux_secmark_refcount);
@@ -10479,6 +10491,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inet_csk_clone, selinux_inet_csk_clone),
 	LSM_HOOK_INIT(inet_conn_established, selinux_inet_conn_established),
 	LSM_HOOK_INIT(secmark_relabel_packet, selinux_secmark_relabel_packet),
+	LSM_HOOK_INIT(secmark_raw_set, selinux_secmark_raw_set),
 	LSM_HOOK_INIT(secmark_refcount_inc, selinux_secmark_refcount_inc),
 	LSM_HOOK_INIT(secmark_refcount_dec, selinux_secmark_refcount_dec),
 	LSM_HOOK_INIT(req_classify_flow, selinux_req_classify_flow),

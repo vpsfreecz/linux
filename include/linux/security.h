@@ -1710,6 +1710,7 @@ void security_inet_csk_clone(struct sock *newsk,
 void security_inet_conn_established(struct sock *sk,
 			struct sk_buff *skb);
 int security_secmark_relabel_packet(u32 secid);
+int security_secmark_raw_set(void);
 void security_secmark_refcount_inc(void);
 void security_secmark_refcount_dec(void);
 int security_tun_dev_alloc_security(void **security);
@@ -1898,6 +1899,11 @@ static inline void security_inet_conn_established(struct sock *sk,
 }
 
 static inline int security_secmark_relabel_packet(u32 secid)
+{
+	return 0;
+}
+
+static inline int security_secmark_raw_set(void)
 {
 	return 0;
 }

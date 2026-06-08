@@ -5208,6 +5208,21 @@ int security_secmark_relabel_packet(u32 secid)
 EXPORT_SYMBOL(security_secmark_relabel_packet);
 
 /**
+ * security_secmark_raw_set() - Check if raw secmark register writes are allowed
+ *
+ * Check if the process should be allowed to configure packet or conntrack
+ * secmark writes from raw integer registers instead of an LSM-resolved
+ * security context.
+ *
+ * Return: Returns 0 if permission is granted.
+ */
+int security_secmark_raw_set(void)
+{
+	return call_int_hook(secmark_raw_set);
+}
+EXPORT_SYMBOL(security_secmark_raw_set);
+
+/**
  * security_secmark_refcount_inc() - Increment the secmark labeling rule count
  *
  * Tells the LSM to increment the number of secmark labeling rules loaded.

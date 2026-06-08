@@ -12,6 +12,7 @@
 #include <linux/netlink.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter/nf_tables.h>
+#include <linux/security.h>
 #include <net/netfilter/nf_tables_core.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_acct.h>
@@ -605,6 +606,9 @@ static int nft_ct_set_init(const struct nft_ctx *ctx,
 	case NFT_CT_SECMARK:
 		if (tb[NFTA_CT_DIRECTION])
 			return -EINVAL;
+		err = security_secmark_raw_set();
+		if (err)
+			return err;
 		len = sizeof(u32);
 		break;
 #endif
