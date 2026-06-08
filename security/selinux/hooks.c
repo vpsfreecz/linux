@@ -8577,8 +8577,16 @@ static int selinux_msg_queue_associate(struct kern_ipc_perm *msq, int msqflg)
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = msq->key;
 
-	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_MSGQ,
-			  MSGQ__ASSOCIATE, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid, SECCLASS_MSGQ,
+				MSGQ__ASSOCIATE, &ad);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(current_cred(), isec->outer_state,
+					    isec->outer_sid,
+					    isec->outer_active,
+					    SECCLASS_MSGQ, MSGQ__ASSOCIATE,
+					    &ad);
 }
 
 static int selinux_msg_queue_msgctl(struct kern_ipc_perm *msq, int cmd)
@@ -8786,8 +8794,16 @@ static int selinux_shm_associate(struct kern_ipc_perm *shp, int shmflg)
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = shp->key;
 
-	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_SHM,
-			  SHM__ASSOCIATE, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid, SECCLASS_SHM,
+				SHM__ASSOCIATE, &ad);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(current_cred(), isec->outer_state,
+					    isec->outer_sid,
+					    isec->outer_active,
+					    SECCLASS_SHM, SHM__ASSOCIATE,
+					    &ad);
 }
 
 /* Note, at this point, shp is locked down */
@@ -8889,8 +8905,16 @@ static int selinux_sem_associate(struct kern_ipc_perm *sma, int semflg)
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = sma->key;
 
-	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_SEM,
-			  SEM__ASSOCIATE, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid, SECCLASS_SEM,
+				SEM__ASSOCIATE, &ad);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(current_cred(), isec->outer_state,
+					    isec->outer_sid,
+					    isec->outer_active,
+					    SECCLASS_SEM, SEM__ASSOCIATE,
+					    &ad);
 }
 
 /* Note, at this point, sma is locked down */
