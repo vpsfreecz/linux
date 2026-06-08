@@ -1028,17 +1028,15 @@ static bool task_sid_obj_matches_state(const struct task_struct *task,
 				       const struct selinux_state *state,
 				       u32 *sidp)
 {
-	const struct cred_security_struct *crsec;
+	const struct cred *cred;
 	bool match;
 
 	if (!state)
 		state = &selinux_state;
 
 	rcu_read_lock();
-	crsec = selinux_cred(__task_cred(task));
-	if (sidp)
-		*sidp = crsec->sid;
-	match = (crsec->state ?: &selinux_state) == state;
+	cred = __task_cred(task);
+	match = cred_sid_for_state(cred, state, sidp);
 	rcu_read_unlock();
 
 	return match;
@@ -5636,12 +5634,23 @@ static int selinux_file_permission(struct file *file, int mask)
 static int selinux_file_alloc_security(struct file *file)
 {
 	struct file_security_struct *fsec = selinux_file(file);
+	struct selinux_state *state = current_selinux_state();
 	u32 sid = current_sid();
 
 	fsec->sid = sid;
 	fsec->fown_sid = sid;
+	fsec->fown_state = get_selinux_state(state);
 
 	return 0;
+}
+
+static void selinux_file_free_security(struct file *file)
+{
+	struct file_security_struct *fsec = selinux_file(file);
+	struct selinux_state *state = READ_ONCE(fsec->fown_state);
+
+	WRITE_ONCE(fsec->fown_state, NULL);
+	put_selinux_state(state);
 }
 
 /*
@@ -5930,17 +5939,21 @@ static int selinux_file_fcntl(struct file *file, unsigned int cmd,
 
 static void selinux_file_set_fowner(struct file *file)
 {
-	struct file_security_struct *fsec;
+	struct file_security_struct *fsec = selinux_file(file);
+	struct selinux_state *old = READ_ONCE(fsec->fown_state);
+	struct selinux_state *state = current_selinux_state_for_global();
 
-	fsec = selinux_file(file);
 	fsec->fown_sid = current_sid_for_global();
+	WRITE_ONCE(fsec->fown_state, get_selinux_state(state));
+	put_selinux_state(old);
 }
 
 static int selinux_file_send_sigiotask(struct task_struct *tsk,
 				       struct fown_struct *fown, int signum)
 {
 	struct file *file;
-	u32 sid = task_sid_obj_for_global(tsk);
+	struct selinux_state *state;
+	u32 sid;
 	u32 perm;
 	struct file_security_struct *fsec;
 
@@ -5948,14 +5961,17 @@ static int selinux_file_send_sigiotask(struct task_struct *tsk,
 	file = fown->file;
 
 	fsec = selinux_file(file);
+	state = READ_ONCE(fsec->fown_state) ?: &selinux_state;
+	if (!task_sid_obj_matches_state(tsk, state, &sid))
+		return -EACCES;
 
 	if (!signum)
 		perm = signal_to_av(SIGIO); /* as per send_sigio_to_task */
 	else
 		perm = signal_to_av(signum);
 
-	return avc_has_perm(fsec->fown_sid, sid,
-			    SECCLASS_PROCESS, perm, NULL);
+	return avc_has_perm_state(state, fsec->fown_sid, sid,
+				  SECCLASS_PROCESS, perm, NULL);
 }
 
 static int selinux_file_receive(struct file *file)
@@ -10295,6 +10311,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 
 	LSM_HOOK_INIT(file_permission, selinux_file_permission),
 	LSM_HOOK_INIT(file_alloc_security, selinux_file_alloc_security),
+	LSM_HOOK_INIT(file_free_security, selinux_file_free_security),
 	LSM_HOOK_INIT(file_ioctl, selinux_file_ioctl),
 	LSM_HOOK_INIT(file_ioctl_compat, selinux_file_ioctl_compat),
 	LSM_HOOK_INIT(mmap_file, selinux_mmap_file),
