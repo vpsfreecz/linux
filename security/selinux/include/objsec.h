@@ -168,6 +168,7 @@ struct sk_security_struct {
 
 struct tun_security_struct {
 	u32 sid; /* SID for the tun device sockets */
+	struct selinux_state *state; /* SELinux state bound to this object */
 };
 
 struct key_security_struct {

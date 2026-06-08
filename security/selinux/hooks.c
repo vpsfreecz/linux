@@ -7922,11 +7922,35 @@ static int selinux_tun_dev_alloc_security(void *security)
 	struct tun_security_struct *tunsec = selinux_tun_dev(security);
 
 	tunsec->sid = current_sid_for_global();
+	tunsec->state = get_selinux_state(current_selinux_state_for_global());
 	return 0;
+}
+
+static struct selinux_state *selinux_tun_dev_state(
+	const struct tun_security_struct *tunsec)
+{
+	struct selinux_state *state = READ_ONCE(tunsec->state);
+
+	return state ?: &selinux_state;
+}
+
+static void selinux_tun_dev_release_security(
+	struct tun_security_struct *tunsec)
+{
+	struct selinux_state *state = READ_ONCE(tunsec->state);
+
+	WRITE_ONCE(tunsec->state, NULL);
+	put_selinux_state(state);
+}
+
+static void selinux_tun_dev_free_security(void *security)
+{
+	selinux_tun_dev_release_security(selinux_tun_dev(security));
 }
 
 static int selinux_tun_dev_create(void)
 {
+	struct selinux_state *state = current_selinux_state_for_global();
 	u32 sid = current_sid_for_global();
 
 	/* we aren't taking into account the "sockcreate" SID since the socket
@@ -7936,17 +7960,22 @@ static int selinux_tun_dev_create(void)
 	 * connections unlike traditional sockets - check the TUN driver to
 	 * get a better understanding of why this socket is special */
 
-	return avc_has_perm(sid, sid, SECCLASS_TUN_SOCKET, TUN_SOCKET__CREATE,
-			    NULL);
+	return avc_has_perm_state(state, sid, sid, SECCLASS_TUN_SOCKET,
+				  TUN_SOCKET__CREATE, NULL);
 }
 
 static int selinux_tun_dev_attach_queue(void *security)
 {
 	struct tun_security_struct *tunsec = selinux_tun_dev(security);
+	struct selinux_state *state = selinux_tun_dev_state(tunsec);
+	u32 sid;
 
-	return avc_has_perm(current_sid_for_global(), tunsec->sid,
-			    SECCLASS_TUN_SOCKET,
-			    TUN_SOCKET__ATTACH_QUEUE, NULL);
+	if (!cred_sid_for_state(current_cred(), state, &sid))
+		return -EACCES;
+
+	return avc_has_perm_state(state, sid, tunsec->sid,
+				  SECCLASS_TUN_SOCKET,
+				  TUN_SOCKET__ATTACH_QUEUE, NULL);
 }
 
 static int selinux_tun_dev_attach(struct sock *sk, void *security)
@@ -7962,7 +7991,7 @@ static int selinux_tun_dev_attach(struct sock *sk, void *security)
 	 * protocols were being used */
 
 	sksec->sid = tunsec->sid;
-	selinux_sock_bind_state(sksec, current_selinux_state_for_global());
+	selinux_sock_bind_state(sksec, selinux_tun_dev_state(tunsec));
 	sksec->sclass = SECCLASS_TUN_SOCKET;
 
 	return 0;
@@ -7971,15 +8000,20 @@ static int selinux_tun_dev_attach(struct sock *sk, void *security)
 static int selinux_tun_dev_open(void *security)
 {
 	struct tun_security_struct *tunsec = selinux_tun_dev(security);
-	u32 sid = current_sid_for_global();
+	struct selinux_state *state = selinux_tun_dev_state(tunsec);
+	u32 sid;
 	int err;
 
-	err = avc_has_perm(sid, tunsec->sid, SECCLASS_TUN_SOCKET,
-			   TUN_SOCKET__RELABELFROM, NULL);
+	if (!cred_sid_for_state(current_cred(), state, &sid))
+		return -EACCES;
+
+	err = avc_has_perm_state(state, sid, tunsec->sid,
+				 SECCLASS_TUN_SOCKET,
+				 TUN_SOCKET__RELABELFROM, NULL);
 	if (err)
 		return err;
-	err = avc_has_perm(sid, sid, SECCLASS_TUN_SOCKET,
-			   TUN_SOCKET__RELABELTO, NULL);
+	err = avc_has_perm_state(state, sid, sid, SECCLASS_TUN_SOCKET,
+				 TUN_SOCKET__RELABELTO, NULL);
 	if (err)
 		return err;
 	tunsec->sid = sid;
@@ -10466,6 +10500,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_getsecctx, selinux_inode_getsecctx),
 	LSM_HOOK_INIT(sk_alloc_security, selinux_sk_alloc_security),
 	LSM_HOOK_INIT(tun_dev_alloc_security, selinux_tun_dev_alloc_security),
+	LSM_HOOK_INIT(tun_dev_free_security, selinux_tun_dev_free_security),
 #ifdef CONFIG_SECURITY_INFINIBAND
 	LSM_HOOK_INIT(ib_alloc_security, selinux_ib_alloc_security),
 #endif

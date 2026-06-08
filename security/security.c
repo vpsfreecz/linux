@@ -5248,6 +5248,7 @@ int security_tun_dev_alloc_security(void **security)
 
 	rc = call_int_hook(tun_dev_alloc_security, *security);
 	if (rc) {
+		call_void_hook(tun_dev_free_security, *security);
 		kfree(*security);
 		*security = NULL;
 	}
@@ -5263,6 +5264,7 @@ EXPORT_SYMBOL(security_tun_dev_alloc_security);
  */
 void security_tun_dev_free_security(void *security)
 {
+	call_void_hook(tun_dev_free_security, security);
 	kfree(security);
 }
 EXPORT_SYMBOL(security_tun_dev_free_security);
@@ -5467,6 +5469,7 @@ int security_ib_alloc_security(void **sec)
 
 	rc = call_int_hook(ib_alloc_security, *sec);
 	if (rc) {
+		call_void_hook(ib_free_security, *sec);
 		kfree(*sec);
 		*sec = NULL;
 	}
@@ -6171,6 +6174,7 @@ int security_perf_event_alloc(struct perf_event *event)
 
 	rc = call_int_hook(perf_event_alloc, event);
 	if (rc) {
+		call_void_hook(perf_event_free, event);
 		kfree(event->security);
 		event->security = NULL;
 	}
