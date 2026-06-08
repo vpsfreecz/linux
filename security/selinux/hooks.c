@@ -9022,6 +9022,43 @@ out_cred:
 	return error;
 }
 
+static int selinux_lsm_getouterattr(struct task_struct *p, char **value)
+{
+	const struct cred *tcred;
+	struct selinux_state *state;
+	int error;
+	u32 len;
+	u32 sid;
+
+	tcred = get_task_cred(p);
+	if (!tcred)
+		return -ESRCH;
+
+	if (p != current) {
+		error = selinux_cred_has_perm(current_cred(), tcred,
+					      SECCLASS_PROCESS,
+					      PROCESS__GETATTR, NULL);
+		if (error)
+			goto out_cred;
+	}
+
+	if (!cred_outer_active(tcred)) {
+		*value = NULL;
+		error = 0;
+		goto out_cred;
+	}
+
+	state = cred_outer_state(tcred);
+	sid = cred_outer_sid(tcred);
+	error = security_sid_to_context_state(state, sid, value, &len);
+	if (!error)
+		error = len;
+
+out_cred:
+	put_cred(tcred);
+	return error;
+}
+
 static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 {
 	struct cred_security_struct *crsec;
@@ -9229,6 +9266,9 @@ static int selinux_getprocattr(struct task_struct *p,
 	unsigned int attr = lsm_name_to_attr(name);
 	int rc;
 
+	if (!strcmp(name, "outer"))
+		return selinux_lsm_getouterattr(p, value);
+
 	if (attr) {
 		rc = selinux_lsm_getattr(attr, p, value);
 		if (rc != -EOPNOTSUPP)
@@ -9241,6 +9281,9 @@ static int selinux_getprocattr(struct task_struct *p,
 static int selinux_setprocattr(const char *name, void *value, size_t size)
 {
 	int attr = lsm_name_to_attr(name);
+
+	if (!strcmp(name, "outer"))
+		return -EOPNOTSUPP;
 
 	if (attr)
 		return selinux_lsm_setattr(attr, value, size);

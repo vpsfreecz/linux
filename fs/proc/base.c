@@ -3141,6 +3141,7 @@ static const struct pid_entry selinux_attr_dir_stuff[] = {
 	ATTR(LSM_ID_SELINUX, "fscreate",	0666),
 	ATTR(LSM_ID_SELINUX, "keycreate",	0666),
 	ATTR(LSM_ID_SELINUX, "sockcreate",	0666),
+	ATTR(LSM_ID_SELINUX, "outer",		0444),
 };
 
 LSM_DIR_OPS(selinux);
