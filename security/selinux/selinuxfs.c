@@ -1390,6 +1390,11 @@ static ssize_t sel_commit_bools_write(struct file *filep,
 	if (length)
 		goto out;
 
+	if (!selinux_state_allows_runtime_policy_mutation(fsi->state)) {
+		length = -EOPNOTSUPP;
+		goto out;
+	}
+
 	length = -EINVAL;
 	if (sscanf(page, "%d", &new_value) != 1)
 		goto out;
