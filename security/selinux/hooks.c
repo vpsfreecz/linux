@@ -755,6 +755,75 @@ static int selinux_cred_self_has_perm(const struct cred *cred,
 	return 0;
 }
 
+static void selinux_outer_owner_bind_from_cred(struct selinux_state **statep,
+					       u32 *sidp,
+					       bool *activep,
+					       const struct cred *cred)
+{
+	struct selinux_state *old = READ_ONCE(*statep);
+
+	if (cred_outer_active(cred)) {
+		WRITE_ONCE(*statep, get_selinux_state(cred_outer_state(cred)));
+		WRITE_ONCE(*sidp, cred_outer_sid(cred));
+		WRITE_ONCE(*activep, true);
+	} else {
+		WRITE_ONCE(*statep, NULL);
+		WRITE_ONCE(*sidp, SECINITSID_UNLABELED);
+		WRITE_ONCE(*activep, false);
+	}
+
+	put_selinux_state(old);
+}
+
+static void selinux_outer_owner_release(struct selinux_state **statep,
+					bool *activep)
+{
+	struct selinux_state *state = READ_ONCE(*statep);
+
+	WRITE_ONCE(*statep, NULL);
+	WRITE_ONCE(*activep, false);
+	put_selinux_state(state);
+}
+
+static int selinux_outer_owner_has_perm(const struct cred *cred,
+					struct selinux_state *object_state,
+					u32 object_sid,
+					bool object_active,
+					u16 tclass, u32 perms,
+					struct common_audit_data *ad)
+{
+	u32 actor_sid;
+
+	if (!object_active)
+		return 0;
+	if (!object_state || !selinux_initialized_state(object_state))
+		return -EACCES;
+	if (!cred_sid_for_state(cred, object_state, &actor_sid))
+		return -EACCES;
+
+	return avc_has_perm_state(object_state, actor_sid, object_sid,
+				  tclass, perms, ad);
+}
+
+static int selinux_outer_owner_has_perm_between(struct selinux_state *sstate,
+						u32 ssid,
+						bool sactive,
+						struct selinux_state *tstate,
+						u32 tsid,
+						bool tactive,
+						u16 tclass, u32 perms,
+						struct common_audit_data *ad)
+{
+	if (!sactive && !tactive)
+		return 0;
+	if (!sactive || !tactive || !sstate || !tstate || sstate != tstate)
+		return -EACCES;
+	if (!selinux_initialized_state(sstate))
+		return -EACCES;
+
+	return avc_has_perm_state(sstate, ssid, tsid, tclass, perms, ad);
+}
+
 static int selinux_cred_inode_sid_state(const struct cred *cred,
 					const struct inode *inode,
 					struct selinux_state **statep,
@@ -8222,12 +8291,22 @@ static void selinux_ipc_bind_state(struct ipc_security_struct *isec,
 	put_selinux_state(old);
 }
 
+static void selinux_ipc_bind_outer_owner(struct ipc_security_struct *isec,
+					 const struct cred *cred)
+{
+	selinux_outer_owner_bind_from_cred(&isec->outer_state,
+					   &isec->outer_sid,
+					   &isec->outer_active,
+					   cred);
+}
+
 static void selinux_ipc_release_security(struct ipc_security_struct *isec)
 {
 	struct selinux_state *state = READ_ONCE(isec->state);
 
 	WRITE_ONCE(isec->state, NULL);
 	put_selinux_state(state);
+	selinux_outer_owner_release(&isec->outer_state, &isec->outer_active);
 }
 
 static struct selinux_state *selinux_msg_state_from_sec(const struct msg_security_struct *msec)
@@ -8260,12 +8339,22 @@ static void selinux_msg_bind_state(struct msg_security_struct *msec,
 	put_selinux_state(old);
 }
 
+static void selinux_msg_bind_outer_owner(struct msg_security_struct *msec,
+					 const struct cred *cred)
+{
+	selinux_outer_owner_bind_from_cred(&msec->outer_state,
+					   &msec->outer_sid,
+					   &msec->outer_active,
+					   cred);
+}
+
 static void selinux_msg_release_security(struct msg_security_struct *msec)
 {
 	struct selinux_state *state = READ_ONCE(msec->state);
 
 	WRITE_ONCE(msec->state, NULL);
 	put_selinux_state(state);
+	selinux_outer_owner_release(&msec->outer_state, &msec->outer_active);
 }
 
 static struct selinux_state *selinux_key_state_from_sec(const struct key_security_struct *ksec)
@@ -8298,12 +8387,22 @@ static void selinux_key_bind_state(struct key_security_struct *ksec,
 	put_selinux_state(old);
 }
 
+static void selinux_key_bind_outer_owner(struct key_security_struct *ksec,
+					 const struct cred *cred)
+{
+	selinux_outer_owner_bind_from_cred(&ksec->outer_state,
+					   &ksec->outer_sid,
+					   &ksec->outer_active,
+					   cred);
+}
+
 static void selinux_key_release_security(struct key_security_struct *ksec)
 {
 	struct selinux_state *state = READ_ONCE(ksec->state);
 
 	WRITE_ONCE(ksec->state, NULL);
 	put_selinux_state(state);
+	selinux_outer_owner_release(&ksec->outer_state, &ksec->outer_active);
 }
 
 static void ipc_init_security(struct ipc_security_struct *isec, u16 sclass,
@@ -8312,6 +8411,7 @@ static void ipc_init_security(struct ipc_security_struct *isec, u16 sclass,
 	isec->sclass = sclass;
 	isec->sid = current_sid();
 	selinux_ipc_bind_state(isec, state);
+	selinux_ipc_bind_outer_owner(isec, current_cred());
 }
 
 static int selinux_ipc_current_state(struct kern_ipc_perm *ipc_perms,
@@ -8346,8 +8446,15 @@ static int ipc_has_perm(struct kern_ipc_perm *ipc_perms,
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = ipc_perms->key;
 
-	return avc_has_perm_state(state, sid, isec->sid, isec->sclass,
-			  perms, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid, isec->sclass,
+				perms, &ad);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(current_cred(), isec->outer_state,
+					    isec->outer_sid,
+					    isec->outer_active,
+					    isec->sclass, perms, &ad);
 }
 
 static int selinux_msg_msg_alloc_security(struct msg_msg *msg)
@@ -8363,6 +8470,7 @@ static int selinux_msg_msg_alloc_security(struct msg_msg *msg)
 	msec = selinux_msg_msg(msg);
 	msec->sid = SECINITSID_UNLABELED;
 	selinux_msg_bind_state(msec, state);
+	selinux_msg_bind_outer_owner(msec, current_cred());
 
 	return 0;
 }
@@ -8391,8 +8499,16 @@ static int selinux_msg_queue_alloc_security(struct kern_ipc_perm *msq)
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = msq->key;
 
-	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_MSGQ,
-			  MSGQ__CREATE, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid, SECCLASS_MSGQ,
+				MSGQ__CREATE, &ad);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(current_cred(), isec->outer_state,
+					    isec->outer_sid,
+					    isec->outer_active,
+					    SECCLASS_MSGQ, MSGQ__CREATE,
+					    &ad);
 }
 
 static void selinux_msg_queue_free_security(struct kern_ipc_perm *msq)
@@ -8499,6 +8615,26 @@ static int selinux_msg_queue_msgsnd(struct kern_ipc_perm *msq, struct msg_msg *m
 		rc = avc_has_perm_state(state, msec->sid, isec->sid,
 					SECCLASS_MSGQ, MSGQ__ENQUEUE,
 					&ad);
+	if (!rc)
+		rc = selinux_outer_owner_has_perm(current_cred(),
+						  isec->outer_state,
+						  isec->outer_sid,
+						  isec->outer_active,
+						  SECCLASS_MSGQ,
+						  MSGQ__WRITE, &ad);
+	if (!rc)
+		rc = selinux_outer_owner_has_perm(current_cred(),
+						  msec->outer_state,
+						  msec->outer_sid,
+						  msec->outer_active,
+						  SECCLASS_MSG, MSG__SEND,
+						  &ad);
+	if (!rc)
+		rc = selinux_outer_owner_has_perm_between(
+			msec->outer_state, msec->outer_sid,
+			msec->outer_active, isec->outer_state,
+			isec->outer_sid, isec->outer_active,
+			SECCLASS_MSGQ, MSGQ__ENQUEUE, &ad);
 
 	return rc;
 }
@@ -8510,6 +8646,7 @@ static int selinux_msg_queue_msgrcv(struct kern_ipc_perm *msq, struct msg_msg *m
 	struct ipc_security_struct *isec;
 	struct msg_security_struct *msec;
 	struct common_audit_data ad;
+	const struct cred *tcred;
 	struct selinux_state *state;
 	u32 sid;
 	int rc;
@@ -8534,6 +8671,22 @@ static int selinux_msg_queue_msgrcv(struct kern_ipc_perm *msq, struct msg_msg *m
 		rc = avc_has_perm_state(state, sid, msec->sid,
 					SECCLASS_MSG, MSG__RECEIVE,
 					&ad);
+	if (rc)
+		return rc;
+
+	tcred = get_task_cred(target);
+	rc = selinux_outer_owner_has_perm(tcred, isec->outer_state,
+					  isec->outer_sid,
+					  isec->outer_active,
+					  SECCLASS_MSGQ, MSGQ__READ, &ad);
+	if (!rc)
+		rc = selinux_outer_owner_has_perm(tcred, msec->outer_state,
+						  msec->outer_sid,
+						  msec->outer_active,
+						  SECCLASS_MSG,
+						  MSG__RECEIVE, &ad);
+	put_cred(tcred);
+
 	return rc;
 }
 
@@ -8556,8 +8709,15 @@ static int selinux_shm_alloc_security(struct kern_ipc_perm *shp)
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = shp->key;
 
-	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_SHM,
-			  SHM__CREATE, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid, SECCLASS_SHM,
+				SHM__CREATE, &ad);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(current_cred(), isec->outer_state,
+					    isec->outer_sid,
+					    isec->outer_active,
+					    SECCLASS_SHM, SHM__CREATE, &ad);
 }
 
 static void selinux_shm_free_security(struct kern_ipc_perm *shp)
@@ -8652,8 +8812,15 @@ static int selinux_sem_alloc_security(struct kern_ipc_perm *sma)
 	ad.type = LSM_AUDIT_DATA_IPC;
 	ad.u.ipc_id = sma->key;
 
-	return avc_has_perm_state(state, sid, isec->sid, SECCLASS_SEM,
-			  SEM__CREATE, &ad);
+	rc = avc_has_perm_state(state, sid, isec->sid, SECCLASS_SEM,
+				SEM__CREATE, &ad);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(current_cred(), isec->outer_state,
+					    isec->outer_sid,
+					    isec->outer_active,
+					    SECCLASS_SEM, SEM__CREATE, &ad);
 }
 
 static void selinux_sem_free_security(struct kern_ipc_perm *sma)
@@ -9200,6 +9367,7 @@ static int selinux_key_alloc(struct key *k, const struct cred *cred,
 	else
 		ksec->sid = crsec->sid;
 	selinux_key_bind_state(ksec, cred_selinux_state(cred));
+	selinux_key_bind_outer_owner(ksec, cred);
 
 	return 0;
 }
@@ -9217,6 +9385,7 @@ static int selinux_key_permission(key_ref_t key_ref,
 	struct key_security_struct *ksec;
 	struct selinux_state *state = cred_selinux_state(cred);
 	u32 perm, sid;
+	int rc;
 
 	switch (need_perm) {
 	case KEY_NEED_VIEW:
@@ -9254,8 +9423,15 @@ static int selinux_key_permission(key_ref_t key_ref,
 	if (!selinux_key_state_matches(ksec, state))
 		return -EACCES;
 
-	return avc_has_perm_state(state, sid, ksec->sid,
+	rc = avc_has_perm_state(state, sid, ksec->sid,
 				SECCLASS_KEY, perm, NULL);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(cred, ksec->outer_state,
+					    ksec->outer_sid,
+					    ksec->outer_active,
+					    SECCLASS_KEY, perm, NULL);
 }
 
 static int selinux_key_getsecurity(struct key *key, char **_buffer)
@@ -9275,6 +9451,13 @@ static int selinux_key_getsecurity(struct key *key, char **_buffer)
 		return -EACCES;
 	state = selinux_key_state_from_sec(ksec);
 
+	rc = selinux_outer_owner_has_perm(current_cred(), ksec->outer_state,
+					  ksec->outer_sid,
+					  ksec->outer_active,
+					  SECCLASS_KEY, KEY__VIEW, NULL);
+	if (rc)
+		return rc;
+
 	rc = security_sid_to_context_state(state, ksec->sid,
 					   &context, &len);
 	if (!rc)
@@ -9289,12 +9472,20 @@ static int selinux_watch_key(struct key *key)
 	struct key_security_struct *ksec = selinux_key(key);
 	struct selinux_state *state = current_selinux_state();
 	u32 sid = current_sid();
+	int rc;
 
 	if (!selinux_key_state_matches(ksec, state))
 		return -EACCES;
 
-	return avc_has_perm_state(state, sid, ksec->sid,
+	rc = avc_has_perm_state(state, sid, ksec->sid,
 				SECCLASS_KEY, KEY__VIEW, NULL);
+	if (rc)
+		return rc;
+
+	return selinux_outer_owner_has_perm(current_cred(), ksec->outer_state,
+					    ksec->outer_sid,
+					    ksec->outer_active,
+					    SECCLASS_KEY, KEY__VIEW, NULL);
 }
 #endif
 #endif

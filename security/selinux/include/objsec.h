@@ -109,12 +109,18 @@ struct superblock_security_struct {
 struct msg_security_struct {
 	u32 sid; /* SID of message */
 	struct selinux_state *state; /* SELinux state bound to this message */
+	u32 outer_sid; /* immutable host SID of creator's outer owner */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
 };
 
 struct ipc_security_struct {
 	u16 sclass; /* security class of this object */
 	u32 sid; /* SID of IPC resource */
 	struct selinux_state *state; /* SELinux state bound to this IPC object */
+	u32 outer_sid; /* immutable host SID of creator's outer owner */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
 };
 
 struct netif_security_struct {
@@ -167,6 +173,9 @@ struct tun_security_struct {
 struct key_security_struct {
 	u32 sid; /* SID of key */
 	struct selinux_state *state; /* SELinux state bound to this key */
+	u32 outer_sid; /* immutable host SID of creator's outer owner */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
 };
 
 struct ib_security_struct {
