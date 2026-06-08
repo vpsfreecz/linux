@@ -3707,18 +3707,27 @@ static int selinux_vm_enough_memory(struct mm_struct *mm, long pages)
 
 /* binprm security operations */
 
-static u32 ptrace_parent_sid(void)
+static bool ptrace_parent_sid_for_state(const struct selinux_state *state,
+					u32 *sidp)
 {
-	u32 sid = 0;
 	struct task_struct *tracer;
+	bool match = true;
+
+	if (!state)
+		state = &selinux_state;
+
+	*sidp = 0;
 
 	rcu_read_lock();
 	tracer = ptrace_parent(current);
-	if (tracer)
-		sid = task_sid_obj(tracer);
+	if (tracer) {
+		const struct cred *cred = __task_cred(tracer);
+
+		match = cred_sid_for_state(cred, state, sidp);
+	}
 	rcu_read_unlock();
 
-	return sid;
+	return match;
 }
 
 static int check_nnp_nosuid_state(struct selinux_state *state,
@@ -3955,7 +3964,11 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 		/* Make sure that anyone attempting to ptrace over a task that
 		 * changes its SID has the appropriate permit */
 			if (bprm->unsafe & LSM_UNSAFE_PTRACE) {
-				u32 ptsid = ptrace_parent_sid();
+				u32 ptsid;
+
+				if (!ptrace_parent_sid_for_state(state,
+								 &ptsid))
+					return -EPERM;
 				if (ptsid != 0) {
 					rc = avc_has_perm_state(
 						state, ptsid, new_crsec->sid,
@@ -9359,7 +9372,9 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 
 		/* Check for ptracing, and update the task SID if ok.
 		   Otherwise, leave SID unchanged and fail. */
-		ptsid = ptrace_parent_sid();
+		error = -EACCES;
+		if (!ptrace_parent_sid_for_state(state, &ptsid))
+			goto abort_change;
 		if (ptsid != 0) {
 			error = avc_has_perm_state(state, ptsid, sid,
 					     SECCLASS_PROCESS, PROCESS__PTRACE,
