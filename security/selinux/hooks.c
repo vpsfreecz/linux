@@ -5998,7 +5998,12 @@ static void selinux_cred_free(struct cred *cred)
 
 static void selinux_cred_getsecid(const struct cred *c, u32 *secid)
 {
-	*secid = cred_sid(c);
+	/*
+	 * The legacy secid API has no SELinux state tag.  Export the host/global
+	 * SID for child-state payload credentials; callers that need the inner SID
+	 * must use the lsmprop hook below.
+	 */
+	*secid = cred_sid_for_global(c);
 }
 
 static void selinux_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
