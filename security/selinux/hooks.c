@@ -9911,19 +9911,59 @@ static int selinux_bpf_has_perm(const struct bpf_security_struct *bpfsec,
 static int selinux_bpf_token_has_perm(const struct bpf_token *token,
 				      const struct cred *cred, u32 perms)
 {
-	return selinux_bpf_has_perm(
-		selinux_bpf_token_security((struct bpf_token *)token),
-		cred, perms);
+	struct bpf_security_struct *bpfsec;
+
+	if (!token)
+		return -EACCES;
+
+	/*
+	 * Effective container tokens are synthetic and intentionally skip LSM
+	 * blob allocation; current-subject checks and the final map/prog label
+	 * still cover those paths.
+	 */
+	if (token->flags & BPF_TOKEN_F_INTERNAL)
+		return 0;
+	if (!token->security)
+		return -EACCES;
+
+	bpfsec = selinux_bpf_token_security((struct bpf_token *)token);
+	return selinux_bpf_has_perm(bpfsec, cred, perms);
+}
+
+static u32 bpf_token_cmd_to_av(enum bpf_cmd cmd)
+{
+	/*
+	 * SELinux has no BTF-specific BPF permission; bind BTF load/get to the
+	 * closest existing load/read permissions rather than letting token use
+	 * fall through to the LSM default.
+	 */
+	switch (cmd) {
+	case BPF_MAP_CREATE:
+		return BPF__MAP_CREATE;
+	case BPF_PROG_LOAD:
+	case BPF_BTF_LOAD:
+		return BPF__PROG_LOAD;
+	case BPF_BTF_GET_FD_BY_ID:
+		return BPF__MAP_READ;
+	default:
+		return 0;
+	}
 }
 
 static u32 bpf_token_to_av(const struct bpf_token *token)
 {
 	u32 av = 0;
+	int cmd;
 
-	if (token->allowed_cmds & BIT_ULL(BPF_MAP_CREATE))
-		av |= BPF__MAP_CREATE;
-	if (token->allowed_cmds & BIT_ULL(BPF_PROG_LOAD))
-		av |= BPF__PROG_LOAD;
+	if (!token)
+		return 0;
+
+	BUILD_BUG_ON(__MAX_BPF_CMD >= 64);
+
+	for (cmd = 0; cmd < __MAX_BPF_CMD; cmd++) {
+		if (token->allowed_cmds & BIT_ULL(cmd))
+			av |= bpf_token_cmd_to_av(cmd);
+	}
 	return av ?: BPF__MAP_READ;
 }
 
@@ -10067,7 +10107,31 @@ static int selinux_bpf_token_create(struct bpf_token *token, union bpf_attr *att
 	bpfsec->sid = current_sid_for_global();
 	selinux_bpf_bind_state(bpfsec, current_selinux_state_for_global());
 
-	return 0;
+	return selinux_bpf_token_has_perm(token, current_cred(),
+					  bpf_token_to_av(token));
+}
+
+static int selinux_bpf_token_cmd(const struct bpf_token *token, enum bpf_cmd cmd)
+{
+	u32 av = bpf_token_cmd_to_av(cmd);
+
+	if (!av)
+		return -EACCES;
+	return selinux_bpf_token_has_perm(token, current_cred(), av);
+}
+
+static int selinux_bpf_token_capable(const struct bpf_token *token, int cap)
+{
+	switch (cap) {
+	case CAP_BPF:
+	case CAP_NET_ADMIN:
+	case CAP_PERFMON:
+	case CAP_SYS_ADMIN:
+		return selinux_bpf_token_has_perm(token, current_cred(),
+						  bpf_token_to_av(token));
+	default:
+		return -EACCES;
+	}
 }
 
 static void selinux_bpf_map_free(struct bpf_map *map)
@@ -10082,6 +10146,8 @@ static void selinux_bpf_prog_free(struct bpf_prog *prog)
 
 static void selinux_bpf_token_free(struct bpf_token *token)
 {
+	if (!token->security)
+		return;
 	selinux_bpf_release_security(selinux_bpf_token_security(token));
 }
 #endif
@@ -10538,6 +10604,8 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(bpf_map_free, selinux_bpf_map_free),
 	LSM_HOOK_INIT(bpf_prog_free, selinux_bpf_prog_free),
 	LSM_HOOK_INIT(bpf_token_free, selinux_bpf_token_free),
+	LSM_HOOK_INIT(bpf_token_cmd, selinux_bpf_token_cmd),
+	LSM_HOOK_INIT(bpf_token_capable, selinux_bpf_token_capable),
 #endif
 
 #ifdef CONFIG_PERF_EVENTS
