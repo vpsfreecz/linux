@@ -116,6 +116,41 @@ static void selinux_fs_info_free(struct super_block *sb)
 	sb->s_fs_info = NULL;
 }
 
+static int selinuxfs_current_sid(struct selinux_fs_info *fsi, u32 *sid)
+{
+	const struct cred *cred = current_cred();
+	const struct cred_security_struct *crsec = selinux_cred(cred);
+	struct selinux_state *state = fsi->state ?: &selinux_state;
+	struct selinux_state *cstate = cred_selinux_state(cred);
+
+	if (crsec->outer_active && crsec->outer_state == state &&
+	    cstate != crsec->outer_state &&
+	    selinux_initialized_state(crsec->outer_state)) {
+		*sid = crsec->outer_sid;
+		return 0;
+	}
+
+	if (cstate == state) {
+		*sid = crsec->sid;
+		return 0;
+	}
+
+	return -EACCES;
+}
+
+static int selinuxfs_has_perm(struct selinux_fs_info *fsi, u32 perms)
+{
+	u32 sid;
+	int rc;
+
+	rc = selinuxfs_current_sid(fsi, &sid);
+	if (rc)
+		return rc;
+
+	return avc_has_perm_state(fsi->state, sid, SECINITSID_SECURITY,
+				  SECCLASS_SECURITY, perms, NULL);
+}
+
 #define SEL_INITCON_INO_OFFSET		0x01000000
 #define SEL_BOOL_INO_OFFSET		0x02000000
 #define SEL_CLASS_INO_OFFSET		0x04000000
@@ -169,9 +204,7 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 
 	old_value = enforcing_enabled_state(fsi->state);
 	if (new_value != old_value) {
-		length = avc_has_perm_state(fsi->state, current_sid(),
-				      SECINITSID_SECURITY, SECCLASS_SECURITY,
-				      SECURITY__SETENFORCE, NULL);
+		length = selinuxfs_has_perm(fsi, SECURITY__SETENFORCE);
 		if (length)
 			goto out;
 		if (!selinux_state_allows_runtime_enforcing_change(fsi->state)) {
@@ -389,9 +422,7 @@ static int sel_open_policy(struct inode *inode, struct file *filp)
 
 	mutex_lock(&fsi->state->policy_mutex);
 
-	rc = avc_has_perm_state(fsi->state, current_sid(),
-			  SECINITSID_SECURITY, SECCLASS_SECURITY,
-			  SECURITY__READ_POLICY, NULL);
+	rc = selinuxfs_has_perm(fsi, SECURITY__READ_POLICY);
 	if (rc)
 		goto err;
 
@@ -452,9 +483,7 @@ static ssize_t sel_read_policy(struct file *filp, char __user *buf,
 	struct selinux_fs_info *fsi = file_inode(filp)->i_sb->s_fs_info;
 	int ret;
 
-	ret = avc_has_perm_state(fsi->state, current_sid(),
-		  SECINITSID_SECURITY, SECCLASS_SECURITY,
-		  SECURITY__READ_POLICY, NULL);
+	ret = selinuxfs_has_perm(fsi, SECURITY__READ_POLICY);
 	if (ret)
 		return ret;
 
@@ -608,9 +637,7 @@ static ssize_t sel_write_load(struct file *file, const char __user *buf,
 	fsi = file_inode(file)->i_sb->s_fs_info;
 	mutex_lock(&fsi->state->policy_mutex);
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__LOAD_POLICY, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__LOAD_POLICY);
 	if (length)
 		goto out;
 
@@ -668,9 +695,7 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
 	ssize_t length;
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__CHECK_CONTEXT, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__CHECK_CONTEXT);
 	if (length)
 		goto out;
 
@@ -716,9 +741,7 @@ static ssize_t sel_write_checkreqprot(struct file *file, const char __user *buf,
 	unsigned int new_value;
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__SETCHECKREQPROT, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__SETCHECKREQPROT);
 	if (length)
 		return length;
 
@@ -770,9 +793,7 @@ static ssize_t sel_write_validatetrans(struct file *file,
 	int rc;
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 
-	rc = avc_has_perm_state(fsi->state, current_sid(),
-		  SECINITSID_SECURITY, SECCLASS_SECURITY,
-		  SECURITY__VALIDATE_TRANS, NULL);
+	rc = selinuxfs_has_perm(fsi, SECURITY__VALIDATE_TRANS);
 	if (rc)
 		goto out;
 
@@ -902,9 +923,7 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
 	ssize_t length;
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__COMPUTE_AV, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__COMPUTE_AV);
 	if (length)
 		goto out;
 
@@ -957,9 +976,7 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size)
 	int nargs;
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__COMPUTE_CREATE, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__COMPUTE_CREATE);
 	if (length)
 		goto out;
 
@@ -1060,9 +1077,7 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size)
 	u32 len;
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__COMPUTE_RELABEL, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__COMPUTE_RELABEL);
 	if (length)
 		goto out;
 
@@ -1128,9 +1143,7 @@ static ssize_t sel_write_user(struct file *file, char *buf, size_t size)
 		" userspace.\n", current->comm, current->pid);
 	ssleep(5);
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__COMPUTE_USER, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__COMPUTE_USER);
 	if (length)
 		goto out;
 
@@ -1194,9 +1207,7 @@ static ssize_t sel_write_member(struct file *file, char *buf, size_t size)
 	u32 len;
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__COMPUTE_MEMBER, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__COMPUTE_MEMBER);
 	if (length)
 		goto out;
 
@@ -1317,9 +1328,7 @@ static ssize_t sel_write_bool(struct file *filep, const char __user *buf,
 
 	mutex_lock(&fsi->state->policy_mutex);
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__SETBOOL, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__SETBOOL);
 	if (length)
 		goto out;
 
@@ -1377,9 +1386,7 @@ static ssize_t sel_commit_bools_write(struct file *filep,
 
 	mutex_lock(&fsi->state->policy_mutex);
 
-	length = avc_has_perm_state(fsi->state, current_sid(),
-			      SECINITSID_SECURITY, SECCLASS_SECURITY,
-			      SECURITY__SETBOOL, NULL);
+	length = selinuxfs_has_perm(fsi, SECURITY__SETBOOL);
 	if (length)
 		goto out;
 
@@ -1492,9 +1499,7 @@ static ssize_t sel_write_avc_cache_threshold(struct file *file,
 	unsigned int new_value;
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 
-	ret = avc_has_perm_state(fsi->state, current_sid(),
-		   SECINITSID_SECURITY, SECCLASS_SECURITY,
-		   SECURITY__SETSECPARAM, NULL);
+	ret = selinuxfs_has_perm(fsi, SECURITY__SETSECPARAM);
 	if (ret)
 		return ret;
 
