@@ -519,6 +519,13 @@ static int se_is_idle(struct sched_entity *se)
 
 static __always_inline
 void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec);
+static void account_proxy_owner_runtime(struct rq *rq,
+					struct task_struct *running,
+					u64 delta_exec);
+static void account_proxy_cfs_rq_runtime(struct rq *rq,
+					 struct cfs_rq *cfs_rq,
+					 struct sched_entity *curr,
+					 u64 delta_exec);
 
 /**************************************************************
  * Scheduling class tree data structure manipulation methods:
@@ -1252,8 +1259,14 @@ static s64 update_se(struct rq *rq, struct sched_entity *se)
 		trace_sched_stat_runtime(running, delta_exec);
 		account_group_exec_runtime(running, delta_exec);
 
-		/* cgroup time is always accounted against the donor */
-		cgroup_account_cputime(donor, delta_exec);
+		if (running != donor) {
+			cgroup_account_cputime(running, delta_exec);
+			if (running->sched_class == &fair_sched_class)
+				account_proxy_owner_runtime(rq, running,
+							    delta_exec);
+		} else {
+			cgroup_account_cputime(donor, delta_exec);
+		}
 	} else {
 		/* If not task, account the time against donor se  */
 		se->sum_exec_runtime += delta_exec;
@@ -1321,7 +1334,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 			dl_server_update(&rq->fair_server, delta_exec);
 	}
 
-	account_cfs_rq_runtime(cfs_rq, delta_exec);
+	account_proxy_cfs_rq_runtime(rq, cfs_rq, curr, delta_exec);
 
 	if (cfs_rq->nr_queued == 1)
 		return;
@@ -5882,6 +5895,57 @@ void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
 	__account_cfs_rq_runtime(cfs_rq, delta_exec);
 }
 
+static inline void task_throttle_setup_work(struct task_struct *p);
+static inline bool task_is_throttled(struct task_struct *p);
+
+static void account_proxy_owner_runtime(struct rq *rq,
+					struct task_struct *running,
+					u64 delta_exec)
+{
+	struct sched_entity *se = &running->se;
+	bool throttled = false;
+
+	for_each_sched_entity(se) {
+		struct cfs_rq *running_cfs_rq = cfs_rq_of(se);
+
+		account_cfs_rq_runtime(running_cfs_rq, delta_exec);
+		check_enqueue_throttle(running_cfs_rq);
+		throttled |= throttled_hierarchy(running_cfs_rq);
+	}
+
+	if (throttled) {
+		/*
+		 * Task-based CFS throttling lets in-kernel tasks run out to the
+		 * ret2user throttle point, so charging a proxy-running owner
+		 * should queue the same task work instead of trying to execute an
+		 * off-rq throttled-limbo task directly.
+		 */
+		if (!task_is_throttled(running))
+			task_throttle_setup_work(running);
+		resched_curr(rq);
+	}
+}
+
+static void account_proxy_cfs_rq_runtime(struct rq *rq,
+					 struct cfs_rq *cfs_rq,
+					 struct sched_entity *curr,
+					 u64 delta_exec)
+{
+	struct task_struct *running = rq->curr;
+
+	/*
+	 * Vruntime still follows the donor, but donated proxy-exec CPU must
+	 * not become free CFS bandwidth for the lock owner.  Shared task-level
+	 * runtime accounting already charged the actual running owner's fair
+	 * hierarchy, so suppress ordinary donor hierarchy bandwidth charges for
+	 * the rest of this proxy execution update.
+	 */
+	if (running != rq->donor)
+		return;
+
+	account_cfs_rq_runtime(cfs_rq, delta_exec);
+}
+
 static inline int cfs_rq_throttled(struct cfs_rq *cfs_rq)
 {
 	return cfs_bandwidth_used() && cfs_rq->throttled;
@@ -5960,6 +6024,7 @@ void init_cfs_throttle_work(struct task_struct *p)
 	/* Protect against double add, see throttle_cfs_rq() and throttle_cfs_rq_work() */
 	p->sched_throttle_work.next = &p->sched_throttle_work;
 	INIT_LIST_HEAD(&p->throttle_node);
+	p->throttled = false;
 }
 
 /*
@@ -6026,12 +6091,15 @@ static bool enqueue_throttled_task(struct task_struct *p)
 	 *                    list_move(&se->group_node, &rq->cfs_tasks); // bug
 	 *  schedule()
 	 *
-	 * In the above race case, @p current cfs_rq is in the same rq as
-	 * its previous cfs_rq because sched_move_task() only moves a task
-	 * to a different group from the same rq, so we can use its current
-	 * cfs_rq to derive rq and test if the task is current.
+	 * The same protection is needed for a proxy-serviced owner that is
+	 * the execution context but not the donor. In the above race case, @p
+	 * current cfs_rq is in the same rq as its previous cfs_rq because
+	 * sched_move_task() only moves a task to a different group from the
+	 * same rq, so we can use its current cfs_rq to derive rq and test if
+	 * the task is current.
 	 */
 	if (throttled_hierarchy(cfs_rq) &&
+	    !task_current(rq_of(cfs_rq), p) &&
 	    !task_current_donor(rq_of(cfs_rq), p)) {
 		list_add(&p->throttle_node, &cfs_rq->throttled_limbo_list);
 		return true;
@@ -6073,7 +6141,16 @@ static int tg_unthrottle_up(struct task_group *tg, void *data)
 	list_for_each_entry_safe(p, tmp, &cfs_rq->throttled_limbo_list, throttle_node) {
 		list_del_init(&p->throttle_node);
 		p->throttled = false;
-		enqueue_task_fair(rq_of(cfs_rq), p, ENQUEUE_WAKEUP);
+		/*
+		 * Ordinary throttled-limbo tasks remain core-queued, so the
+		 * class enqueue below is sufficient. A proxy-serviced owner can
+		 * return to limbo while core off-rq; restore that state through
+		 * the core activation path so p->on_rq matches its fair entity.
+		 */
+		if (task_on_rq_queued(p))
+			enqueue_task_fair(rq, p, ENQUEUE_WAKEUP);
+		else
+			activate_task(rq, p, ENQUEUE_WAKEUP);
 	}
 
 	/* Add cfs_rq with load or one or more already running entities to the list */
@@ -6881,6 +6958,18 @@ static void sched_fair_update_stop_tick(struct rq *rq, struct task_struct *p)
 #else /* !CONFIG_CFS_BANDWIDTH: */
 
 static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec) {}
+static void account_proxy_owner_runtime(struct rq *rq,
+					struct task_struct *running,
+					u64 delta_exec)
+{
+}
+
+static void account_proxy_cfs_rq_runtime(struct rq *rq,
+					 struct cfs_rq *cfs_rq,
+					 struct sched_entity *curr,
+					 u64 delta_exec)
+{
+}
 static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq) { return false; }
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq) {}
 static inline void sync_throttle(struct task_group *tg, int cpu) {}
