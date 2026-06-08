@@ -1443,7 +1443,7 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 	if (task_is_blocked(p))
 		return;
 
-	if (!task_current(rq, p) && p->nr_cpus_allowed > 1)
+	if (!task_current_donor(rq, p) && p->nr_cpus_allowed > 1)
 		enqueue_pushable_task(rq, p);
 }
 
@@ -1498,7 +1498,7 @@ static int find_lowest_rq(struct task_struct *task);
 static int
 select_task_rq_rt(struct task_struct *p, int cpu, int flags)
 {
-	struct task_struct *curr, *donor;
+	struct task_struct *donor;
 	struct rq *rq;
 	bool test;
 
@@ -1509,7 +1509,6 @@ select_task_rq_rt(struct task_struct *p, int cpu, int flags)
 	rq = cpu_rq(cpu);
 
 	rcu_read_lock();
-	curr = READ_ONCE(rq->curr); /* unlocked access */
 	donor = READ_ONCE(rq->donor);
 
 	/*
@@ -1538,9 +1537,8 @@ select_task_rq_rt(struct task_struct *p, int cpu, int flags)
 	 * requirement of the task - which is only important on heterogeneous
 	 * systems like big.LITTLE.
 	 */
-	test = curr &&
-	       unlikely(rt_task(donor)) &&
-	       (curr->nr_cpus_allowed < 2 || donor->prio <= p->prio);
+	test = unlikely(rt_task(donor)) &&
+	       (donor->nr_cpus_allowed < 2 || donor->prio <= p->prio);
 
 	if (test || !rt_task_fits_capacity(p, cpu)) {
 		int target = find_lowest_rq(p);
@@ -1570,7 +1568,7 @@ out:
 
 static void check_preempt_equal_prio(struct rq *rq, struct task_struct *p)
 {
-	if (rq->curr->nr_cpus_allowed == 1 ||
+	if (rq->donor->nr_cpus_allowed == 1 ||
 	    !cpupri_find(&rq->rd->cpupri, rq->donor, NULL))
 		return;
 
@@ -1982,7 +1980,7 @@ retry:
 		if (rq->donor->sched_class != &rt_sched_class)
 			return 0;
 
-		cpu = find_lowest_rq(rq->curr);
+		cpu = find_lowest_rq(rq->donor);
 		if (cpu == -1 || cpu == rq->cpu)
 			return 0;
 
@@ -2359,7 +2357,7 @@ static void task_woken_rt(struct rq *rq, struct task_struct *p)
 			    !test_tsk_need_resched(rq->curr) &&
 			    p->nr_cpus_allowed > 1 &&
 			    (dl_task(rq->donor) || rt_task(rq->donor)) &&
-			    (rq->curr->nr_cpus_allowed < 2 ||
+			    (rq->donor->nr_cpus_allowed < 2 ||
 			     rq->donor->prio <= p->prio);
 
 	if (need_to_push)
@@ -2428,7 +2426,7 @@ static void switched_to_rt(struct rq *rq, struct task_struct *p)
 	 * If we are running, update the avg_rt tracking, as the running time
 	 * will now on be accounted into the latter.
 	 */
-	if (task_current(rq, p)) {
+	if (task_current_donor(rq, p)) {
 		update_rt_rq_load_avg(rq_clock_pelt(rq), rq, 0);
 		return;
 	}
