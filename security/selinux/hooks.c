@@ -732,6 +732,17 @@ static inline u32 current_sid_for_global(void)
 	return cred_sid_for_global(current_cred());
 }
 
+static inline struct selinux_state *current_selinux_state_for_global(void)
+{
+	const struct cred *cred = current_cred();
+
+	if (cred_outer_active(cred) &&
+	    cred_outer_state(cred) == &selinux_state)
+		return cred_outer_state(cred);
+
+	return current_selinux_state();
+}
+
 static int selinux_cred_self_has_perm(const struct cred *cred,
 				      u16 tclass, u32 perms,
 				      struct common_audit_data *ad)
@@ -7865,7 +7876,7 @@ static int selinux_tun_dev_attach(struct sock *sk, void *security)
 	 * protocols were being used */
 
 	sksec->sid = tunsec->sid;
-	selinux_sock_bind_state(sksec, current_selinux_state());
+	selinux_sock_bind_state(sksec, current_selinux_state_for_global());
 	sksec->sclass = SECCLASS_TUN_SOCKET;
 
 	return 0;

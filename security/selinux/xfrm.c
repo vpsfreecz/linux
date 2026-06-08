@@ -147,12 +147,17 @@ static void selinux_xfrm_free(struct xfrm_sec_ctx *ctx)
  */
 static int selinux_xfrm_delete(struct xfrm_sec_ctx *ctx)
 {
+	struct selinux_state *state = current_selinux_state();
+
 	if (!ctx)
 		return 0;
 
-	return avc_has_perm(current_sid(), ctx->ctx_sid,
-			    SECCLASS_ASSOCIATION, ASSOCIATION__SETCONTEXT,
-			    NULL);
+	if (selinux_state_freezes_raw_network_sid_carriers(state))
+		return -EOPNOTSUPP;
+
+	return avc_has_perm_state(state, current_sid(), ctx->ctx_sid,
+				  SECCLASS_ASSOCIATION,
+				  ASSOCIATION__SETCONTEXT, NULL);
 }
 
 /*
