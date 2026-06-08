@@ -1660,10 +1660,17 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 			goto out;
 		}
 		if (sbsec->behavior == SECURITY_FS_USE_XATTR) {
+			struct selinux_state *state;
+			u32 sid;
+
 			sbsec->behavior = SECURITY_FS_USE_MNTPOINT;
-			rc = security_transition_sid_state(selinux_superblock_state_from_sec(sbsec),
-					current_sid(), current_sid(), SECCLASS_FILE, NULL,
-					&sbsec->mntpoint_sid);
+			state = selinux_superblock_state_from_sec(sbsec);
+			if (!cred_sid_for_state(cred, state, &sid)) {
+				rc = -EACCES;
+				goto out;
+			}
+			rc = security_transition_sid_state(state, sid, sid,
+					SECCLASS_FILE, NULL, &sbsec->mntpoint_sid);
 			if (rc)
 				goto out;
 		}
@@ -5561,10 +5568,18 @@ static int selinux_inode_copy_up_xattr(struct dentry *dentry, const char *name)
 static int selinux_kernfs_init_security(struct kernfs_node *kn_dir,
 					struct kernfs_node *kn)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
+	const struct cred *cred = current_cred();
+	const struct cred_security_struct *crsec = selinux_cred(cred);
+	struct selinux_state *state = current_selinux_state();
 	u32 parent_sid, newsid, clen;
+	u32 sid;
 	int rc;
 	char *context;
+
+	if (cred_outer_active(cred))
+		state = cred_outer_state(cred);
+	if (!cred_sid_for_state(cred, state, &sid))
+		return -EACCES;
 
 	rc = kernfs_xattr_get(kn_dir, XATTR_NAME_SELINUX, NULL, 0);
 	if (rc == -ENODATA)
@@ -5583,13 +5598,13 @@ static int selinux_kernfs_init_security(struct kernfs_node *kn_dir,
 		return rc;
 	}
 
-	rc = security_context_to_sid_state(current_selinux_state(), context, clen,
+	rc = security_context_to_sid_state(state, context, clen,
 					 &parent_sid, GFP_KERNEL);
 	kfree(context);
 	if (rc)
 		return rc;
 
-	if (crsec->create_sid) {
+	if (!cred_outer_active(cred) && crsec->create_sid) {
 		newsid = crsec->create_sid;
 	} else {
 		u16 secclass = inode_mode_to_security_class(kn->mode);
@@ -5601,13 +5616,13 @@ static int selinux_kernfs_init_security(struct kernfs_node *kn_dir,
 		q.name = kn_name;
 		q.hash_len = hashlen_string(kn_dir, kn_name);
 
-		rc = security_transition_sid_state(current_selinux_state(), crsec->sid,
+		rc = security_transition_sid_state(state, sid,
 					   parent_sid, secclass, &q, &newsid);
 		if (rc)
 			return rc;
 	}
 
-	rc = security_sid_to_context_force_state(current_selinux_state(), newsid,
+	rc = security_sid_to_context_force_state(state, newsid,
 					 &context, &clen);
 	if (rc)
 		return rc;
