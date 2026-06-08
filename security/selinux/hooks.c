@@ -92,6 +92,7 @@
 #include <uapi/linux/mount.h>
 #include <linux/fsnotify.h>
 #include <linux/fanotify.h>
+#include <linux/watch_queue.h>
 #include <linux/io_uring/cmd.h>
 #include <uapi/linux/lsm.h>
 
@@ -5294,6 +5295,53 @@ static int selinux_path_notify(const struct path *path, u64 mask,
 	return path_has_perm(current_cred(), path, perm);
 }
 
+static u32 selinux_fsnotify_perm(u32 mask)
+{
+	u32 perm = FILE__WATCH;
+
+	if (mask & ALL_FSNOTIFY_PERM_EVENTS)
+		perm |= FILE__WATCH_WITH_PERM;
+	if (mask & (FS_ACCESS | FS_ACCESS_PERM | FS_PRE_ACCESS |
+		    FS_CLOSE_NOWRITE))
+		perm |= FILE__WATCH_READS;
+
+	return perm;
+}
+
+static int selinux_fsnotify_event(const struct cred *cred,
+				  struct inode *inode, struct inode *dir,
+				  u32 mask)
+{
+	u32 perm = selinux_fsnotify_perm(mask);
+	int rc;
+
+	if (!cred)
+		return 0;
+
+	if (inode) {
+		rc = inode_has_perm(cred, inode, perm, NULL);
+		if (rc)
+			return rc;
+	}
+	if (dir && dir != inode)
+		return inode_has_perm(cred, dir, perm, NULL);
+
+	return 0;
+}
+
+#ifdef CONFIG_WATCH_QUEUE
+static int selinux_post_notification(const struct cred *w_cred,
+				     const struct cred *cred,
+				     struct watch_notification *n)
+{
+	if (n->type == WATCH_TYPE_META || !cred)
+		return 0;
+
+	return selinux_cred_has_perm(cred, w_cred, SECCLASS_PROCESS,
+				     PROCESS__SIGNULL, NULL);
+}
+#endif
+
 /*
  * Copy the inode security context value to the user.
  *
@@ -10286,6 +10334,10 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_invalidate_secctx, selinux_inode_invalidate_secctx),
 	LSM_HOOK_INIT(inode_notifysecctx, selinux_inode_notifysecctx),
 	LSM_HOOK_INIT(inode_setsecctx, selinux_inode_setsecctx),
+	LSM_HOOK_INIT(fsnotify_event, selinux_fsnotify_event),
+#ifdef CONFIG_WATCH_QUEUE
+	LSM_HOOK_INIT(post_notification, selinux_post_notification),
+#endif
 
 	LSM_HOOK_INIT(unix_stream_connect, selinux_socket_unix_stream_connect),
 	LSM_HOOK_INIT(unix_may_send, selinux_socket_unix_may_send),

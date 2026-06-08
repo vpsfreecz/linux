@@ -4628,6 +4628,23 @@ int security_inode_getsecctx(struct inode *inode, struct lsm_context *cp)
 }
 EXPORT_SYMBOL(security_inode_getsecctx);
 
+/**
+ * security_fsnotify_event() - Check if an fsnotify event can be delivered
+ * @cred: credentials of the fsnotify group creator
+ * @inode: inode that generated the event
+ * @dir: optional directory associated with the event
+ * @mask: fsnotify event mask
+ *
+ * Check whether an fsnotify group may receive an event for the supplied object.
+ *
+ * Return: Returns 0 if permission is granted.
+ */
+int security_fsnotify_event(const struct cred *cred, struct inode *inode,
+			    struct inode *dir, u32 mask)
+{
+	return call_int_hook(fsnotify_event, cred, inode, dir, mask);
+}
+
 #ifdef CONFIG_WATCH_QUEUE
 /**
  * security_post_notification() - Check if a watch notification can be posted
