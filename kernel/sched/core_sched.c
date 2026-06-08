@@ -82,15 +82,16 @@ static unsigned long sched_core_update_cookie(struct task_struct *p,
 		sched_core_enqueue(rq, p);
 
 	/*
-	 * If task is currently running, it may not be compatible anymore after
-	 * the cookie change, so enter the scheduler on its CPU to schedule it
-	 * away.
+	 * If task is currently running, either as the execution context or the
+	 * proxy-exec donor scheduling context, it may not be compatible anymore
+	 * after the cookie change, so enter the scheduler on its CPU to schedule
+	 * it away.
 	 *
 	 * Note that it is possible that as a result of this cookie change, the
 	 * core has now entered/left forced idle state. Defer accounting to the
 	 * next scheduling edge, rather than always forcing a reschedule here.
 	 */
-	if (task_on_cpu(rq, p))
+	if (task_on_cpu(rq, p) || task_current_donor(rq, p))
 		resched_curr(rq);
 
 	task_rq_unlock(rq, p, &rf);
