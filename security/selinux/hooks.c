@@ -4634,7 +4634,8 @@ static int selinux_inode_init_security_anon(struct inode *inode,
 					    const struct qstr *name,
 					    const struct inode *context_inode)
 {
-	u32 sid = current_sid();
+	struct selinux_state *state = selinux_superblock_state(inode->i_sb);
+	u32 sid;
 	struct common_audit_data ad;
 	struct inode_security_struct *isec;
 	int rc;
@@ -4642,7 +4643,11 @@ static int selinux_inode_init_security_anon(struct inode *inode,
 	if (unlikely(!selinux_initialized()))
 		return 0;
 
+	if (!cred_sid_for_state(current_cred(), state, &sid))
+		return -EACCES;
+
 	isec = selinux_inode(inode);
+	isec->task_sid = sid;
 
 	/*
 	 * We only get here once per ephemeral inode.  The inode has
@@ -4653,6 +4658,10 @@ static int selinux_inode_init_security_anon(struct inode *inode,
 	if (context_inode) {
 		struct inode_security_struct *context_isec =
 			selinux_inode(context_inode);
+
+		if (selinux_superblock_state(context_inode->i_sb) != state)
+			return -EACCES;
+
 		if (context_isec->initialized != LABEL_INITIALIZED) {
 			pr_err("SELinux:  context_inode is not initialized\n");
 			return -EACCES;
@@ -4662,8 +4671,9 @@ static int selinux_inode_init_security_anon(struct inode *inode,
 		isec->sid = context_isec->sid;
 	} else {
 		isec->sclass = SECCLASS_ANON_INODE;
-		rc = security_transition_sid_state(current_selinux_state(), sid, sid,
-				isec->sclass, name, &isec->sid);
+		rc = security_transition_sid_state(state, sid, sid,
+						   isec->sclass, name,
+						   &isec->sid);
 		if (rc)
 			return rc;
 	}
@@ -4677,11 +4687,8 @@ static int selinux_inode_init_security_anon(struct inode *inode,
 	ad.type = LSM_AUDIT_DATA_ANONINODE;
 	ad.u.anonclass = name ? (const char *)name->name : "?";
 
-	return avc_has_perm(sid,
-			    isec->sid,
-			    isec->sclass,
-			    FILE__CREATE,
-			    &ad);
+	return avc_has_perm_state(state, sid, isec->sid, isec->sclass,
+				  FILE__CREATE, &ad);
 }
 
 static int selinux_inode_create(struct inode *dir, struct dentry *dentry, umode_t mode)
