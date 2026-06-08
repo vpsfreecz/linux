@@ -3842,6 +3842,19 @@ void security_task_to_inode(struct task_struct *p, struct inode *inode)
 }
 
 /**
+ * security_cred_to_inode() - Set the security attributes of a cred's inode
+ * @cred: credentials
+ * @inode: inode
+ *
+ * Set the security attributes for an inode based on an associated credential,
+ * e.g. for namespace inodes whose owner is captured at namespace creation.
+ */
+void security_cred_to_inode(const struct cred *cred, struct inode *inode)
+{
+	call_void_hook(cred_to_inode, cred, inode);
+}
+
+/**
  * security_create_user_ns() - Check if creating a new userns is allowed
  * @cred: prepared creds
  *

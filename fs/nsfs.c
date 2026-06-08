@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
+#include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/proc_fs.h>
@@ -21,6 +22,7 @@
 #include <linux/lsm_namespace.h>
 #include <linux/exportfs.h>
 #include <linux/nstree.h>
+#include <linux/security.h>
 #include <net/net_namespace.h>
 
 #include "mount.h"
@@ -416,11 +418,15 @@ static const struct super_operations nsfs_ops = {
 static int nsfs_init_inode(struct inode *inode, void *data)
 {
 	struct ns_common *ns = data;
+	const struct cred *owner_cred = READ_ONCE(ns->owner_cred);
 
 	inode->i_private = data;
 	inode->i_mode |= S_IRUGO;
 	inode->i_fop = &ns_file_operations;
 	inode->i_ino = ns->inum;
+	if (!owner_cred)
+		owner_cred = &init_cred;
+	security_cred_to_inode(owner_cred, inode);
 	return 0;
 }
 

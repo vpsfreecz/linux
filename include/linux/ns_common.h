@@ -7,6 +7,7 @@
 #include <uapi/linux/sched.h>
 
 struct proc_ns_operations;
+struct cred;
 
 struct cgroup_namespace;
 struct ipc_namespace;
@@ -48,6 +49,7 @@ struct ns_common {
 	u32 ns_type;
 	struct dentry *stashed;
 	const struct proc_ns_operations *ops;
+	const struct cred *owner_cred;
 	unsigned int inum;
 	refcount_t __ns_ref; /* do not use directly */
 	union {

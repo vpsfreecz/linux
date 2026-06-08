@@ -21,6 +21,7 @@
 #include <linux/utsname.h>
 #include <net/net_namespace.h>
 #include <linux/coredump.h>
+#include <linux/security.h>
 #include <linux/xattr.h>
 
 #include "internal.h"
@@ -869,7 +870,8 @@ static const struct export_operations pidfs_export_operations = {
 
 static int pidfs_init_inode(struct inode *inode, void *data)
 {
-	const struct pid *pid = data;
+	struct pid *pid = data;
+	struct task_struct *task;
 
 	inode->i_private = data;
 	inode->i_flags |= S_PRIVATE | S_ANON_INODE;
@@ -880,6 +882,11 @@ static int pidfs_init_inode(struct inode *inode, void *data)
 	inode->i_fop = &pidfs_file_operations;
 	inode->i_ino = pidfs_ino(pid->ino);
 	inode->i_generation = pidfs_gen(pid->ino);
+	task = get_pid_task(pid, PIDTYPE_PID);
+	if (task) {
+		security_task_to_inode(task, inode);
+		put_task_struct(task);
+	}
 	return 0;
 }
 

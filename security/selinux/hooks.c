@@ -6307,15 +6307,12 @@ static int selinux_task_kill(struct task_struct *p, struct kernel_siginfo *info,
 					     NULL);
 }
 
-static void selinux_task_to_inode(struct task_struct *p,
-				  struct inode *inode)
+static void selinux_cred_to_inode(const struct cred *cred, struct inode *inode)
 {
-	const struct cred *cred;
 	struct inode_security_struct *isec = selinux_inode(inode);
 	struct selinux_state *sb_state = selinux_superblock_state(inode->i_sb);
-	u32 sid = task_sid_obj(p);
+	u32 sid;
 
-	cred = get_task_cred(p);
 	if (cred_outer_active(cred) && cred_outer_state(cred) == sb_state)
 		sid = cred_outer_sid(cred);
 	else
@@ -6326,6 +6323,14 @@ static void selinux_task_to_inode(struct task_struct *p,
 	isec->sid = sid;
 	isec->initialized = LABEL_INITIALIZED;
 	spin_unlock(&isec->lock);
+}
+
+static void selinux_task_to_inode(struct task_struct *p,
+				  struct inode *inode)
+{
+	const struct cred *cred = get_task_cred(p);
+
+	selinux_cred_to_inode(cred, inode);
 	put_cred(cred);
 }
 
@@ -10247,6 +10252,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_movememory, selinux_task_movememory),
 	LSM_HOOK_INIT(task_kill, selinux_task_kill),
 	LSM_HOOK_INIT(task_to_inode, selinux_task_to_inode),
+	LSM_HOOK_INIT(cred_to_inode, selinux_cred_to_inode),
 	LSM_HOOK_INIT(userns_create, selinux_userns_create),
 
 	LSM_HOOK_INIT(ipc_permission, selinux_ipc_permission),
