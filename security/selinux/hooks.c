@@ -6028,6 +6028,9 @@ static int selinux_kernel_act_as(struct cred *new, u32 secid)
 	u32 sid = current_sid_for_global();
 	int ret;
 
+	if (selinux_state_shares_object_model(current_selinux_state()))
+		return -EOPNOTSUPP;
+
 	ret = avc_has_perm(sid, secid,
 			   SECCLASS_KERNEL_SERVICE,
 			   KERNEL_SERVICE__USE_AS_OVERRIDE,
@@ -6051,6 +6054,9 @@ static int selinux_kernel_create_files_as(struct cred *new, struct inode *inode)
 	struct cred_security_struct *crsec = selinux_cred(new);
 	u32 sid = current_sid_for_global();
 	int ret;
+
+	if (selinux_state_shares_object_model(current_selinux_state()))
+		return -EOPNOTSUPP;
 
 	ret = avc_has_perm(sid, isec->sid,
 			   SECCLASS_KERNEL_SERVICE,
