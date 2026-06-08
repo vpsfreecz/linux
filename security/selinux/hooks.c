@@ -6593,9 +6593,15 @@ static int selinux_conn_sid_state(struct selinux_state *state,
 	int err = 0;
 
 	if (skb_sid != SECSID_NULL) {
+		/*
+		 * Packet peer labels still arrive through a raw host-global secid
+		 * carrier.  Child SELinux states must not interpret that raw host
+		 * SID as one of their own policy SIDs; project it to the shared
+		 * unlabeled carrier before deriving the child connection SID.
+		 */
 		if (selinux_state_freezes_raw_network_sid_carriers(state) &&
 		    skb_sid != SECINITSID_UNLABELED)
-			return -EOPNOTSUPP;
+			skb_sid = SECINITSID_UNLABELED;
 
 		err = security_sid_mls_copy_state(state, sk_sid, skb_sid,
 						 conn_sid);
