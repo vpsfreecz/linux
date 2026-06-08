@@ -4041,12 +4041,14 @@ static inline void flush_unauthorized_files(const struct cred *cred,
 static void selinux_bprm_committing_creds(const struct linux_binprm *bprm)
 {
 	struct cred_security_struct *new_crsec;
+	struct selinux_state *state;
 	struct rlimit *rlim, *initrlim;
 	int rc, i;
 
 	new_crsec = selinux_cred(bprm->cred);
 	if (new_crsec->sid == new_crsec->osid)
 		return;
+	state = cred_selinux_state(bprm->cred);
 
 	/* Close files for which the new task SID is not authorized. */
 	flush_unauthorized_files(bprm->cred, current->files);
@@ -4064,8 +4066,8 @@ static void selinux_bprm_committing_creds(const struct linux_binprm *bprm)
 	 * higher than the default soft limit for cases where the default is
 	 * lower than the hard limit, e.g. RLIMIT_CORE or RLIMIT_STACK.
 	 */
-	rc = avc_has_perm(new_crsec->osid, new_crsec->sid, SECCLASS_PROCESS,
-			  PROCESS__RLIMITINH, NULL);
+	rc = avc_has_perm_state(state, new_crsec->osid, new_crsec->sid,
+				SECCLASS_PROCESS, PROCESS__RLIMITINH, NULL);
 	if (rc) {
 		/* protect against do_prlimit() */
 		task_lock(current);
@@ -4086,7 +4088,9 @@ static void selinux_bprm_committing_creds(const struct linux_binprm *bprm)
  */
 static void selinux_bprm_committed_creds(const struct linux_binprm *bprm)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
+	const struct cred *cred = current_cred();
+	const struct cred_security_struct *crsec = selinux_cred(cred);
+	struct selinux_state *state = cred_selinux_state(cred);
 	u32 osid, sid;
 	int rc;
 
@@ -4103,7 +4107,8 @@ static void selinux_bprm_committed_creds(const struct linux_binprm *bprm)
 	 * This must occur _after_ the task SID has been updated so that any
 	 * kill done after the flush will be checked against the new SID.
 	 */
-	rc = avc_has_perm(osid, sid, SECCLASS_PROCESS, PROCESS__SIGINH, NULL);
+	rc = avc_has_perm_state(state, osid, sid, SECCLASS_PROCESS,
+				PROCESS__SIGINH, NULL);
 	if (rc) {
 		clear_itimer();
 
