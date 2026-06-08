@@ -4289,11 +4289,12 @@ out_len:
  * Sets the netlabel socket state on sk from parent
  */
 static int smack_socket_getpeersec_dgram(struct socket *sock,
-					 struct sk_buff *skb, u32 *secid)
+					 struct sk_buff *skb, u32 *secid,
+					 struct lsm_prop *prop)
 
 {
 	struct socket_smack *ssp = NULL;
-	struct smack_known *skp;
+	struct smack_known *skp = NULL;
 	struct sock *sk = NULL;
 	int family = PF_UNSPEC;
 	u32 s = 0;	/* 0 is the invalid secid */
@@ -4312,7 +4313,8 @@ static int smack_socket_getpeersec_dgram(struct socket *sock,
 	switch (family) {
 	case PF_UNIX:
 		ssp = smack_sock(sock->sk);
-		s = ssp->smk_out->smk_secid;
+		skp = ssp->smk_out;
+		s = skp->smk_secid;
 		break;
 	case PF_INET:
 		skp = smack_from_skb(skb);
@@ -4340,6 +4342,8 @@ static int smack_socket_getpeersec_dgram(struct socket *sock,
 	*secid = s;
 	if (s == 0)
 		return -EINVAL;
+	if (prop && skp)
+		prop->smack.skp = skp;
 	return 0;
 }
 

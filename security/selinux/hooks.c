@@ -7407,20 +7407,11 @@ out_len:
 }
 
 static int selinux_socket_getpeersec_dgram(struct socket *sock,
-					   struct sk_buff *skb, u32 *secid)
+					   struct sk_buff *skb, u32 *secid,
+					   struct lsm_prop *prop)
 {
 	u32 peer_secid = SECSID_NULL;
 	u16 family;
-
-	/*
-	 * Datagram peer export still returns a raw secid with no attached SELinux
-	 * state identity.  Keep that API frozen for child states until the generic
-	 * networking secid carrier grows an explicit state tag.
-	 */
-	if (selinux_state_freezes_raw_network_sid_carriers(current_selinux_state())) {
-		*secid = SECSID_NULL;
-		return -EOPNOTSUPP;
-	}
 
 	if (skb && skb->protocol == htons(ETH_P_IP))
 		family = PF_INET;
@@ -7435,10 +7426,35 @@ static int selinux_socket_getpeersec_dgram(struct socket *sock,
 
 	if (sock && family == PF_UNIX) {
 		struct inode_security_struct *isec;
+		struct sk_security_struct *sksec = selinux_sock(sock->sk);
+
 		isec = inode_security_novalidate(SOCK_INODE(sock));
 		peer_secid = isec->sid;
-	} else if (skb)
+		if (prop) {
+			prop->selinux.secid = peer_secid;
+			prop->selinux.state = selinux_sock_state_from_sec(sksec);
+		} else if (selinux_state_freezes_raw_network_sid_carriers(
+				   current_selinux_state())) {
+			*secid = SECSID_NULL;
+			return -EOPNOTSUPP;
+		}
+	} else if (skb) {
+		/*
+		 * Packet peer labels are host-global carriers.  Do not let a
+		 * child state reinterpret their raw SID values through its own
+		 * policy.
+		 */
+		if (selinux_state_freezes_raw_network_sid_carriers(
+			    current_selinux_state())) {
+			*secid = SECSID_NULL;
+			return -EOPNOTSUPP;
+		}
 		selinux_skb_peerlbl_sid(skb, family, &peer_secid);
+		if (prop) {
+			prop->selinux.secid = peer_secid;
+			prop->selinux.state = &selinux_state;
+		}
+	}
 
 	*secid = peer_secid;
 	if (peer_secid == SECSID_NULL)

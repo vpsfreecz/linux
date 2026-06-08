@@ -438,7 +438,19 @@ static void scm_passec(struct sock *sk, struct msghdr *msg, struct scm_cookie *s
 	int err;
 
 	if (sk->sk_scm_security) {
-		err = security_secid_to_secctx(scm->secid, &ctx);
+#ifdef CONFIG_SECURITY_SELINUX
+		if (scm->selinux.state) {
+			struct lsm_prop prop = { };
+
+			prop.selinux = scm->selinux;
+			err = security_lsmprop_to_secctx(&prop, &ctx,
+							 LSM_ID_UNDEF);
+		} else {
+#endif
+			err = security_secid_to_secctx(scm->secid, &ctx);
+#ifdef CONFIG_SECURITY_SELINUX
+		}
+#endif
 
 		if (err >= 0) {
 			put_cmsg(msg, SOL_SOCKET, SCM_SECURITY, ctx.len,
@@ -537,6 +549,7 @@ void scm_recv(struct socket *sock, struct msghdr *msg,
 	if (!__scm_recv_common(sock->sk, msg, scm, flags))
 		return;
 
+	scm_destroy_secdata(scm);
 	scm_destroy_cred(scm);
 }
 EXPORT_SYMBOL(scm_recv);
@@ -550,5 +563,6 @@ void scm_recv_unix(struct socket *sock, struct msghdr *msg,
 	if (sock->sk->sk_scm_pidfd)
 		scm_pidfd_recv(msg, scm);
 
+	scm_destroy_secdata(scm);
 	scm_destroy_cred(scm);
 }

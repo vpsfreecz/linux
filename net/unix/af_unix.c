@@ -256,22 +256,62 @@ static void unix_table_double_unlock(struct net *net,
 static void unix_get_secdata(struct scm_cookie *scm, struct sk_buff *skb)
 {
 	UNIXCB(skb).secid = scm->secid;
+#ifdef CONFIG_SECURITY_SELINUX
+	UNIXCB(skb).selinux_state = scm->selinux.state;
+	if (UNIXCB(skb).selinux_state) {
+		struct lsm_prop prop = { };
+
+		prop.selinux.secid = scm->secid;
+		prop.selinux.state = UNIXCB(skb).selinux_state;
+		security_lsmprop_hold(&prop);
+		UNIXCB(skb).selinux_state = prop.selinux.state;
+	}
+#endif
 }
 
 static inline void unix_set_secdata(struct scm_cookie *scm, struct sk_buff *skb)
 {
 	scm->secid = UNIXCB(skb).secid;
+#ifdef CONFIG_SECURITY_SELINUX
+	if (UNIXCB(skb).selinux_state) {
+		struct lsm_prop prop = { };
+
+		prop.selinux.secid = scm->secid;
+		prop.selinux.state = UNIXCB(skb).selinux_state;
+		scm_set_secdata_prop(scm, &prop);
+	} else
+		scm_destroy_secdata(scm);
+#endif
+}
+
+static inline void unix_move_secdata(struct scm_cookie *scm, struct sk_buff *skb)
+{
+	scm->secid = UNIXCB(skb).secid;
+#ifdef CONFIG_SECURITY_SELINUX
+	scm->selinux.secid = scm->secid;
+	scm->selinux.state = UNIXCB(skb).selinux_state;
+	UNIXCB(skb).selinux_state = NULL;
+#endif
 }
 
 static inline bool unix_secdata_eq(struct scm_cookie *scm, struct sk_buff *skb)
 {
-	return (scm->secid == UNIXCB(skb).secid);
+	if (scm->secid != UNIXCB(skb).secid)
+		return false;
+#ifdef CONFIG_SECURITY_SELINUX
+	if (scm->selinux.state != UNIXCB(skb).selinux_state)
+		return false;
+#endif
+	return true;
 }
 #else
 static inline void unix_get_secdata(struct scm_cookie *scm, struct sk_buff *skb)
 { }
 
 static inline void unix_set_secdata(struct scm_cookie *scm, struct sk_buff *skb)
+{ }
+
+static inline void unix_move_secdata(struct scm_cookie *scm, struct sk_buff *skb)
 { }
 
 static inline bool unix_secdata_eq(struct scm_cookie *scm, struct sk_buff *skb)
@@ -1992,6 +2032,7 @@ static void unix_destruct_scm(struct sk_buff *skb)
 
 	memset(&scm, 0, sizeof(scm));
 	scm.pid = UNIXCB(skb).pid;
+	unix_move_secdata(&scm, skb);
 	if (UNIXCB(skb).fp)
 		unix_detach_fds(&scm, skb);
 

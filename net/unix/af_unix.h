@@ -2,6 +2,7 @@
 #ifndef __AF_UNIX_H
 #define __AF_UNIX_H
 
+#include <linux/lsm/selinux.h>
 #include <linux/uidgid.h>
 
 #define UNIX_HASH_MOD	(256 - 1)
@@ -17,6 +18,9 @@ struct unix_skb_parms {
 	struct scm_fp_list	*fp;		/* Passed files		*/
 #ifdef CONFIG_SECURITY_NETWORK
 	u32			secid;		/* Security ID		*/
+#ifdef CONFIG_SECURITY_SELINUX
+	struct selinux_state	*selinux_state;	/* SELinux state for secid */
+#endif
 #endif
 	u32			consumed;
 } __randomize_layout;

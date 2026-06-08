@@ -129,14 +129,23 @@ static void ip_cmsg_recv_checksum(struct msghdr *msg, struct sk_buff *skb,
 static void ip_cmsg_recv_security(struct msghdr *msg, struct sk_buff *skb)
 {
 	struct lsm_context ctx;
+	struct lsm_prop prop = { };
 	u32 secid;
 	int err;
 
-	err = security_socket_getpeersec_dgram(NULL, skb, &secid);
+	err = security_socket_getpeersec_dgram(NULL, skb, &secid, &prop);
 	if (err)
 		return;
 
-	err = security_secid_to_secctx(secid, &ctx);
+#ifdef CONFIG_SECURITY_SELINUX
+	if (prop.selinux.state)
+		err = security_lsmprop_to_secctx(&prop, &ctx, LSM_ID_UNDEF);
+	else {
+#endif
+		err = security_secid_to_secctx(secid, &ctx);
+#ifdef CONFIG_SECURITY_SELINUX
+	}
+#endif
 	if (err < 0)
 		return;
 

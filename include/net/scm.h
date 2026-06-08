@@ -47,6 +47,9 @@ struct scm_cookie {
 	struct scm_creds	creds;		/* Skb credentials	*/
 #ifdef CONFIG_SECURITY_NETWORK
 	u32			secid;		/* Passed security ID 	*/
+#ifdef CONFIG_SECURITY_SELINUX
+	struct lsm_prop_selinux selinux;	/* SELinux state for secid */
+#endif
 #endif
 };
 
@@ -57,11 +60,42 @@ void __scm_destroy(struct scm_cookie *scm);
 struct scm_fp_list *scm_fp_dup(struct scm_fp_list *fpl);
 
 #ifdef CONFIG_SECURITY_NETWORK
+static __inline__ void scm_destroy_secdata(struct scm_cookie *scm)
+{
+#ifdef CONFIG_SECURITY_SELINUX
+	if (scm->selinux.state) {
+		struct lsm_prop prop = { };
+
+		prop.selinux = scm->selinux;
+		security_release_lsmprop(&prop);
+		scm->selinux = prop.selinux;
+	}
+#endif
+}
+
+static __inline__ void scm_set_secdata_prop(struct scm_cookie *scm,
+					    struct lsm_prop *prop)
+{
+#ifdef CONFIG_SECURITY_SELINUX
+	scm_destroy_secdata(scm);
+	if (prop && prop->selinux.state) {
+		security_lsmprop_hold(prop);
+		scm->selinux = prop->selinux;
+	}
+#endif
+}
+
 static __inline__ void unix_get_peersec_dgram(struct socket *sock, struct scm_cookie *scm)
 {
-	security_socket_getpeersec_dgram(sock, NULL, &scm->secid);
+	struct lsm_prop prop = { };
+
+	if (security_socket_getpeersec_dgram(sock, NULL, &scm->secid, &prop) == 0)
+		scm_set_secdata_prop(scm, &prop);
 }
 #else
+static __inline__ void scm_destroy_secdata(struct scm_cookie *scm)
+{ }
+
 static __inline__ void unix_get_peersec_dgram(struct socket *sock, struct scm_cookie *scm)
 { }
 #endif /* CONFIG_SECURITY_NETWORK */
@@ -83,6 +117,7 @@ static __inline__ void scm_destroy_cred(struct scm_cookie *scm)
 
 static __inline__ void scm_destroy(struct scm_cookie *scm)
 {
+	scm_destroy_secdata(scm);
 	scm_destroy_cred(scm);
 	if (scm->fp)
 		__scm_destroy(scm);
@@ -116,4 +151,3 @@ static inline int scm_recv_one_fd(struct file *f, int __user *ufd,
 }
 
 #endif /* __LINUX_NET_SCM_H */
-

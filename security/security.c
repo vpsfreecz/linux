@@ -4995,6 +4995,7 @@ int security_socket_getpeersec_stream(struct socket *sock, sockptr_t optval,
  * @sock: socket
  * @skb: datagram packet
  * @secid: remote peer label secid
+ * @prop: optional stateful peer label property
  *
  * This hook allows the security module to provide peer socket security state
  * for udp sockets on a per-packet basis to userspace via getsockopt
@@ -5005,9 +5006,12 @@ int security_socket_getpeersec_stream(struct socket *sock, sockptr_t optval,
  * Return: Returns 0 on success, error on failure.
  */
 int security_socket_getpeersec_dgram(struct socket *sock,
-				     struct sk_buff *skb, u32 *secid)
+				     struct sk_buff *skb, u32 *secid,
+				     struct lsm_prop *prop)
 {
-	return call_int_hook(socket_getpeersec_dgram, sock, skb, secid);
+	if (prop)
+		lsmprop_init(prop);
+	return call_int_hook(socket_getpeersec_dgram, sock, skb, secid, prop);
 }
 EXPORT_SYMBOL(security_socket_getpeersec_dgram);
 

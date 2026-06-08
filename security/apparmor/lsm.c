@@ -1609,7 +1609,8 @@ done:
  * Sets the netlabel socket state on sk from parent
  */
 static int apparmor_socket_getpeersec_dgram(struct socket *sock,
-					    struct sk_buff *skb, u32 *secid)
+					    struct sk_buff *skb, u32 *secid,
+					    struct lsm_prop *prop)
 
 {
 	/* TODO: requires secid support */
