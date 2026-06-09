@@ -59,6 +59,7 @@
 #include <linux/perf_event_api.h>
 #include <linux/percpu-rwsem.h>
 #include <linux/profile.h>
+#include <linux/proc_fs.h>
 #include <linux/psi.h>
 #include <linux/rcuwait_api.h>
 #include <linux/rseq.h>
@@ -72,6 +73,7 @@
 #include <linux/wait_api.h>
 #include <linux/workqueue_api.h>
 #include <linux/livepatch_sched.h>
+#include <linux/seq_file.h>
 
 #ifdef CONFIG_PREEMPT_DYNAMIC
 # ifdef CONFIG_GENERIC_IRQ_ENTRY
@@ -82,6 +84,7 @@
 #include <uapi/linux/sched/types.h>
 
 #include <asm/irq_regs.h>
+#include <asm/local64.h>
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
 
@@ -132,6 +135,209 @@ DEFINE_PER_CPU(struct rnd_state, sched_rnd_state);
 #ifdef CONFIG_SCHED_PROXY_EXEC
 DEFINE_STATIC_KEY_TRUE(__sched_proxy_exec);
 
+struct sched_proxy_exec_diag {
+	local64_t attempts;
+	local64_t chain_steps;
+	local64_t chain_changed;
+	local64_t chain_cycle;
+	local64_t chain_too_deep;
+	local64_t chain_lock_busy;
+	local64_t chain_unknown_type;
+	local64_t chain_rwsem_writer;
+	local64_t chain_rwsem_reader_single;
+	local64_t rwsem_reader_rep;
+	local64_t chain_rwsem_reader_multi;
+	local64_t chain_rwsem_owner_unknown;
+	local64_t chain_percpu_rwsem_writer;
+	local64_t percpu_rwsem_reader_rep;
+	local64_t chain_percpu_rwsem_reader_untracked;
+	local64_t chain_percpu_rwsem_owner_unknown;
+	local64_t chain_rtmutex_owner;
+	local64_t owner_none;
+	local64_t owner_not_on_rq;
+	local64_t owner_not_on_rq_throttled;
+	local64_t owner_not_on_rq_hierarchy_throttled;
+	local64_t owner_not_on_rq_same_cpu;
+	local64_t owner_not_on_rq_remote_cpu;
+	local64_t owner_not_on_rq_remote_migrate;
+	local64_t owner_not_on_rq_task_running;
+	local64_t owner_not_on_rq_task_sleeping;
+	local64_t owner_not_on_rq_sched_delayed;
+	local64_t owner_on_rq_throttled;
+	local64_t owner_on_rq_hierarchy_throttled;
+	local64_t owner_sched_delayed;
+	local64_t owner_sched_delayed_requeued;
+	local64_t owner_remote_cpu;
+	local64_t owner_migrating;
+	local64_t owner_self;
+	local64_t owner_core_cookie_mismatch;
+	local64_t success;
+	local64_t success_owner_throttled;
+	local64_t success_owner_hierarchy_throttled;
+	local64_t deactivate;
+	local64_t migrate_task;
+	local64_t return_migration_current;
+	local64_t mutex_donor_seen;
+	local64_t mutex_donor_selected;
+	local64_t mutex_chain_selected;
+	local64_t mutex_donor_missed;
+	local64_t donated_runtime_events;
+	local64_t donated_runtime_ns;
+	local64_t donated_runtime_owner_throttled_ns;
+	local64_t donated_runtime_owner_hierarchy_throttled_ns;
+};
+
+static DEFINE_PER_CPU(struct sched_proxy_exec_diag, sched_proxy_exec_diag);
+
+#define sched_proxy_exec_diag_inc(field) do { \
+	preempt_disable(); \
+	local64_inc(&this_cpu_ptr(&sched_proxy_exec_diag)->field); \
+	preempt_enable(); \
+} while (0)
+
+#define sched_proxy_exec_diag_add(field, value) do { \
+	preempt_disable(); \
+	local64_add((value), \
+		    &this_cpu_ptr(&sched_proxy_exec_diag)->field); \
+	preempt_enable(); \
+} while (0)
+
+#ifdef CONFIG_PROC_FS
+static u64 sched_proxy_exec_diag_sum(size_t offset)
+{
+	u64 sum = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		struct sched_proxy_exec_diag *diag;
+		local64_t *counter;
+
+		diag = per_cpu_ptr(&sched_proxy_exec_diag, cpu);
+		counter = (local64_t *)((char *)diag + offset);
+		sum += local64_read(counter);
+	}
+
+	return sum;
+}
+
+#define sched_proxy_exec_diag_read(field) \
+	sched_proxy_exec_diag_sum(offsetof(struct sched_proxy_exec_diag, field))
+
+static int sched_proxy_exec_diag_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "enabled %d\n", sched_proxy_exec() ? 1 : 0);
+	seq_printf(m, "attempts %llu\n",
+		   sched_proxy_exec_diag_read(attempts));
+	seq_printf(m, "chain_steps %llu\n",
+		   sched_proxy_exec_diag_read(chain_steps));
+	seq_printf(m, "chain_changed %llu\n",
+		   sched_proxy_exec_diag_read(chain_changed));
+	seq_printf(m, "chain_cycle %llu\n",
+		   sched_proxy_exec_diag_read(chain_cycle));
+	seq_printf(m, "chain_too_deep %llu\n",
+		   sched_proxy_exec_diag_read(chain_too_deep));
+	seq_printf(m, "chain_lock_busy %llu\n",
+		   sched_proxy_exec_diag_read(chain_lock_busy));
+	seq_printf(m, "chain_unknown_type %llu\n",
+		   sched_proxy_exec_diag_read(chain_unknown_type));
+	seq_printf(m, "chain_rwsem_writer %llu\n",
+		   sched_proxy_exec_diag_read(chain_rwsem_writer));
+	seq_printf(m, "chain_rwsem_reader_single %llu\n",
+		   sched_proxy_exec_diag_read(chain_rwsem_reader_single));
+	seq_printf(m, "chain_rwsem_reader_representative %llu\n",
+		   sched_proxy_exec_diag_read(rwsem_reader_rep));
+	seq_printf(m, "chain_rwsem_reader_multi %llu\n",
+		   sched_proxy_exec_diag_read(chain_rwsem_reader_multi));
+	seq_printf(m, "chain_rwsem_owner_unknown %llu\n",
+		   sched_proxy_exec_diag_read(chain_rwsem_owner_unknown));
+	seq_printf(m, "chain_percpu_rwsem_writer %llu\n",
+		   sched_proxy_exec_diag_read(chain_percpu_rwsem_writer));
+	seq_printf(m, "chain_percpu_rwsem_reader_representative %llu\n",
+		   sched_proxy_exec_diag_read(percpu_rwsem_reader_rep));
+	seq_printf(m, "chain_percpu_rwsem_reader_untracked %llu\n",
+		   sched_proxy_exec_diag_read(chain_percpu_rwsem_reader_untracked));
+	seq_printf(m, "chain_percpu_rwsem_owner_unknown %llu\n",
+		   sched_proxy_exec_diag_read(chain_percpu_rwsem_owner_unknown));
+	seq_printf(m, "chain_rtmutex_owner %llu\n",
+		   sched_proxy_exec_diag_read(chain_rtmutex_owner));
+	seq_printf(m, "owner_none %llu\n",
+		   sched_proxy_exec_diag_read(owner_none));
+	seq_printf(m, "owner_not_on_rq %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq));
+	seq_printf(m, "owner_not_on_rq_throttled %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq_throttled));
+	seq_printf(m, "owner_not_on_rq_hierarchy_throttled %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq_hierarchy_throttled));
+	seq_printf(m, "owner_not_on_rq_same_cpu %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq_same_cpu));
+	seq_printf(m, "owner_not_on_rq_remote_cpu %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq_remote_cpu));
+	seq_printf(m, "owner_not_on_rq_remote_migrate %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq_remote_migrate));
+	seq_printf(m, "owner_not_on_rq_task_running %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq_task_running));
+	seq_printf(m, "owner_not_on_rq_task_sleeping %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq_task_sleeping));
+	seq_printf(m, "owner_not_on_rq_sched_delayed %llu\n",
+		   sched_proxy_exec_diag_read(owner_not_on_rq_sched_delayed));
+	seq_printf(m, "owner_on_rq_throttled %llu\n",
+		   sched_proxy_exec_diag_read(owner_on_rq_throttled));
+	seq_printf(m, "owner_on_rq_hierarchy_throttled %llu\n",
+		   sched_proxy_exec_diag_read(owner_on_rq_hierarchy_throttled));
+	seq_printf(m, "owner_sched_delayed %llu\n",
+		   sched_proxy_exec_diag_read(owner_sched_delayed));
+	seq_printf(m, "owner_sched_delayed_requeued %llu\n",
+		   sched_proxy_exec_diag_read(owner_sched_delayed_requeued));
+	seq_printf(m, "owner_remote_cpu %llu\n",
+		   sched_proxy_exec_diag_read(owner_remote_cpu));
+	seq_printf(m, "owner_migrating %llu\n",
+		   sched_proxy_exec_diag_read(owner_migrating));
+	seq_printf(m, "owner_self %llu\n",
+		   sched_proxy_exec_diag_read(owner_self));
+	seq_printf(m, "owner_core_cookie_mismatch %llu\n",
+		   sched_proxy_exec_diag_read(owner_core_cookie_mismatch));
+	seq_printf(m, "success %llu\n",
+		   sched_proxy_exec_diag_read(success));
+	seq_printf(m, "success_owner_throttled %llu\n",
+		   sched_proxy_exec_diag_read(success_owner_throttled));
+	seq_printf(m, "success_owner_hierarchy_throttled %llu\n",
+		   sched_proxy_exec_diag_read(success_owner_hierarchy_throttled));
+	seq_printf(m, "deactivate %llu\n",
+		   sched_proxy_exec_diag_read(deactivate));
+	seq_printf(m, "migrate_task %llu\n",
+		   sched_proxy_exec_diag_read(migrate_task));
+	seq_printf(m, "return_migration_current %llu\n",
+		   sched_proxy_exec_diag_read(return_migration_current));
+	seq_printf(m, "mutex_donor_seen %llu\n",
+		   sched_proxy_exec_diag_read(mutex_donor_seen));
+	seq_printf(m, "mutex_donor_selected %llu\n",
+		   sched_proxy_exec_diag_read(mutex_donor_selected));
+	seq_printf(m, "mutex_chain_selected %llu\n",
+		   sched_proxy_exec_diag_read(mutex_chain_selected));
+	seq_printf(m, "mutex_donor_missed %llu\n",
+		   sched_proxy_exec_diag_read(mutex_donor_missed));
+	seq_printf(m, "donated_runtime_events %llu\n",
+		   sched_proxy_exec_diag_read(donated_runtime_events));
+	seq_printf(m, "donated_runtime_ns %llu\n",
+		   sched_proxy_exec_diag_read(donated_runtime_ns));
+	seq_printf(m, "donated_runtime_owner_throttled_ns %llu\n",
+		   sched_proxy_exec_diag_read(donated_runtime_owner_throttled_ns));
+	seq_printf(m, "donated_runtime_owner_hierarchy_throttled_ns %llu\n",
+		   sched_proxy_exec_diag_read(donated_runtime_owner_hierarchy_throttled_ns));
+	return 0;
+}
+
+static int __init sched_proxy_exec_diag_init(void)
+{
+	if (!proc_create_single("sched_proxy_exec_diag", 0444, NULL,
+				sched_proxy_exec_diag_show))
+		return -ENOMEM;
+
+	return 0;
+}
+late_initcall(sched_proxy_exec_diag_init);
+#endif /* CONFIG_PROC_FS */
+
 static bool sched_proxy_exec_task_throttled(struct task_struct *p)
 {
 #if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH)
@@ -144,6 +350,17 @@ static bool sched_proxy_exec_task_throttled(struct task_struct *p)
 static bool sched_proxy_exec_task_hierarchy_throttled(struct task_struct *p)
 {
 	return fair_task_hierarchy_throttled(p, task_cpu(p));
+}
+
+void sched_proxy_exec_note_donated_runtime(struct task_struct *owner, u64 delta_exec)
+{
+	sched_proxy_exec_diag_inc(donated_runtime_events);
+	sched_proxy_exec_diag_add(donated_runtime_ns, delta_exec);
+	if (sched_proxy_exec_task_throttled(owner))
+		sched_proxy_exec_diag_add(donated_runtime_owner_throttled_ns, delta_exec);
+	if (sched_proxy_exec_task_hierarchy_throttled(owner))
+		sched_proxy_exec_diag_add(donated_runtime_owner_hierarchy_throttled_ns,
+					  delta_exec);
 }
 
 int sched_proxy_exec_lock_owner_score(struct task_struct *p)
@@ -176,6 +393,15 @@ int sched_proxy_exec_lock_owner_score(struct task_struct *p)
 	return score;
 }
 
+static void sched_proxy_exec_note_success(struct task_struct *owner)
+{
+	sched_proxy_exec_diag_inc(success);
+	if (sched_proxy_exec_task_throttled(owner))
+		sched_proxy_exec_diag_inc(success_owner_throttled);
+	if (sched_proxy_exec_task_hierarchy_throttled(owner))
+		sched_proxy_exec_diag_inc(success_owner_hierarchy_throttled);
+}
+
 struct task_struct *sched_proxy_exec_current_donor(void)
 {
 	struct task_struct *donor = NULL;
@@ -196,6 +422,25 @@ struct task_struct *sched_proxy_exec_current_donor(void)
 	return donor;
 }
 
+void sched_proxy_exec_note_mutex_donor_seen(void)
+{
+	sched_proxy_exec_diag_inc(mutex_donor_seen);
+}
+
+void sched_proxy_exec_note_mutex_donor_selected(void)
+{
+	sched_proxy_exec_diag_inc(mutex_donor_selected);
+}
+
+void sched_proxy_exec_note_mutex_chain_selected(void)
+{
+	sched_proxy_exec_diag_inc(mutex_chain_selected);
+}
+
+void sched_proxy_exec_note_mutex_donor_missed(void)
+{
+	sched_proxy_exec_diag_inc(mutex_donor_missed);
+}
 static int __init setup_proxy_exec(char *str)
 {
 	bool proxy_enable = true;
@@ -6814,6 +7059,7 @@ static bool proxy_core_cookie_mismatch(struct rq *rq, struct task_struct *donor,
 	if (cookie_match(donor, owner))
 		return false;
 
+	sched_proxy_exec_diag_inc(owner_core_cookie_mismatch);
 	return true;
 #else
 	return false;
@@ -6831,6 +7077,8 @@ static inline struct task_struct *proxy_resched_idle(struct rq *rq)
 static void proxy_deactivate(struct rq *rq, struct task_struct *donor)
 {
 	unsigned long state = READ_ONCE(donor->__state);
+
+	sched_proxy_exec_diag_inc(deactivate);
 
 	WARN_ON_ONCE(state == TASK_RUNNING);
 	WARN_ON_ONCE(donor->blocked_on);
@@ -6895,6 +7143,7 @@ static void proxy_migrate_task(struct rq *rq, struct rq_flags *rf,
 
 	lockdep_assert_rq_held(rq);
 	WARN_ON(p == rq->curr);
+	sched_proxy_exec_diag_inc(migrate_task);
 	/*
 	 * Since we are migrating a blocked donor, it could be rq->donor,
 	 * and we want to make sure there aren't any references from this
@@ -6969,6 +7218,8 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 	int owner_cpu;
 	int chain_depth = 0;
 
+	sched_proxy_exec_diag_inc(attempts);
+
 	/* Follow the blocked chain while is_blocked owns scheduler state. */
 	for (p = donor; p->is_blocked; p = owner) {
 		enum sched_proxy_blocked_on_type type;
@@ -6976,9 +7227,15 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 		bool chain_changed = false;
 		bool ownerless_runnable = false;
 		bool no_proxy_owner = false;
+		bool rwsem_reader_multi = false;
+		bool rwsem_owner_unknown = false;
+		bool percpu_rwsem_owner_unknown = false;
+		bool percpu_rwsem_reader_untracked = false;
 
 		owner_ref = NULL;
+		sched_proxy_exec_diag_inc(chain_steps);
 		if (++chain_depth > SCHED_PROXY_EXEC_MAX_CHAIN_DEPTH) {
+			sched_proxy_exec_diag_inc(chain_too_deep);
 			if (curr_in_chain || task_current(rq, p))
 				return proxy_resched_idle(rq);
 			goto deactivate;
@@ -6990,6 +7247,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 		/* !blocked_on retains is_blocked until return migration completes. */
 		if (!blocked_on) {
 			if (task_current(rq, p)) {
+				sched_proxy_exec_diag_inc(return_migration_current);
 				p->is_blocked = 0;
 				return p;
 			}
@@ -7040,6 +7298,16 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 					owner_ref = owner;
 				ownerless_runnable =
 					rwsem_state == RWSEM_PROXY_OWNER_OWNERLESS;
+				if (rwsem_state == RWSEM_PROXY_OWNER_WRITER)
+					sched_proxy_exec_diag_inc(chain_rwsem_writer);
+				rwsem_reader_multi =
+					rwsem_state == RWSEM_PROXY_OWNER_READER_MULTI;
+				rwsem_owner_unknown =
+					rwsem_state == RWSEM_PROXY_OWNER_UNKNOWN;
+				if (rwsem_state == RWSEM_PROXY_OWNER_READER_SINGLE)
+					sched_proxy_exec_diag_inc(chain_rwsem_reader_single);
+				if (rwsem_state == RWSEM_PROXY_OWNER_READER_REPRESENTATIVE)
+					sched_proxy_exec_diag_inc(rwsem_reader_rep);
 				no_proxy_owner = !owner && !ownerless_runnable;
 				if (!owner && p_current && ownerless_runnable)
 					__clear_task_blocked_on_rwsem(p, sem);
@@ -7061,6 +7329,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 * retry later if the lock is busy.
 			 */
 			if (!spin_trylock(&sem->waiters.lock)) {
+				sched_proxy_exec_diag_inc(chain_lock_busy);
 				/*
 				 * The waiter wake path can hold waiters.lock
 				 * while reaching for rq->lock.  Drop this rq
@@ -7079,8 +7348,16 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 				owner = percpu_rwsem_proxy_owner(sem, &pcpu_state);
 				if (owner)
 					owner_ref = owner;
+				if (pcpu_state == PERCPU_RWSEM_PROXY_OWNER_WRITER)
+					sched_proxy_exec_diag_inc(chain_percpu_rwsem_writer);
+				if (pcpu_state == PERCPU_RWSEM_PROXY_OWNER_READER_REPRESENTATIVE)
+					sched_proxy_exec_diag_inc(percpu_rwsem_reader_rep);
 				ownerless_runnable =
 					pcpu_state == PERCPU_RWSEM_PROXY_OWNER_OWNERLESS;
+				percpu_rwsem_reader_untracked =
+					pcpu_state == PERCPU_RWSEM_PROXY_OWNER_READER_UNTRACKED;
+				percpu_rwsem_owner_unknown =
+					pcpu_state == PERCPU_RWSEM_PROXY_OWNER_UNKNOWN;
 				no_proxy_owner = !owner && !ownerless_runnable;
 				if (!owner && p_current && ownerless_runnable)
 					__clear_task_blocked_on_percpu_rwsem(p, sem);
@@ -7103,6 +7380,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 * owns it.
 			 */
 			if (!raw_spin_trylock(&rtlock->wait_lock)) {
+				sched_proxy_exec_diag_inc(chain_lock_busy);
 				/*
 				 * PI wakeup/priority adjustment can nest toward
 				 * rq->lock.  Let that owner make progress before
@@ -7120,8 +7398,10 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 				if (p_current)
 					curr_in_chain = true;
 				owner = rt_mutex_owner(rtlock);
-				if (owner)
+				if (owner) {
 					owner_ref = get_task_struct(owner);
+					sched_proxy_exec_diag_inc(chain_rtmutex_owner);
+				}
 				if (!owner && p_current)
 					__clear_task_blocked_on_rtmutex(p, rtlock);
 			}
@@ -7130,11 +7410,13 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			raw_spin_unlock(&rtlock->wait_lock);
 			break;
 #else
+			sched_proxy_exec_diag_inc(chain_unknown_type);
 			chain_changed = true;
 			break;
 #endif
 		}
 		default:
+			sched_proxy_exec_diag_inc(chain_unknown_type);
 			chain_changed = true;
 			break;
 		}
@@ -7146,11 +7428,21 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 * just bail out completely and let __schedule()
 			 * figure things out (pick_again loop).
 			 */
+			sched_proxy_exec_diag_inc(chain_changed);
 			proxy_put_task_ref(&owner_ref);
 			return NULL;
 		}
 
 		if (!owner) {
+			sched_proxy_exec_diag_inc(owner_none);
+			if (rwsem_reader_multi)
+				sched_proxy_exec_diag_inc(chain_rwsem_reader_multi);
+			if (rwsem_owner_unknown)
+				sched_proxy_exec_diag_inc(chain_rwsem_owner_unknown);
+			if (percpu_rwsem_owner_unknown)
+				sched_proxy_exec_diag_inc(chain_percpu_rwsem_owner_unknown);
+			if (percpu_rwsem_reader_untracked)
+				sched_proxy_exec_diag_inc(chain_percpu_rwsem_reader_untracked);
 			/*
 			 * If there is no owner, either clear blocked_on
 			 * and return p (if it is current and safe to
@@ -7164,6 +7456,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 		}
 
 		if (owner == donor && p != donor) {
+			sched_proxy_exec_diag_inc(chain_cycle);
 			if (curr_in_chain) {
 				proxy_put_task_ref(&owner_ref);
 				return proxy_resched_idle(rq);
@@ -7185,8 +7478,24 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 * owner in throttled limbo, and running arbitrary off-rq
 			 * owners directly would bypass scheduler ownership rules.
 			 */
+			sched_proxy_exec_diag_inc(owner_not_on_rq);
 			owner_cpu = task_cpu(owner);
+			if (owner_cpu == this_cpu)
+				sched_proxy_exec_diag_inc(owner_not_on_rq_same_cpu);
+			else
+				sched_proxy_exec_diag_inc(owner_not_on_rq_remote_cpu);
+			if (sched_proxy_exec_task_throttled(owner))
+				sched_proxy_exec_diag_inc(owner_not_on_rq_throttled);
+			if (sched_proxy_exec_task_hierarchy_throttled(owner))
+				sched_proxy_exec_diag_inc(owner_not_on_rq_hierarchy_throttled);
+			if (owner_running)
+				sched_proxy_exec_diag_inc(owner_not_on_rq_task_running);
+			else
+				sched_proxy_exec_diag_inc(owner_not_on_rq_task_sleeping);
+			if (READ_ONCE(owner->se.sched_delayed))
+				sched_proxy_exec_diag_inc(owner_not_on_rq_sched_delayed);
 			if (owner_running && owner_cpu != this_cpu && !p_current) {
+				sched_proxy_exec_diag_inc(owner_not_on_rq_remote_migrate);
 				goto migrate_task;
 			}
 			if (curr_in_chain) {
@@ -7203,6 +7512,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 * @owner can disappear, simply migrate to @owner_cpu
 			 * and leave that CPU to sort things out.
 			 */
+			sched_proxy_exec_diag_inc(owner_remote_cpu);
 			if (curr_in_chain) {
 				owner = proxy_resched_idle(rq);
 				proxy_put_task_ref(&owner_ref);
@@ -7220,6 +7530,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 * case we should end up back in find_proxy_task(), this time
 			 * hopefully with all relevant tasks already enqueued.
 			 */
+			sched_proxy_exec_diag_inc(owner_migrating);
 			owner = proxy_resched_idle(rq);
 			proxy_put_task_ref(&owner_ref);
 			return owner;
@@ -7234,13 +7545,21 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 		 * inconsistent results, try again.
 		 */
 		if (!task_on_rq_queued(owner) || task_cpu(owner) != this_cpu) {
+			sched_proxy_exec_diag_inc(chain_changed);
 			proxy_put_task_ref(&owner_ref);
 			return NULL;
 		}
 
+		if (sched_proxy_exec_task_throttled(owner))
+			sched_proxy_exec_diag_inc(owner_on_rq_throttled);
+		if (sched_proxy_exec_task_hierarchy_throttled(owner))
+			sched_proxy_exec_diag_inc(owner_on_rq_hierarchy_throttled);
+
 		if (owner->se.sched_delayed) {
+			sched_proxy_exec_diag_inc(owner_sched_delayed);
 			update_rq_clock(rq);
 			enqueue_task(rq, owner, ENQUEUE_NOCLOCK | ENQUEUE_DELAYED);
+			sched_proxy_exec_diag_inc(owner_sched_delayed_requeued);
 		}
 
 		if (owner == p) {
@@ -7266,6 +7585,7 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 * So schedule rq->idle so that ttwu_runnable() can get the rq
 			 * lock and mark owner as running.
 			 */
+			sched_proxy_exec_diag_inc(owner_self);
 			owner = proxy_resched_idle(rq);
 			proxy_put_task_ref(&owner_ref);
 			return owner;
@@ -7281,6 +7601,8 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 	WARN_ON_ONCE(owner && !owner->on_rq);
 	if (owner && proxy_core_cookie_mismatch(rq, donor, owner))
 		return proxy_resched_idle(rq);
+	if (owner)
+		sched_proxy_exec_note_success(owner);
 	return owner;
 
 deactivate:
