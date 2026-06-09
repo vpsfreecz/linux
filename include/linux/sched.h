@@ -1718,6 +1718,11 @@ static inline bool sched_proxy_exec(void)
 struct task_struct *sched_proxy_exec_current_donor(void);
 struct task_struct *sched_proxy_exec_current_handoff_waiter(void);
 int sched_proxy_exec_lock_owner_score(struct task_struct *p);
+void sched_proxy_exec_note_mutex_donor_seen(void);
+void sched_proxy_exec_note_mutex_donor_selected(void);
+void sched_proxy_exec_note_mutex_chain_selected(void);
+void sched_proxy_exec_note_mutex_donor_missed(void);
+void sched_proxy_exec_note_mutex_donor_ww_skip(void);
 #else
 static inline bool sched_proxy_exec(void)
 {
@@ -1738,6 +1743,12 @@ static inline int sched_proxy_exec_lock_owner_score(struct task_struct *p)
 {
 	return 0;
 }
+
+static inline void sched_proxy_exec_note_mutex_donor_seen(void) { }
+static inline void sched_proxy_exec_note_mutex_donor_selected(void) { }
+static inline void sched_proxy_exec_note_mutex_chain_selected(void) { }
+static inline void sched_proxy_exec_note_mutex_donor_missed(void) { }
+static inline void sched_proxy_exec_note_mutex_donor_ww_skip(void) { }
 #endif
 
 #define TASK_REPORT_IDLE	(TASK_REPORT + 1)
