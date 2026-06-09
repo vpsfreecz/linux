@@ -221,6 +221,7 @@ static struct mutex_waiter *__mutex_proxy_donor_waiter(struct mutex *lock)
 	if (!donor || !handoff_waiter)
 		return NULL;
 
+	sched_proxy_exec_note_mutex_donor_seen();
 	list_for_each_entry(waiter, &lock->wait_list, list) {
 		if (!first_waiter)
 			first_waiter = waiter;
@@ -237,11 +238,18 @@ static struct mutex_waiter *__mutex_proxy_donor_waiter(struct mutex *lock)
 		 * ordering.  A proxy donor may use the existing first waiter,
 		 * but must not jump ahead of another ww-ordered waiter.
 		 */
-		if (has_ww_ctx && donor_waiter != first_waiter)
+		if (has_ww_ctx && donor_waiter != first_waiter) {
+			sched_proxy_exec_note_mutex_donor_ww_skip();
 			return NULL;
+		}
+		if (handoff_waiter == donor)
+			sched_proxy_exec_note_mutex_donor_selected();
+		else
+			sched_proxy_exec_note_mutex_chain_selected();
 		return donor_waiter;
 	}
 
+	sched_proxy_exec_note_mutex_donor_missed();
 	return NULL;
 }
 
