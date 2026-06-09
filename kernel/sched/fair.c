@@ -1255,6 +1255,9 @@ static s64 update_se(struct rq *rq, struct sched_entity *se)
 		account_group_exec_runtime(running, delta_exec);
 
 		if (running != donor) {
+#ifdef CONFIG_SCHED_PROXY_EXEC
+			sched_proxy_exec_note_donated_runtime(running, delta_exec);
+#endif
 			cgroup_account_cputime(running, delta_exec);
 			if (running->sched_class == &fair_sched_class)
 				account_proxy_owner_runtime(rq, running,

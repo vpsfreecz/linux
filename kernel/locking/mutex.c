@@ -986,12 +986,19 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 		if (donor) {
 			struct mutex *next_lock;
 
+			sched_proxy_exec_note_mutex_donor_seen();
 			raw_spin_lock_nested(&donor->blocked_lock, SINGLE_DEPTH_NESTING);
 			next_lock = __get_task_blocked_on(donor);
 			if (next_lock == lock) {
+				if (donor == sched_proxy_exec_current_donor())
+					sched_proxy_exec_note_mutex_donor_selected();
+				else
+					sched_proxy_exec_note_mutex_chain_selected();
 				next = get_task_struct(donor);
 				__clear_task_blocked_on(next, lock);
 				current->blocked_donor = NULL;
+			} else {
+				sched_proxy_exec_note_mutex_donor_missed();
 			}
 			raw_spin_unlock(&donor->blocked_lock);
 		}
