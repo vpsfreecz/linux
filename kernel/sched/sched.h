@@ -2547,6 +2547,10 @@ extern const struct sched_class stop_sched_class;
 extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
 extern const struct sched_class fair_sched_class;
+#ifdef CONFIG_SCHED_PROXY_EXEC
+void sched_proxy_exec_note_donated_runtime(struct task_struct *owner,
+					   u64 delta_exec);
+#endif
 extern const struct sched_class idle_sched_class;
 bool fair_task_hierarchy_throttled(struct task_struct *p, int cpu);
 
