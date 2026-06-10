@@ -198,6 +198,11 @@ static bool vec_is_stale(struct aa_profile **vec, int n)
 	return false;
 }
 
+static bool label_or_vec_is_stale(struct aa_label *label)
+{
+	return label_is_stale(label) || vec_is_stale(label->vec, label->size);
+}
+
 static void accum_label_info(struct aa_label *new)
 {
 	long u = FLAG_UNCONFINED;
@@ -1151,8 +1156,10 @@ static struct aa_label *__label_find_merge(struct aa_labelset *ls,
 			node = node->rb_left;
 		else if (result > 0)
 			node = node->rb_right;
-		else
+		else if (!label_or_vec_is_stale(this))
 			return __aa_get_label(this);
+		else
+			return NULL;
 	}
 
 	return NULL;
@@ -1182,10 +1189,16 @@ struct aa_label *aa_label_find_merge(struct aa_label *a, struct aa_label *b)
 		a = ar = aa_get_newest_label(a);
 	if (label_is_stale(b))
 		b = br = aa_get_newest_label(b);
+	if (vec_is_stale(a->vec, a->size) || vec_is_stale(b->vec, b->size)) {
+		label = NULL;
+		goto out;
+	}
 	ls = labelset_of_merge(a, b);
 	read_lock_irqsave(&ls->lock, flags);
 	label = __label_find_merge(ls, a, b);
 	read_unlock_irqrestore(&ls->lock, flags);
+
+out:
 	aa_put_label(ar);
 	aa_put_label(br);
 
@@ -1216,11 +1229,7 @@ struct aa_label *aa_label_merge(struct aa_label *a, struct aa_label *b,
 	if (a == b)
 		return aa_get_newest_label(a);
 
-	/* TODO: enable when read side is lockless
-	 * check if label exists before taking locks
-	if (!label_is_stale(a) && !label_is_stale(b))
-		label = aa_label_find_merge(a, b);
-	*/
+	label = aa_label_find_merge(a, b);
 
 	if (!label) {
 		struct aa_label *new;
