@@ -908,8 +908,28 @@ config SCHED_PROXY_EXEC
 	# Not particularly useful until we get to multi-rq proxying
 	depends on EXPERT
 	help
-	  This option enables proxy execution, a mechanism for mutex-owning
-	  tasks to inherit the scheduling context of higher priority waiters.
+	  This option enables proxy execution, a mechanism for tasks holding
+	  sleepable owner-bearing locks to inherit the scheduling context of
+	  waiters. Supported blocked relations include mutexes and ww-mutexes,
+	  rwsem waiters blocked by a writer-owned rwsem or by sampled
+	  read-side representatives, percpu-rwsem waiters blocked by a writer
+	  or by sampled read-side representatives, and opportunistically
+	  sampled rtmutex owner chains.
+
+	  Rwsem and percpu-rwsem reader coverage is bounded representative
+	  sampling, not a complete read-owner set. The sampling tracks nested
+	  read acquisitions for represented tasks and replaces older
+	  representatives under slot pressure, so it is intended to expose a
+	  useful runnable owner for shared production bottlenecks without
+	  turning read-mostly locks into globally serialized locks.
+	  Percpu-rwsem and rtmutex owner reads from the scheduler preserve
+	  lock ordering by sampling only when their internal locks are not
+	  already held.
+
+	  Raw spinlocks, non-RT spinlocks, and non-RT rwlocks do not sleep or
+	  expose a scheduler-visible owner chain, so they are not proxy-exec
+	  lock classes. Convert specific process-context bottlenecks to a
+	  sleepable lock before expecting proxy execution to service them.
 
 endmenu
 

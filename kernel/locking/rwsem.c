@@ -206,12 +206,15 @@ bool is_rwsem_reader_owned(struct rw_semaphore *sem)
 		return false;
 	return rwsem_test_oflags(sem, RWSEM_READER_OWNED);
 }
+#endif
 
+#if defined(CONFIG_DEBUG_RWSEMS) || defined(CONFIG_DETECT_HUNG_TASK_BLOCKER) || \
+    defined(CONFIG_SCHED_PROXY_EXEC)
 /*
- * With CONFIG_DEBUG_RWSEMS or CONFIG_DETECT_HUNG_TASK_BLOCKER configured,
- * it will make sure that the owner field of a reader-owned rwsem either
- * points to a real reader-owner(s) or gets cleared. The only exception is
- * when the unlock is done by up_read_non_owner().
+ * With CONFIG_DEBUG_RWSEMS, CONFIG_DETECT_HUNG_TASK_BLOCKER, or proxy
+ * execution configured, make sure that the owner field of a reader-owned rwsem
+ * either points to a real reader-owner(s) or gets cleared. The only exception
+ * is when the unlock is done by up_read_non_owner().
  */
 static inline void rwsem_clear_reader_owned(struct rw_semaphore *sem)
 {
@@ -225,6 +228,331 @@ static inline void rwsem_clear_reader_owned(struct rw_semaphore *sem)
 }
 #else
 static inline void rwsem_clear_reader_owned(struct rw_semaphore *sem)
+{
+}
+#endif
+
+#ifdef CONFIG_SCHED_PROXY_EXEC
+#define RWSEM_PROXY_READERS ARRAY_SIZE(((struct rw_semaphore *)0)->proxy_readers)
+#define RWSEM_PROXY_READER_LOCKED 1UL
+#define RWSEM_PROXY_READER_MASK (~RWSEM_PROXY_READER_LOCKED)
+#define RWSEM_PROXY_READER_TRYLOCK_ATTEMPTS 4
+
+static inline struct task_struct *rwsem_proxy_reader_task(unsigned long value)
+{
+	return (struct task_struct *)(value & RWSEM_PROXY_READER_MASK);
+}
+
+static bool rwsem_proxy_reader_trylock(struct rwsem_proxy_reader_slot *slot,
+				       unsigned long *value)
+{
+	unsigned long old;
+	int attempts;
+
+	for (attempts = 0; attempts < RWSEM_PROXY_READER_TRYLOCK_ATTEMPTS;
+	     attempts++) {
+		old = READ_ONCE(slot->task);
+		if (old & RWSEM_PROXY_READER_LOCKED)
+			return false;
+		if (cmpxchg(&slot->task, old,
+			    old | RWSEM_PROXY_READER_LOCKED) == old) {
+			*value = old;
+			return true;
+		}
+		cpu_relax();
+	}
+
+	return false;
+}
+
+/*
+ * Scheduler owner sampling must fail fast, but read-side maintenance must not
+ * lose acquire/release accounting just because the sampled slot is busy.
+ */
+static void rwsem_proxy_reader_lock(struct rwsem_proxy_reader_slot *slot,
+				    unsigned long *value)
+{
+	while (!rwsem_proxy_reader_trylock(slot, value))
+		cpu_relax();
+}
+
+static bool rwsem_proxy_reader_lock_maybe(struct rwsem_proxy_reader_slot *slot,
+					  unsigned long *value, bool wait)
+{
+	if (!wait)
+		return rwsem_proxy_reader_trylock(slot, value);
+
+	rwsem_proxy_reader_lock(slot, value);
+	return true;
+}
+
+static void rwsem_proxy_reader_unlock(struct rwsem_proxy_reader_slot *slot,
+				      struct task_struct *reader)
+{
+	smp_store_release(&slot->task, (unsigned long)reader);
+}
+
+static struct task_struct *rwsem_proxy_reader_owner(struct rw_semaphore *sem)
+{
+	struct rwsem_proxy_reader_slot *slot;
+	struct task_struct *reader;
+	struct task_struct *best_reader = NULL;
+	unsigned long value;
+	int best_score = -1;
+	int i;
+
+	for (i = 0; i < RWSEM_PROXY_READERS; i++) {
+		int reader_score;
+
+		slot = &sem->proxy_readers[i];
+		value = READ_ONCE(slot->task);
+		if (!rwsem_proxy_reader_task(value))
+			continue;
+		if (!rwsem_proxy_reader_trylock(slot, &value))
+			continue;
+
+		reader = rwsem_proxy_reader_task(value);
+		reader_score = sched_proxy_exec_lock_owner_score(reader);
+		if (reader && reader_score > best_score) {
+			get_task_struct(reader);
+			if (best_reader)
+				put_task_struct(best_reader);
+			best_reader = reader;
+			best_score = reader_score;
+		}
+		rwsem_proxy_reader_unlock(slot, reader);
+	}
+
+	return best_reader;
+}
+
+static bool __rwsem_proxy_reader_track(struct rw_semaphore *sem,
+				       struct task_struct *task,
+				       bool counted, bool wait)
+{
+	unsigned int start;
+	int i;
+
+	if (!sched_proxy_exec())
+		return false;
+
+	for (i = 0; i < RWSEM_PROXY_READERS; i++) {
+		struct rwsem_proxy_reader_slot *slot = &sem->proxy_readers[i];
+		struct task_struct *reader;
+		unsigned long value;
+
+		value = READ_ONCE(slot->task);
+		if (rwsem_proxy_reader_task(value) != task)
+			continue;
+		if (!rwsem_proxy_reader_lock_maybe(slot, &value, wait))
+			return false;
+
+		reader = rwsem_proxy_reader_task(value);
+		if (reader == task) {
+			if (counted)
+				WRITE_ONCE(slot->count,
+					   READ_ONCE(slot->count) + 1);
+			rwsem_proxy_reader_unlock(slot, reader);
+			return true;
+		}
+		rwsem_proxy_reader_unlock(slot, reader);
+	}
+
+	get_task_struct(task);
+	for (i = 0; i < RWSEM_PROXY_READERS; i++) {
+		struct rwsem_proxy_reader_slot *slot = &sem->proxy_readers[i];
+		struct task_struct *reader;
+		unsigned long value;
+
+		value = READ_ONCE(slot->task);
+		if (rwsem_proxy_reader_task(value))
+			continue;
+		if (!rwsem_proxy_reader_lock_maybe(slot, &value, wait))
+			continue;
+
+		reader = rwsem_proxy_reader_task(value);
+		if (!reader) {
+			WRITE_ONCE(slot->count, counted ? 1 : 0);
+			rwsem_proxy_reader_unlock(slot, task);
+			return true;
+		}
+		if (reader == task) {
+			if (counted)
+				WRITE_ONCE(slot->count,
+					   READ_ONCE(slot->count) + 1);
+			rwsem_proxy_reader_unlock(slot, reader);
+			put_task_struct(task);
+			return true;
+		}
+		rwsem_proxy_reader_unlock(slot, reader);
+	}
+
+	start = atomic_inc_return(&sem->proxy_readers_next);
+	{
+		unsigned int victim = start % RWSEM_PROXY_READERS;
+		struct rwsem_proxy_reader_slot *slot =
+			&sem->proxy_readers[victim];
+		struct task_struct *reader;
+		int task_score = sched_proxy_exec_lock_owner_score(task);
+		int victim_score = 0;
+		bool have_victim = false;
+		unsigned long value;
+
+		for (i = 0; i < RWSEM_PROXY_READERS; i++) {
+			unsigned int idx = (start + i) % RWSEM_PROXY_READERS;
+			struct rwsem_proxy_reader_slot *sample_slot =
+				&sem->proxy_readers[idx];
+			struct task_struct *sample;
+			int sample_score;
+
+			if (!rwsem_proxy_reader_lock_maybe(sample_slot, &value,
+							   wait))
+				continue;
+			sample = rwsem_proxy_reader_task(value);
+			if (sample == task) {
+				if (counted)
+					WRITE_ONCE(sample_slot->count,
+						   READ_ONCE(sample_slot->count) + 1);
+				rwsem_proxy_reader_unlock(sample_slot, sample);
+				put_task_struct(task);
+				return true;
+			}
+			sample_score = sched_proxy_exec_lock_owner_score(sample);
+			if (!have_victim || sample_score < victim_score) {
+				victim = idx;
+				victim_score = sample_score;
+				have_victim = true;
+			}
+			rwsem_proxy_reader_unlock(sample_slot, sample);
+			if (!sample || task_score > sample_score)
+				break;
+		}
+
+		slot = &sem->proxy_readers[victim];
+		if (!rwsem_proxy_reader_lock_maybe(slot, &value, wait)) {
+			put_task_struct(task);
+			return false;
+		}
+
+		reader = rwsem_proxy_reader_task(value);
+		if (reader == task) {
+			if (counted)
+				WRITE_ONCE(slot->count,
+					   READ_ONCE(slot->count) + 1);
+			rwsem_proxy_reader_unlock(slot, reader);
+			put_task_struct(task);
+			return true;
+		}
+
+		if (reader &&
+		    task_score < sched_proxy_exec_lock_owner_score(reader)) {
+			rwsem_proxy_reader_unlock(slot, reader);
+			put_task_struct(task);
+			return false;
+		}
+
+		WRITE_ONCE(slot->count, counted ? 1 : 0);
+		rwsem_proxy_reader_unlock(slot, task);
+		if (reader)
+			put_task_struct(reader);
+		return true;
+	}
+
+	put_task_struct(task);
+	return false;
+}
+
+static bool rwsem_proxy_reader_try_acquire(struct rw_semaphore *sem)
+{
+	return __rwsem_proxy_reader_track(sem, current, true, false);
+}
+
+static void rwsem_proxy_reader_acquire(struct rw_semaphore *sem)
+{
+	__rwsem_proxy_reader_track(sem, current, true, true);
+}
+
+static void rwsem_proxy_reader_wake_acquire(struct rw_semaphore *sem,
+					    struct task_struct *reader)
+{
+	__rwsem_proxy_reader_track(sem, reader, false, false);
+}
+
+static bool __rwsem_proxy_reader_release(struct rw_semaphore *sem, bool wait)
+{
+	int i;
+
+	if (!sched_proxy_exec())
+		return true;
+
+	for (i = 0; i < RWSEM_PROXY_READERS; i++) {
+		struct rwsem_proxy_reader_slot *slot = &sem->proxy_readers[i];
+		struct task_struct *reader;
+		unsigned int count;
+		unsigned long value;
+
+		value = READ_ONCE(slot->task);
+		if (rwsem_proxy_reader_task(value) != current)
+			continue;
+		if (!rwsem_proxy_reader_lock_maybe(slot, &value, wait))
+			return false;
+
+		reader = rwsem_proxy_reader_task(value);
+		if (reader != current) {
+			rwsem_proxy_reader_unlock(slot, reader);
+			continue;
+		}
+
+		count = READ_ONCE(slot->count);
+		if (count > 1) {
+			WRITE_ONCE(slot->count, count - 1);
+			rwsem_proxy_reader_unlock(slot, reader);
+		} else {
+			WRITE_ONCE(slot->count, 0);
+			rwsem_proxy_reader_unlock(slot, NULL);
+			put_task_struct(current);
+		}
+		return true;
+	}
+
+	return true;
+}
+
+static bool rwsem_proxy_reader_try_release(struct rw_semaphore *sem)
+{
+	return __rwsem_proxy_reader_release(sem, false);
+}
+
+static void rwsem_proxy_reader_release(struct rw_semaphore *sem)
+{
+	__rwsem_proxy_reader_release(sem, true);
+}
+#else
+static inline struct task_struct *rwsem_proxy_reader_owner(struct rw_semaphore *sem)
+{
+	return NULL;
+}
+
+static inline void rwsem_proxy_reader_acquire(struct rw_semaphore *sem)
+{
+}
+
+static inline bool rwsem_proxy_reader_try_acquire(struct rw_semaphore *sem)
+{
+	return false;
+}
+
+static inline void rwsem_proxy_reader_wake_acquire(struct rw_semaphore *sem,
+						   struct task_struct *reader)
+{
+}
+
+static inline bool rwsem_proxy_reader_try_release(struct rw_semaphore *sem)
+{
+	return true;
+}
+
+static inline void rwsem_proxy_reader_release(struct rw_semaphore *sem)
 {
 }
 #endif
@@ -286,6 +614,63 @@ rwsem_owner_flags(struct rw_semaphore *sem, unsigned long *pflags)
 	return (struct task_struct *)(owner & ~RWSEM_OWNER_FLAGS_MASK);
 }
 
+#ifdef CONFIG_SCHED_PROXY_EXEC
+struct task_struct *rwsem_proxy_owner(struct rw_semaphore *sem,
+				      enum rwsem_proxy_owner_state *state)
+{
+	unsigned long flags;
+	struct task_struct *owner;
+	long count;
+	unsigned long readers;
+
+	lockdep_assert_held(&sem->wait_lock);
+
+	count = atomic_long_read(&sem->count);
+	if (!(count & RWSEM_LOCK_MASK)) {
+		*state = RWSEM_PROXY_OWNER_OWNERLESS;
+		return NULL;
+	}
+	/*
+	 * Writer ownership has a single owner. Reader ownership exposes either
+	 * the exact single sampled reader or a bounded active representative.
+	 */
+	if (!(count & RWSEM_WRITER_LOCKED)) {
+		readers = (count & RWSEM_READER_MASK) >> RWSEM_READER_SHIFT;
+		owner = rwsem_proxy_reader_owner(sem);
+		if (!owner) {
+			*state = readers > 1 ? RWSEM_PROXY_OWNER_READER_MULTI :
+				RWSEM_PROXY_OWNER_UNKNOWN;
+			return NULL;
+		}
+
+		/*
+		 * Reader slots are bounded and ref-held.  With exactly one
+		 * reader, the slot is the single sampled owner; with multiple
+		 * readers, it is a representative owner without tracking every
+		 * read-side critical section.
+		 */
+		*state = readers == 1 ? RWSEM_PROXY_OWNER_READER_SINGLE :
+			RWSEM_PROXY_OWNER_READER_REPRESENTATIVE;
+		return owner;
+	}
+
+	owner = rwsem_owner_flags(sem, &flags);
+	if (!owner) {
+		*state = RWSEM_PROXY_OWNER_UNKNOWN;
+		return NULL;
+	}
+
+	if (flags & RWSEM_READER_OWNED) {
+		*state = RWSEM_PROXY_OWNER_UNKNOWN;
+		return NULL;
+	}
+
+	*state = RWSEM_PROXY_OWNER_WRITER;
+	get_task_struct(owner);
+	return owner;
+}
+#endif
+
 /*
  * Guide to the rw_semaphore's count field.
  *
@@ -309,6 +694,10 @@ rwsem_owner_flags(struct rw_semaphore *sem, unsigned long *pflags)
 void __init_rwsem(struct rw_semaphore *sem, const char *name,
 		  struct lock_class_key *key)
 {
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	int i;
+#endif
+
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	/*
 	 * Make sure we are not reinitializing a held semaphore:
@@ -323,6 +712,13 @@ void __init_rwsem(struct rw_semaphore *sem, const char *name,
 	raw_spin_lock_init(&sem->wait_lock);
 	INIT_LIST_HEAD(&sem->wait_list);
 	atomic_long_set(&sem->owner, 0L);
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	for (i = 0; i < RWSEM_PROXY_READERS; i++) {
+		sem->proxy_readers[i].task = 0;
+		sem->proxy_readers[i].count = 0;
+	}
+	atomic_set(&sem->proxy_readers_next, 0);
+#endif
 #ifdef CONFIG_RWSEM_SPIN_ON_OWNER
 	osq_lock_init(&sem->osq);
 #endif
@@ -432,6 +828,7 @@ static void rwsem_mark_wake(struct rw_semaphore *sem,
 			 * Readers, on the other hand, will block as they
 			 * will notice the queued writer.
 			 */
+			set_task_blocked_on_rwsem_waking(waiter->task, sem);
 			wake_q_add(wake_q, waiter->task);
 			lockevent_inc(rwsem_wake_writer);
 		}
@@ -550,6 +947,8 @@ static void rwsem_mark_wake(struct rw_semaphore *sem,
 
 		tsk = waiter->task;
 		get_task_struct(tsk);
+		rwsem_proxy_reader_wake_acquire(sem, tsk);
+		set_task_blocked_on_rwsem_waking(tsk, sem);
 
 		/*
 		 * Ensure calling get_task_struct() before setting the reader
@@ -1057,6 +1456,11 @@ queue:
 	/* we're now waiting on the lock, but no longer actively locking */
 	count = atomic_long_add_return(adjustment, &sem->count);
 
+	raw_spin_lock(&current->blocked_lock);
+	__set_task_blocked_on_rwsem(current, sem);
+	set_current_state(state);
+	raw_spin_unlock(&current->blocked_lock);
+
 	rwsem_cond_wake_waiter(sem, count, &wake_q);
 	raw_spin_unlock_irq(&sem->wait_lock);
 
@@ -1064,7 +1468,6 @@ queue:
 		wake_up_q(&wake_q);
 
 	trace_contention_begin(sem, LCB_F_READ);
-	set_current_state(state);
 
 	if (state == TASK_UNINTERRUPTIBLE)
 		hung_task_set_blocker(sem, BLOCKER_TYPE_RWSEM_READER);
@@ -1085,12 +1488,16 @@ queue:
 		}
 		schedule_preempt_disabled();
 		lockevent_inc(rwsem_sleep_reader);
+		raw_spin_lock(&current->blocked_lock);
+		__set_task_blocked_on_rwsem(current, sem);
 		set_current_state(state);
+		raw_spin_unlock(&current->blocked_lock);
 	}
 
 	if (state == TASK_UNINTERRUPTIBLE)
 		hung_task_clear_blocker();
 
+	clear_task_blocked_on_rwsem(current, sem);
 	__set_current_state(TASK_RUNNING);
 	lockevent_inc(rwsem_rlock);
 	trace_contention_end(sem, 0);
@@ -1098,6 +1505,7 @@ queue:
 
 out_nolock:
 	rwsem_del_wake_waiter(sem, &waiter, &wake_q);
+	clear_task_blocked_on_rwsem(current, sem);
 	__set_current_state(TASK_RUNNING);
 	lockevent_inc(rwsem_rlock_fail);
 	trace_contention_end(sem, -EINTR);
@@ -1130,6 +1538,10 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 
 	raw_spin_lock_irq(&sem->wait_lock);
 	rwsem_add_waiter(sem, &waiter);
+	raw_spin_lock(&current->blocked_lock);
+	__set_task_blocked_on_rwsem(current, sem);
+	set_current_state(state);
+	raw_spin_unlock(&current->blocked_lock);
 
 	/* we're now waiting on the lock */
 	if (rwsem_first_waiter(sem) != &waiter) {
@@ -1148,19 +1560,19 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 		atomic_long_or(RWSEM_FLAG_WAITERS, &sem->count);
 	}
 
-	/* wait until we successfully acquire the lock */
-	set_current_state(state);
 	trace_contention_begin(sem, LCB_F_WRITE);
 
 	if (state == TASK_UNINTERRUPTIBLE)
 		hung_task_set_blocker(sem, BLOCKER_TYPE_RWSEM_WRITER);
 
+	raw_spin_lock(&current->blocked_lock);
 	for (;;) {
 		if (rwsem_try_write_lock(sem, &waiter)) {
 			/* rwsem_try_write_lock() implies ACQUIRE on success */
 			break;
 		}
 
+		raw_spin_unlock(&current->blocked_lock);
 		raw_spin_unlock_irq(&sem->wait_lock);
 
 		if (signal_pending_state(state, current))
@@ -1184,15 +1596,19 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 
 		schedule_preempt_disabled();
 		lockevent_inc(rwsem_sleep_writer);
-		set_current_state(state);
 trylock_again:
 		raw_spin_lock_irq(&sem->wait_lock);
+		raw_spin_lock(&current->blocked_lock);
+		__set_task_blocked_on_rwsem(current, sem);
+		set_current_state(state);
 	}
 
 	if (state == TASK_UNINTERRUPTIBLE)
 		hung_task_clear_blocker();
 
+	__clear_task_blocked_on_rwsem(current, sem);
 	__set_current_state(TASK_RUNNING);
+	raw_spin_unlock(&current->blocked_lock);
 	raw_spin_unlock_irq(&sem->wait_lock);
 	lockevent_inc(rwsem_wlock);
 	trace_contention_end(sem, 0);
@@ -1202,6 +1618,7 @@ out_nolock:
 	__set_current_state(TASK_RUNNING);
 	raw_spin_lock_irq(&sem->wait_lock);
 	rwsem_del_wake_waiter(sem, &waiter, &wake_q);
+	clear_task_blocked_on_rwsem(current, sem);
 	lockevent_inc(rwsem_wlock_fail);
 	trace_contention_end(sem, -EINTR);
 	return ERR_PTR(-EINTR);
@@ -1253,6 +1670,7 @@ static struct rw_semaphore *rwsem_downgrade_wake(struct rw_semaphore *sem)
  */
 static __always_inline int __down_read_common(struct rw_semaphore *sem, int state)
 {
+	bool proxy_reader = false;
 	int ret = 0;
 	long count;
 
@@ -1265,7 +1683,11 @@ static __always_inline int __down_read_common(struct rw_semaphore *sem, int stat
 		DEBUG_RWSEMS_WARN_ON(!is_rwsem_reader_owned(sem), sem);
 	}
 out:
+	if (!ret)
+		proxy_reader = rwsem_proxy_reader_try_acquire(sem);
 	preempt_enable();
+	if (!ret && !proxy_reader)
+		rwsem_proxy_reader_acquire(sem);
 	return ret;
 }
 
@@ -1301,6 +1723,8 @@ static inline int __down_read_trylock(struct rw_semaphore *sem)
 			break;
 		}
 	}
+	if (ret)
+		rwsem_proxy_reader_try_acquire(sem);
 	preempt_enable();
 	return ret;
 }
@@ -1348,6 +1772,7 @@ static inline int __down_write_trylock(struct rw_semaphore *sem)
  */
 static inline void __up_read(struct rw_semaphore *sem)
 {
+	bool proxy_reader;
 	long tmp;
 
 	DEBUG_RWSEMS_WARN_ON(sem->magic != sem, sem);
@@ -1355,6 +1780,7 @@ static inline void __up_read(struct rw_semaphore *sem)
 
 	preempt_disable();
 	rwsem_clear_reader_owned(sem);
+	proxy_reader = rwsem_proxy_reader_try_release(sem);
 	tmp = atomic_long_add_return_release(-RWSEM_READER_BIAS, &sem->count);
 	DEBUG_RWSEMS_WARN_ON(tmp < 0, sem);
 	if (unlikely((tmp & (RWSEM_LOCK_MASK|RWSEM_FLAG_WAITERS)) ==
@@ -1363,6 +1789,8 @@ static inline void __up_read(struct rw_semaphore *sem)
 		rwsem_wake(sem);
 	}
 	preempt_enable();
+	if (!proxy_reader)
+		rwsem_proxy_reader_release(sem);
 }
 
 /*
@@ -1393,6 +1821,7 @@ static inline void __up_write(struct rw_semaphore *sem)
  */
 static inline void __downgrade_write(struct rw_semaphore *sem)
 {
+	bool proxy_reader;
 	long tmp;
 
 	/*
@@ -1407,9 +1836,12 @@ static inline void __downgrade_write(struct rw_semaphore *sem)
 	tmp = atomic_long_fetch_add_release(
 		-RWSEM_WRITER_LOCKED+RWSEM_READER_BIAS, &sem->count);
 	rwsem_set_reader_owned(sem);
+	proxy_reader = rwsem_proxy_reader_try_acquire(sem);
 	if (tmp & RWSEM_FLAG_WAITERS)
 		rwsem_downgrade_wake(sem);
 	preempt_enable();
+	if (!proxy_reader)
+		rwsem_proxy_reader_acquire(sem);
 }
 
 #else /* !CONFIG_PREEMPT_RT */
@@ -1690,6 +2122,9 @@ void down_read_non_owner(struct rw_semaphore *sem)
 {
 	might_sleep();
 	__down_read(sem);
+#ifndef CONFIG_PREEMPT_RT
+	rwsem_proxy_reader_release(sem);
+#endif
 	/*
 	 * The owner value for a reader-owned lock is mostly for debugging
 	 * purpose only and is not critical to the correct functioning of
