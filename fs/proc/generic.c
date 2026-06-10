@@ -24,6 +24,7 @@
 #include <linux/idr.h>
 #include <linux/bitops.h>
 #include <linux/spinlock.h>
+#include <linux/rwsem.h>
 #include <linux/completion.h>
 #include <linux/uaccess.h>
 #include <linux/seq_file.h>
@@ -31,7 +32,7 @@
 
 #include "internal.h"
 
-static DEFINE_RWLOCK(proc_subdir_lock);
+static DECLARE_RWSEM(proc_subdir_lock);
 
 struct kmem_cache *proc_dir_entry_cache __ro_after_init;
 
@@ -313,9 +314,9 @@ static int xlate_proc_name(const char *name, struct proc_dir_entry **ret,
 {
 	int rv;
 
-	read_lock(&proc_subdir_lock);
+	down_read(&proc_subdir_lock);
 	rv = __xlate_proc_name(name, ret, residual);
-	read_unlock(&proc_subdir_lock);
+	up_read(&proc_subdir_lock);
 	return rv;
 }
 
@@ -378,15 +379,15 @@ struct dentry *proc_lookup_de(struct inode *dir, struct dentry *dentry,
 {
 	struct inode *inode;
 
-	read_lock(&proc_subdir_lock);
+	down_read(&proc_subdir_lock);
 	de = pde_subdir_find(de, dentry->d_name.name, dentry->d_name.len);
 	if (de) {
 		if (vpsa_proc_pde_decide(de, MAY_READ) == VPSA_KERNFS_FILTER_DECISION_HIDE) {
-			read_unlock(&proc_subdir_lock);
+			up_read(&proc_subdir_lock);
 			return ERR_PTR(-ENOENT);
 		}
 		pde_get(de);
-		read_unlock(&proc_subdir_lock);
+		up_read(&proc_subdir_lock);
 		inode = proc_get_inode(dir->i_sb, de);
 		if (!inode)
 			return ERR_PTR(-ENOMEM);
@@ -399,7 +400,7 @@ struct dentry *proc_lookup_de(struct inode *dir, struct dentry *dentry,
 					      &proc_misc_dentry_ops),
 				dentry);
 	}
-	read_unlock(&proc_subdir_lock);
+	up_read(&proc_subdir_lock);
 	return ERR_PTR(-ENOENT);
 }
 
@@ -433,11 +434,11 @@ int proc_readdir_de(struct file *file, struct dir_context *ctx,
 		return 0;
 
 	i = ctx->pos - 2;
-	read_lock(&proc_subdir_lock);
+	down_read(&proc_subdir_lock);
 	de = pde_subdir_first(de);
 	for (;;) {
 		if (!de) {
-			read_unlock(&proc_subdir_lock);
+			up_read(&proc_subdir_lock);
 			return 0;
 		}
 		if (!i)
@@ -452,11 +453,11 @@ int proc_readdir_de(struct file *file, struct dir_context *ctx,
 
 		decision = vpsa_proc_pde_decide_view(de, MAY_READ, view);
 		pde_get(de);
-		read_unlock(&proc_subdir_lock);
+		up_read(&proc_subdir_lock);
 
 		if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE) {
 			ctx->pos++;
-			read_lock(&proc_subdir_lock);
+			down_read(&proc_subdir_lock);
 			next = pde_subdir_next(de);
 			pde_put(de);
 			de = next;
@@ -469,12 +470,12 @@ int proc_readdir_de(struct file *file, struct dir_context *ctx,
 			return 0;
 		}
 		ctx->pos++;
-		read_lock(&proc_subdir_lock);
+		down_read(&proc_subdir_lock);
 		next = pde_subdir_next(de);
 		pde_put(de);
 		de = next;
 	} while (de);
-	read_unlock(&proc_subdir_lock);
+	up_read(&proc_subdir_lock);
 	return 1;
 }
 
@@ -552,16 +553,16 @@ struct proc_dir_entry *proc_register(struct proc_dir_entry *dir,
 	if (!S_ISDIR(dp->mode))
 		pde_set_flags(dp);
 
-	write_lock(&proc_subdir_lock);
+	down_write(&proc_subdir_lock);
 	dp->parent = dir;
 	if (pde_subdir_insert(dir, dp) == false) {
 		WARN(1, "proc_dir_entry '%s/%s' already registered\n",
 		     dir->name, dp->name);
-		write_unlock(&proc_subdir_lock);
+		up_write(&proc_subdir_lock);
 		goto out_free_inum;
 	}
 	dir->nlink++;
-	write_unlock(&proc_subdir_lock);
+	up_write(&proc_subdir_lock);
 
 	return dp;
 out_free_inum:
@@ -869,9 +870,9 @@ void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 	const char *fn = name;
 	unsigned int len;
 
-	write_lock(&proc_subdir_lock);
+	down_write(&proc_subdir_lock);
 	if (__xlate_proc_name(name, &parent, &fn) != 0) {
-		write_unlock(&proc_subdir_lock);
+		up_write(&proc_subdir_lock);
 		return;
 	}
 	len = strlen(fn);
@@ -887,7 +888,7 @@ void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 				parent->nlink--;
 		}
 	}
-	write_unlock(&proc_subdir_lock);
+	up_write(&proc_subdir_lock);
 	if (!de) {
 		WARN(1, "name '%s'\n", name);
 		return;
@@ -908,20 +909,20 @@ int remove_proc_subtree(const char *name, struct proc_dir_entry *parent)
 	const char *fn = name;
 	unsigned int len;
 
-	write_lock(&proc_subdir_lock);
+	down_write(&proc_subdir_lock);
 	if (__xlate_proc_name(name, &parent, &fn) != 0) {
-		write_unlock(&proc_subdir_lock);
+		up_write(&proc_subdir_lock);
 		return -ENOENT;
 	}
 	len = strlen(fn);
 
 	root = pde_subdir_find(parent, fn, len);
 	if (!root) {
-		write_unlock(&proc_subdir_lock);
+		up_write(&proc_subdir_lock);
 		return -ENOENT;
 	}
 	if (unlikely(pde_is_permanent(root))) {
-		write_unlock(&proc_subdir_lock);
+		up_write(&proc_subdir_lock);
 		WARN(1, "removing permanent /proc entry '%s/%s'",
 			root->parent->name, root->name);
 		return -EINVAL;
@@ -933,7 +934,7 @@ int remove_proc_subtree(const char *name, struct proc_dir_entry *parent)
 		next = pde_subdir_first(de);
 		if (next) {
 			if (unlikely(pde_is_permanent(next))) {
-				write_unlock(&proc_subdir_lock);
+				up_write(&proc_subdir_lock);
 				WARN(1, "removing permanent /proc entry '%s/%s'",
 					next->parent->name, next->name);
 				return -EINVAL;
@@ -945,14 +946,14 @@ int remove_proc_subtree(const char *name, struct proc_dir_entry *parent)
 		next = de->parent;
 		if (S_ISDIR(de->mode))
 			next->nlink--;
-		write_unlock(&proc_subdir_lock);
+		up_write(&proc_subdir_lock);
 
 		proc_entry_rundown(de);
 		if (de == root)
 			break;
 		pde_put(de);
 
-		write_lock(&proc_subdir_lock);
+		down_write(&proc_subdir_lock);
 		de = next;
 	}
 	pde_put(root);
