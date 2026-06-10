@@ -27,6 +27,19 @@
 # define __RWSEM_DEP_MAP_INIT(lockname)
 #endif
 
+#ifdef CONFIG_SCHED_PROXY_EXEC
+struct rwsem_proxy_reader_slot {
+	unsigned long task;
+	unsigned int count;
+};
+
+# define __RWSEM_PROXY_INIT					\
+	.proxy_readers = { { 0, 0 } },				\
+	.proxy_readers_next = ATOMIC_INIT(0),
+#else
+# define __RWSEM_PROXY_INIT
+#endif
+
 #ifndef CONFIG_PREEMPT_RT
 
 #ifdef CONFIG_RWSEM_SPIN_ON_OWNER
@@ -58,6 +71,10 @@ struct rw_semaphore {
 #endif
 	raw_spinlock_t wait_lock;
 	struct list_head wait_list;
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	struct rwsem_proxy_reader_slot proxy_readers[4];
+	atomic_t proxy_readers_next;
+#endif
 #ifdef CONFIG_DEBUG_RWSEMS
 	void *magic;
 #endif
@@ -105,6 +122,7 @@ static inline void rwsem_assert_held_write_nolockdep(const struct rw_semaphore *
 	  __RWSEM_OPT_INIT(name)				\
 	  .wait_lock = __RAW_SPIN_LOCK_UNLOCKED(name.wait_lock),\
 	  .wait_list = LIST_HEAD_INIT((name).wait_list),	\
+	  __RWSEM_PROXY_INIT					\
 	  __RWSEM_DEBUG_INIT(name)				\
 	  __RWSEM_DEP_MAP_INIT(name) }
 
@@ -142,6 +160,24 @@ extern struct task_struct *rwsem_owner(struct rw_semaphore *sem);
  * Return true if the rwsem is owned by a reader.
  */
 extern bool is_rwsem_reader_owned(struct rw_semaphore *sem);
+#endif
+
+#ifdef CONFIG_SCHED_PROXY_EXEC
+enum rwsem_proxy_owner_state {
+	RWSEM_PROXY_OWNER_WRITER,
+	RWSEM_PROXY_OWNER_READER_SINGLE,
+	RWSEM_PROXY_OWNER_READER_REPRESENTATIVE,
+	RWSEM_PROXY_OWNER_OWNERLESS,
+	RWSEM_PROXY_OWNER_READER_MULTI,
+	RWSEM_PROXY_OWNER_UNKNOWN,
+};
+
+/*
+ * Returns a refcounted task when an owner is found. The caller must drop it
+ * with put_task_struct().
+ */
+extern struct task_struct *rwsem_proxy_owner(struct rw_semaphore *sem,
+					     enum rwsem_proxy_owner_state *state);
 #endif
 
 #else /* !CONFIG_PREEMPT_RT */

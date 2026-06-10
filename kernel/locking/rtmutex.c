@@ -1174,6 +1174,9 @@ try_to_take_rt_mutex(struct rt_mutex_base *lock, struct task_struct *task,
 	 */
 	raw_spin_lock(&task->pi_lock);
 	task->pi_blocked_on = NULL;
+	raw_spin_lock(&task->blocked_lock);
+	__clear_task_blocked_on_rtmutex(task, lock);
+	raw_spin_unlock(&task->blocked_lock);
 	/*
 	 * Finish the lock acquisition. @task is the new owner. If
 	 * other waiters exist we have to insert the highest priority
@@ -1241,6 +1244,9 @@ static int __sched task_blocks_on_rt_mutex(struct rt_mutex_base *lock,
 	rt_mutex_enqueue(lock, waiter);
 
 	task->pi_blocked_on = waiter;
+	raw_spin_lock(&task->blocked_lock);
+	__set_task_blocked_on_rtmutex(task, lock);
+	raw_spin_unlock(&task->blocked_lock);
 
 	raw_spin_unlock(&task->pi_lock);
 
@@ -1254,6 +1260,9 @@ static int __sched task_blocks_on_rt_mutex(struct rt_mutex_base *lock,
 			raw_spin_lock(&task->pi_lock);
 			rt_mutex_dequeue(lock, waiter);
 			task->pi_blocked_on = NULL;
+			raw_spin_lock(&task->blocked_lock);
+			__clear_task_blocked_on_rtmutex(task, lock);
+			raw_spin_unlock(&task->blocked_lock);
 			raw_spin_unlock(&task->pi_lock);
 			return res;
 		}
@@ -1351,6 +1360,7 @@ static void __sched mark_wakeup_next_waiter(struct rt_wake_q_head *wqh,
 	 * Pairs with preempt_enable() in rt_mutex_wake_up_q();
 	 */
 	preempt_disable();
+	set_task_blocked_on_rtmutex_waking(waiter->task, lock);
 	rt_mutex_wake_q_add(wqh, waiter);
 	raw_spin_unlock(&current->pi_lock);
 }
@@ -1548,6 +1558,9 @@ static void __sched remove_waiter(struct rt_mutex_base *lock,
 	raw_spin_lock(&current->pi_lock);
 	rt_mutex_dequeue(lock, waiter);
 	current->pi_blocked_on = NULL;
+	raw_spin_lock(&current->blocked_lock);
+	__clear_task_blocked_on_rtmutex(current, lock);
+	raw_spin_unlock(&current->blocked_lock);
 	raw_spin_unlock(&current->pi_lock);
 
 	/*
@@ -1648,7 +1661,10 @@ static int __sched rt_mutex_slowlock_block(struct rt_mutex_base *lock,
 		}
 
 		raw_spin_lock_irq(&lock->wait_lock);
+		raw_spin_lock(&current->blocked_lock);
+		__set_task_blocked_on_rtmutex(current, lock);
 		set_current_state(state);
+		raw_spin_unlock(&current->blocked_lock);
 	}
 
 	__set_current_state(TASK_RUNNING);

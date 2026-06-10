@@ -1170,6 +1170,7 @@ struct rq {
 #ifdef CONFIG_SCHED_PROXY_EXEC
 	struct task_struct __rcu	*donor;  /* Scheduling context */
 	struct task_struct __rcu	*curr;   /* Execution context */
+	struct task_struct	*proxy_exec_handoff_waiter;
 #else
 	union {
 		struct task_struct __rcu *donor; /* Scheduler context */
@@ -1360,6 +1361,7 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 static inline void rq_set_donor(struct rq *rq, struct task_struct *t)
 {
 	rcu_assign_pointer(rq->donor, t);
+	WRITE_ONCE(rq->proxy_exec_handoff_waiter, NULL);
 }
 #else
 static inline void rq_set_donor(struct rq *rq, struct task_struct *t)
@@ -1780,6 +1782,13 @@ static inline void scx_rq_clock_update(struct rq *rq, u64 clock) {}
 static inline void scx_rq_clock_invalidate(struct rq *rq) {}
 #endif /* !CONFIG_SCHED_CLASS_EXT */
 
+static inline void assert_balance_callbacks_empty(struct rq *rq)
+{
+	WARN_ON_ONCE(IS_ENABLED(CONFIG_PROVE_LOCKING) &&
+		     rq->balance_callback &&
+		     rq->balance_callback != &balance_push_callback);
+}
+
 /*
  * Lockdep annotation that avoids accidental unlocks; it's like a
  * sticky/continuous lockdep_assert_held().
@@ -1796,7 +1805,7 @@ static inline void rq_pin_lock(struct rq *rq, struct rq_flags *rf)
 
 	rq->clock_update_flags &= (RQCF_REQ_SKIP|RQCF_ACT_SKIP);
 	rf->clock_update_flags = 0;
-	WARN_ON_ONCE(rq->balance_callback && rq->balance_callback != &balance_push_callback);
+	assert_balance_callbacks_empty(rq);
 }
 
 static inline void rq_unpin_lock(struct rq *rq, struct rq_flags *rf)
@@ -2292,7 +2301,7 @@ static inline bool task_is_blocked(struct task_struct *p)
 	if (!sched_proxy_exec())
 		return false;
 
-	return !!p->blocked_on;
+	return !!READ_ONCE(p->blocked_on);
 }
 
 static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
@@ -2527,6 +2536,11 @@ extern const struct sched_class stop_sched_class;
 extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
 extern const struct sched_class fair_sched_class;
+extern bool fair_task_hierarchy_throttled(struct task_struct *p, int cpu);
+#ifdef CONFIG_SCHED_PROXY_EXEC
+extern void sched_proxy_exec_note_donated_runtime(struct task_struct *owner,
+						  u64 delta_exec);
+#endif
 extern const struct sched_class idle_sched_class;
 
 /*
@@ -2802,6 +2816,29 @@ extern void activate_task(struct rq *rq, struct task_struct *p, int flags);
 extern void deactivate_task(struct rq *rq, struct task_struct *p, int flags);
 
 extern void wakeup_preempt(struct rq *rq, struct task_struct *p, int flags);
+
+/*
+ * attach_task() -- attach the task detached by detach_task() to its new rq.
+ */
+static inline void attach_task(struct rq *rq, struct task_struct *p)
+{
+	lockdep_assert_rq_held(rq);
+
+	WARN_ON_ONCE(task_rq(p) != rq);
+	activate_task(rq, p, ENQUEUE_NOCLOCK);
+	wakeup_preempt(rq, p, 0);
+}
+
+/*
+ * attach_one_task() -- attaches the task returned from detach_one_task() to
+ * its new rq.
+ */
+static inline void attach_one_task(struct rq *rq, struct task_struct *p)
+{
+	guard(rq_lock)(rq);
+	update_rq_clock(rq);
+	attach_task(rq, p);
+}
 
 #ifdef CONFIG_PREEMPT_RT
 # define SCHED_NR_MIGRATE_BREAK 8
@@ -3839,6 +3876,7 @@ static inline
 bool task_is_pushable(struct rq *rq, struct task_struct *p, int cpu)
 {
 	if (!task_on_cpu(rq, p) &&
+	    !task_current_donor(rq, p) &&
 	    cpumask_test_cpu(cpu, &p->cpus_mask))
 		return true;
 

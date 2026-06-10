@@ -57,10 +57,14 @@
 #include <linux/nmi.h>
 #include <linux/nospec.h>
 #include <linux/perf_event_api.h>
+#include <linux/percpu-rwsem.h>
 #include <linux/profile.h>
+#include <linux/proc_fs.h>
 #include <linux/psi.h>
 #include <linux/rcuwait_api.h>
 #include <linux/rseq.h>
+#include <linux/rtmutex.h>
+#include <linux/rwsem.h>
 #include <linux/sched/wake_q.h>
 #include <linux/scs.h>
 #include <linux/slab.h>
@@ -71,6 +75,7 @@
 #include <linux/user_namespace.h>
 #include <linux/vpsadminos.h>
 #include <linux/livepatch_sched.h>
+#include <linux/seq_file.h>
 
 #ifdef CONFIG_PREEMPT_DYNAMIC
 # ifdef CONFIG_GENERIC_IRQ_ENTRY
@@ -126,6 +131,317 @@ DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
 #ifdef CONFIG_SCHED_PROXY_EXEC
 DEFINE_STATIC_KEY_TRUE(__sched_proxy_exec);
+
+static atomic64_t sched_proxy_exec_diag_attempts;
+static atomic64_t sched_proxy_exec_diag_chain_steps;
+static atomic64_t sched_proxy_exec_diag_chain_changed;
+static atomic64_t sched_proxy_exec_diag_chain_cycle;
+static atomic64_t sched_proxy_exec_diag_chain_too_deep;
+static atomic64_t sched_proxy_exec_diag_chain_lock_busy;
+static atomic64_t sched_proxy_exec_diag_chain_unknown_type;
+static atomic64_t sched_proxy_exec_diag_chain_rwsem_writer;
+static atomic64_t sched_proxy_exec_diag_chain_rwsem_reader_single;
+static atomic64_t sched_proxy_exec_diag_chain_rwsem_reader_representative;
+static atomic64_t sched_proxy_exec_diag_chain_rwsem_reader_multi;
+static atomic64_t sched_proxy_exec_diag_chain_rwsem_owner_unknown;
+static atomic64_t sched_proxy_exec_diag_chain_percpu_rwsem_writer;
+static atomic64_t sched_proxy_exec_diag_chain_percpu_rwsem_reader_representative;
+static atomic64_t sched_proxy_exec_diag_chain_percpu_rwsem_reader_untracked;
+static atomic64_t sched_proxy_exec_diag_chain_percpu_rwsem_owner_unknown;
+static atomic64_t sched_proxy_exec_diag_chain_rtmutex_owner;
+static atomic64_t sched_proxy_exec_diag_owner_none;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq_throttled;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq_hierarchy_throttled;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq_same_cpu;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq_remote_cpu;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq_remote_migrate;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq_task_running;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq_task_sleeping;
+static atomic64_t sched_proxy_exec_diag_owner_not_on_rq_sched_delayed;
+static atomic64_t sched_proxy_exec_diag_owner_on_rq_throttled;
+static atomic64_t sched_proxy_exec_diag_owner_on_rq_hierarchy_throttled;
+static atomic64_t sched_proxy_exec_diag_owner_sched_delayed;
+static atomic64_t sched_proxy_exec_diag_owner_sched_delayed_requeued;
+static atomic64_t sched_proxy_exec_diag_owner_remote_cpu;
+static atomic64_t sched_proxy_exec_diag_owner_migrating;
+static atomic64_t sched_proxy_exec_diag_owner_self;
+static atomic64_t sched_proxy_exec_diag_owner_core_cookie_mismatch;
+static atomic64_t sched_proxy_exec_diag_success;
+static atomic64_t sched_proxy_exec_diag_success_owner_throttled;
+static atomic64_t sched_proxy_exec_diag_success_owner_hierarchy_throttled;
+static atomic64_t sched_proxy_exec_diag_deactivate;
+static atomic64_t sched_proxy_exec_diag_deactivate_failed_clear;
+static atomic64_t sched_proxy_exec_diag_migrate_task;
+static atomic64_t sched_proxy_exec_diag_force_return;
+static atomic64_t sched_proxy_exec_diag_proxy_waking_current;
+static atomic64_t sched_proxy_exec_diag_mutex_donor_seen;
+static atomic64_t sched_proxy_exec_diag_mutex_donor_selected;
+static atomic64_t sched_proxy_exec_diag_mutex_chain_selected;
+static atomic64_t sched_proxy_exec_diag_mutex_donor_missed;
+static atomic64_t sched_proxy_exec_diag_mutex_donor_ww_skip;
+static atomic64_t sched_proxy_exec_diag_donated_runtime_events;
+static atomic64_t sched_proxy_exec_diag_donated_runtime_ns;
+static atomic64_t sched_proxy_exec_diag_donated_runtime_owner_throttled_ns;
+static atomic64_t sched_proxy_exec_diag_donated_runtime_owner_hierarchy_throttled_ns;
+
+static int sched_proxy_exec_diag_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "enabled %d\n", sched_proxy_exec() ? 1 : 0);
+	seq_printf(m, "attempts %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_attempts));
+	seq_printf(m, "chain_steps %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_steps));
+	seq_printf(m, "chain_changed %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_changed));
+	seq_printf(m, "chain_cycle %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_cycle));
+	seq_printf(m, "chain_too_deep %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_too_deep));
+	seq_printf(m, "chain_lock_busy %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_lock_busy));
+	seq_printf(m, "chain_unknown_type %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_unknown_type));
+	seq_printf(m, "chain_rwsem_writer %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_rwsem_writer));
+	seq_printf(m, "chain_rwsem_reader_single %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_rwsem_reader_single));
+	seq_printf(m, "chain_rwsem_reader_representative %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_rwsem_reader_representative));
+	seq_printf(m, "chain_rwsem_reader_multi %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_rwsem_reader_multi));
+	seq_printf(m, "chain_rwsem_owner_unknown %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_rwsem_owner_unknown));
+	seq_printf(m, "chain_percpu_rwsem_writer %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_percpu_rwsem_writer));
+	seq_printf(m, "chain_percpu_rwsem_reader_representative %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_percpu_rwsem_reader_representative));
+	seq_printf(m, "chain_percpu_rwsem_reader_untracked %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_percpu_rwsem_reader_untracked));
+	seq_printf(m, "chain_percpu_rwsem_owner_unknown %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_percpu_rwsem_owner_unknown));
+	seq_printf(m, "chain_rtmutex_owner %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_chain_rtmutex_owner));
+	seq_printf(m, "owner_none %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_none));
+	seq_printf(m, "owner_not_on_rq %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq));
+	seq_printf(m, "owner_not_on_rq_throttled %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq_throttled));
+	seq_printf(m, "owner_not_on_rq_hierarchy_throttled %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq_hierarchy_throttled));
+	seq_printf(m, "owner_not_on_rq_same_cpu %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq_same_cpu));
+	seq_printf(m, "owner_not_on_rq_remote_cpu %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq_remote_cpu));
+	seq_printf(m, "owner_not_on_rq_remote_migrate %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq_remote_migrate));
+	seq_printf(m, "owner_not_on_rq_task_running %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq_task_running));
+	seq_printf(m, "owner_not_on_rq_task_sleeping %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq_task_sleeping));
+	seq_printf(m, "owner_not_on_rq_sched_delayed %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_not_on_rq_sched_delayed));
+	seq_printf(m, "owner_on_rq_throttled %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_on_rq_throttled));
+	seq_printf(m, "owner_on_rq_hierarchy_throttled %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_on_rq_hierarchy_throttled));
+	seq_printf(m, "owner_sched_delayed %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_sched_delayed));
+	seq_printf(m, "owner_sched_delayed_requeued %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_sched_delayed_requeued));
+	seq_printf(m, "owner_remote_cpu %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_remote_cpu));
+	seq_printf(m, "owner_migrating %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_migrating));
+	seq_printf(m, "owner_self %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_self));
+	seq_printf(m, "owner_core_cookie_mismatch %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_owner_core_cookie_mismatch));
+	seq_printf(m, "success %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_success));
+	seq_printf(m, "success_owner_throttled %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_success_owner_throttled));
+	seq_printf(m, "success_owner_hierarchy_throttled %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_success_owner_hierarchy_throttled));
+	seq_printf(m, "deactivate %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_deactivate));
+	seq_printf(m, "deactivate_failed_clear %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_deactivate_failed_clear));
+	seq_printf(m, "migrate_task %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_migrate_task));
+	seq_printf(m, "force_return %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_force_return));
+	seq_printf(m, "proxy_waking_current %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_proxy_waking_current));
+	seq_printf(m, "mutex_donor_seen %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_mutex_donor_seen));
+	seq_printf(m, "mutex_donor_selected %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_mutex_donor_selected));
+	seq_printf(m, "mutex_chain_selected %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_mutex_chain_selected));
+	seq_printf(m, "mutex_donor_missed %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_mutex_donor_missed));
+	seq_printf(m, "mutex_donor_ww_skip %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_mutex_donor_ww_skip));
+	seq_printf(m, "donated_runtime_events %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_donated_runtime_events));
+	seq_printf(m, "donated_runtime_ns %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_donated_runtime_ns));
+	seq_printf(m, "donated_runtime_owner_throttled_ns %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_donated_runtime_owner_throttled_ns));
+	seq_printf(m, "donated_runtime_owner_hierarchy_throttled_ns %lld\n",
+		   atomic64_read(&sched_proxy_exec_diag_donated_runtime_owner_hierarchy_throttled_ns));
+	return 0;
+}
+
+static int __init sched_proxy_exec_diag_init(void)
+{
+	proc_create_single("sched_proxy_exec_diag", 0444, NULL,
+			   sched_proxy_exec_diag_show);
+	return 0;
+}
+late_initcall(sched_proxy_exec_diag_init);
+
+static bool sched_proxy_exec_task_throttled(struct task_struct *p)
+{
+#if defined(CONFIG_CGROUP_SCHED) && defined(CONFIG_CFS_BANDWIDTH)
+	return READ_ONCE(p->throttled);
+#else
+	return false;
+#endif
+}
+
+static bool sched_proxy_exec_task_hierarchy_throttled(struct task_struct *p)
+{
+	return fair_task_hierarchy_throttled(p, task_cpu(p));
+}
+
+void sched_proxy_exec_note_donated_runtime(struct task_struct *owner, u64 delta_exec)
+{
+	atomic64_inc(&sched_proxy_exec_diag_donated_runtime_events);
+	atomic64_add(delta_exec, &sched_proxy_exec_diag_donated_runtime_ns);
+	if (sched_proxy_exec_task_throttled(owner))
+		atomic64_add(delta_exec,
+			     &sched_proxy_exec_diag_donated_runtime_owner_throttled_ns);
+	if (sched_proxy_exec_task_hierarchy_throttled(owner))
+		atomic64_add(delta_exec,
+			     &sched_proxy_exec_diag_donated_runtime_owner_hierarchy_throttled_ns);
+}
+
+int sched_proxy_exec_lock_owner_score(struct task_struct *p)
+{
+	int score = 0;
+
+	if (!p)
+		return 0;
+
+	/*
+	 * Bounded reader representatives are useful only when the sampled task can
+	 * make forward progress directly, or when it exposes another proxy-visible
+	 * owner through blocked_on.  A sleeping, non-proxy-blocked reader may still
+	 * hold a read lock, but donating CPU to it cannot release the lock; prefer
+	 * any runnable/proxy-blocked representative instead of getting stuck on a
+	 * stale or temporarily unschedulable sample.
+	 */
+	if (READ_ONCE(p->__state) == TASK_RUNNING)
+		score += 16;
+	else if (task_is_blocked(p))
+		score += 12;
+	else
+		return -1;
+
+#if defined(CONFIG_CGROUP_SCHED)
+	if (READ_ONCE(p->sched_class) == &fair_sched_class &&
+	    cfs_task_bw_constrained(p))
+		score += 2;
+#endif
+	if (sched_proxy_exec_task_throttled(p))
+		score += 4;
+	if (sched_proxy_exec_task_hierarchy_throttled(p))
+		score += 8;
+
+	return score;
+}
+
+static void sched_proxy_exec_note_success(struct task_struct *owner)
+{
+	atomic64_inc(&sched_proxy_exec_diag_success);
+	if (sched_proxy_exec_task_throttled(owner))
+		atomic64_inc(&sched_proxy_exec_diag_success_owner_throttled);
+	if (sched_proxy_exec_task_hierarchy_throttled(owner))
+		atomic64_inc(&sched_proxy_exec_diag_success_owner_hierarchy_throttled);
+}
+
+struct task_struct *sched_proxy_exec_current_donor(void)
+{
+	struct task_struct *donor = NULL;
+	struct rq *rq;
+
+	if (!sched_proxy_exec())
+		return NULL;
+
+	preempt_disable();
+	rq = this_rq();
+	if (READ_ONCE(rq->curr) == current) {
+		donor = READ_ONCE(rq->donor);
+		if (donor == current || donor == rq->idle)
+			donor = NULL;
+	}
+	preempt_enable();
+
+	return donor;
+}
+
+struct task_struct *sched_proxy_exec_current_handoff_waiter(void)
+{
+	struct task_struct *waiter = NULL;
+	struct task_struct *donor;
+	struct rq *rq;
+
+	if (!sched_proxy_exec())
+		return NULL;
+
+	preempt_disable();
+	rq = this_rq();
+	if (READ_ONCE(rq->curr) == current) {
+		donor = READ_ONCE(rq->donor);
+		if (donor != current && donor != rq->idle) {
+			waiter = READ_ONCE(rq->proxy_exec_handoff_waiter);
+			if (!waiter)
+				waiter = donor;
+		}
+	}
+	preempt_enable();
+
+	return waiter;
+}
+
+void sched_proxy_exec_note_mutex_donor_seen(void)
+{
+	atomic64_inc(&sched_proxy_exec_diag_mutex_donor_seen);
+}
+
+void sched_proxy_exec_note_mutex_donor_selected(void)
+{
+	atomic64_inc(&sched_proxy_exec_diag_mutex_donor_selected);
+}
+
+void sched_proxy_exec_note_mutex_chain_selected(void)
+{
+	atomic64_inc(&sched_proxy_exec_diag_mutex_chain_selected);
+}
+
+void sched_proxy_exec_note_mutex_donor_missed(void)
+{
+	atomic64_inc(&sched_proxy_exec_diag_mutex_donor_missed);
+}
+
+void sched_proxy_exec_note_mutex_donor_ww_skip(void)
+{
+	atomic64_inc(&sched_proxy_exec_diag_mutex_donor_ww_skip);
+}
+
 static int __init setup_proxy_exec(char *str)
 {
 	bool proxy_enable = true;
@@ -879,7 +1195,7 @@ static enum hrtimer_restart hrtick(struct hrtimer *timer)
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
-	rq->donor->sched_class->task_tick(rq, rq->curr, 1);
+	rq->donor->sched_class->task_tick(rq, rq->donor, 1);
 	rq_unlock(rq, &rf);
 
 	return HRTIMER_NORESTART;
@@ -1327,7 +1643,14 @@ static inline bool __need_bw_check(struct rq *rq, struct task_struct *p)
 	if (p->sched_class != &fair_sched_class)
 		return false;
 
-	if (!task_on_rq_queued(p))
+	/*
+	 * Proxy execution can run a fair lock owner as the execution context
+	 * while the donor remains the scheduling context.  Such an owner can be
+	 * off-rq during the throttled proxy-service window, but it still needs
+	 * bandwidth tick pressure while it is actual-current.
+	 */
+	if (!task_on_rq_queued(p) &&
+	    !(sched_proxy_exec() && task_current(rq, p) && p != rq->donor))
 		return false;
 
 	return true;
@@ -1336,6 +1659,15 @@ static inline bool __need_bw_check(struct rq *rq, struct task_struct *p)
 bool sched_can_stop_tick(struct rq *rq)
 {
 	int fifo_nr_running;
+
+	/*
+	 * A proxy-serviced fair owner can be the actual execution context even
+	 * when the donor is RT. Preserve CFS bandwidth tick pressure before the
+	 * RT single-task shortcuts below decide that the tick can stop.
+	 */
+	if (__need_bw_check(rq, rq->curr) &&
+	    cfs_task_bw_constrained(rq->curr))
+		return false;
 
 	/* Deadline tasks, even if single, need the tick */
 	if (rq->dl.dl_nr_running)
@@ -1370,18 +1702,6 @@ bool sched_can_stop_tick(struct rq *rq)
 
 	if (rq->cfs.h_nr_queued > 1)
 		return false;
-
-	/*
-	 * If there is one task and it has CFS runtime bandwidth constraints
-	 * and it's on the cpu now we don't want to stop the tick.
-	 * This check prevents clearing the bit if a newly enqueued task here is
-	 * dequeued by migrating while the constrained task continues to run.
-	 * E.g. going from 2->1 without going through pick_next_task().
-	 */
-	if (__need_bw_check(rq, rq->curr)) {
-		if (cfs_task_bw_constrained(rq->curr))
-			return false;
-	}
 
 	return true;
 }
@@ -2577,7 +2897,10 @@ static int migration_cpu_stop(void *data)
 			update_rq_clock(rq);
 			rq = __migrate_task(rq, &rf, p, arg->dest_cpu);
 		} else {
-			p->wake_cpu = arg->dest_cpu;
+			bool migrated = false;
+
+			if (!migrated)
+				p->wake_cpu = arg->dest_cpu;
 		}
 
 		/*
@@ -4968,6 +5291,34 @@ static inline void finish_task(struct task_struct *prev)
 	smp_store_release(&prev->on_cpu, 0);
 }
 
+/*
+ * Only called from __schedule context
+ *
+ * There are some cases where we are going to re-do the action
+ * that added the balance callbacks. We may not be in a state
+ * where we can run them, so just zap them so they can be
+ * properly re-added on the next time around. This is similar
+ * handling to running the callbacks, except we just don't call
+ * them.
+ */
+static void zap_balance_callbacks(struct rq *rq)
+{
+	struct balance_callback *next, *head;
+	bool found = false;
+
+	lockdep_assert_rq_held(rq);
+
+	head = rq->balance_callback;
+	while (head) {
+		if (head == &balance_push_callback)
+			found = true;
+		next = head->next;
+		head->next = NULL;
+		head = next;
+	}
+	rq->balance_callback = found ? &balance_push_callback : NULL;
+}
+
 static void do_balance_callbacks(struct rq *rq, struct balance_callback *head)
 {
 	void (*func)(struct rq *rq);
@@ -5502,23 +5853,28 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 	 * If we race with it leaving CPU, we'll take a lock. So we're correct.
 	 * If we race with it entering CPU, unaccounted time is 0. This is
 	 * indistinguishable from the read occurring a few cycles earlier.
-	 * If we see ->on_cpu without ->on_rq, the task is leaving, and has
-	 * been accounted, so we're correct here as well.
+	 * Proxy execution can run a throttled owner while it is off-rq, so
+	 * ->on_cpu tasks need the locked path even when !task_on_rq_queued().
 	 */
-	if (!p->on_cpu || !task_on_rq_queued(p))
+	if (!p->on_cpu)
 		return p->se.sum_exec_runtime;
 #endif
 
 	rq = task_rq_lock(p, &rf);
 	/*
-	 * Must be ->curr _and_ ->on_rq.  If dequeued, we would
-	 * project cycles that may never be accounted to this
-	 * thread, breaking clock_gettime().
+	 * Update pending runtime when @p is either the scheduling context or
+	 * the actual execution context.  Proxy-serviced owners can be ->curr
+	 * without being ->donor or ->on_rq, while ordinary dequeued tasks that
+	 * are merely leaving the CPU will fail the ->curr check below.
 	 */
-	if (task_current_donor(rq, p) && task_on_rq_queued(p)) {
-		prefetch_curr_exec_start(p);
+	if (task_current(rq, p) ||
+	    (task_current_donor(rq, p) && task_on_rq_queued(p))) {
+		struct task_struct *donor = rq->donor;
+
+		if (donor->sched_class == &fair_sched_class)
+			prefetch_curr_exec_start(donor);
 		update_rq_clock(rq);
-		p->sched_class->update_curr(rq);
+		donor->sched_class->update_curr(rq);
 	}
 	ns = p->se.sum_exec_runtime;
 	task_rq_unlock(rq, p, &rf);
@@ -5579,7 +5935,7 @@ void sched_tick(void)
 {
 	int cpu = smp_processor_id();
 	struct rq *rq = cpu_rq(cpu);
-	/* accounting goes to the donor task */
+	struct task_struct *curr;
 	struct task_struct *donor;
 	struct rq_flags rf;
 	unsigned long hw_pressure;
@@ -5591,9 +5947,10 @@ void sched_tick(void)
 	sched_clock_tick();
 
 	rq_lock(rq, &rf);
+	curr = rq->curr;
 	donor = rq->donor;
 
-	psi_account_irqtime(rq, donor, NULL);
+	psi_account_irqtime(rq, curr, NULL);
 
 	update_rq_clock(rq);
 	hw_pressure = arch_scale_hw_pressure(cpu_of(rq));
@@ -5607,7 +5964,8 @@ void sched_tick(void)
 		resched_latency = cpu_resched_latency(rq);
 	calc_global_load_tick(rq);
 	sched_core_tick(rq);
-	task_tick_mm_cid(rq, donor);
+	/* mm-cid state follows the actual execution context. */
+	task_tick_mm_cid(rq, curr);
 	scx_tick(rq);
 
 	rq_unlock(rq, &rf);
@@ -5617,8 +5975,8 @@ void sched_tick(void)
 
 	perf_event_task_tick();
 
-	if (donor->flags & PF_WQ_WORKER)
-		wq_worker_tick(donor);
+	if (curr->flags & PF_WQ_WORKER)
+		wq_worker_tick(curr);
 
 	if (!scx_switched_all()) {
 		rq->idle_balance = idle_cpu(cpu);
@@ -5681,14 +6039,15 @@ static void sched_tick_remote(struct work_struct *work)
 	if (tick_nohz_tick_stopped_cpu(cpu)) {
 		guard(rq_lock_irq)(rq);
 		struct task_struct *curr = rq->curr;
+		struct task_struct *donor = rq->donor;
 
 		if (cpu_online(cpu)) {
 			/*
-			 * Since this is a remote tick for full dynticks mode,
-			 * we are always sure that there is no proxy (only a
-			 * single task is running).
+			 * Proxy execution can split the execution context from
+			 * the scheduling context even in full dynticks mode.
+			 * Tick the donor class; shared runtime accounting will
+			 * account the actual running task from rq->curr.
 			 */
-			WARN_ON_ONCE(rq->curr != rq->donor);
 			update_rq_clock(rq);
 
 			if (!is_idle_task(curr)) {
@@ -5699,7 +6058,7 @@ static void sched_tick_remote(struct work_struct *work)
 				u64 delta = rq_clock_task(rq) - curr->se.exec_start;
 				WARN_ON_ONCE(delta > (u64)NSEC_PER_SEC * 3);
 			}
-			curr->sched_class->task_tick(rq, curr, 0);
+			donor->sched_class->task_tick(rq, donor, 0);
 
 			calc_load_nohz_remote(rq);
 		}
@@ -6295,7 +6654,8 @@ static bool try_steal_cookie(int this, int that)
 		return false;
 
 	do {
-		if (p == src->core_pick || p == src->curr)
+		if (p == src->core_pick || p == src->curr ||
+		    task_current_donor(src, p))
 			goto next;
 
 		if (!is_cpu_allowed(p, this))
@@ -6523,15 +6883,17 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 	if (signal_pending_state(task_state, p)) {
 		WRITE_ONCE(p->__state, TASK_RUNNING);
 		*task_state_p = TASK_RUNNING;
+		set_task_blocked_on_waking(p, NULL);
+
 		return false;
 	}
 
 	/*
 	 * We check should_block after signal_pending because we
 	 * will want to wake the task in that case. But if
-	 * should_block is false, its likely due to the task being
-	 * blocked on a mutex, and we want to keep it on the runqueue
-	 * to be selectable for proxy-execution.
+	 * should_block is false, its likely due to the task being blocked on
+	 * a proxy-visible owner-bearing lock, and we want to keep it on the
+	 * runqueue to be selectable for proxy-execution.
 	 */
 	if (!should_block)
 		return false;
@@ -6560,6 +6922,40 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 }
 
 #ifdef CONFIG_SCHED_PROXY_EXEC
+#define SCHED_PROXY_EXEC_MAX_CHAIN_DEPTH 64
+
+static inline void proxy_set_task_cpu(struct task_struct *p, int cpu)
+{
+	unsigned int wake_cpu;
+
+	/*
+	 * Since we are enqueuing a blocked task on a cpu it may
+	 * not be able to run on, preserve wake_cpu when we
+	 * __set_task_cpu so we can return the task to where it
+	 * was previously runnable.
+	 */
+	wake_cpu = p->wake_cpu;
+	__set_task_cpu(p, cpu);
+	p->wake_cpu = wake_cpu;
+}
+
+static bool proxy_core_cookie_mismatch(struct rq *rq, struct task_struct *donor,
+				       struct task_struct *owner)
+{
+#ifdef CONFIG_SCHED_CORE
+	if (!sched_core_enabled(rq))
+		return false;
+
+	if (cookie_match(donor, owner))
+		return false;
+
+	atomic64_inc(&sched_proxy_exec_diag_owner_core_cookie_mismatch);
+	return true;
+#else
+	return false;
+#endif
+}
+
 static inline struct task_struct *proxy_resched_idle(struct rq *rq)
 {
 	put_prev_set_next_task(rq, rq->donor, rq->idle);
@@ -6568,13 +6964,18 @@ static inline struct task_struct *proxy_resched_idle(struct rq *rq)
 	return rq->idle;
 }
 
-static bool __proxy_deactivate(struct rq *rq, struct task_struct *donor)
+static bool proxy_deactivate(struct rq *rq, struct task_struct *donor)
 {
 	unsigned long state = READ_ONCE(donor->__state);
+	bool ret;
+
+	atomic64_inc(&sched_proxy_exec_diag_deactivate);
 
 	/* Don't deactivate if the state has been changed to TASK_RUNNING */
-	if (state == TASK_RUNNING)
+	if (state == TASK_RUNNING) {
+		atomic64_inc(&sched_proxy_exec_diag_deactivate_failed_clear);
 		return false;
+	}
 	/*
 	 * Because we got donor from pick_next_task(), it is *crucial*
 	 * that we call proxy_resched_idle() before we deactivate it.
@@ -6585,94 +6986,503 @@ static bool __proxy_deactivate(struct rq *rq, struct task_struct *donor)
 	 * need to be changed from next *before* we deactivate.
 	 */
 	proxy_resched_idle(rq);
-	return try_to_block_task(rq, donor, &state, true);
+	ret = try_to_block_task(rq, donor, &state, true);
+	if (!ret)
+		atomic64_inc(&sched_proxy_exec_diag_deactivate_failed_clear);
+	return ret;
 }
 
-static struct task_struct *proxy_deactivate(struct rq *rq, struct task_struct *donor)
+static inline void proxy_release_rq_lock(struct rq *rq, struct rq_flags *rf)
+	__releases(__rq_lockp(rq))
 {
-	if (!__proxy_deactivate(rq, donor)) {
-		/*
-		 * XXX: For now, if deactivation failed, set donor
-		 * as unblocked, as we aren't doing proxy-migrations
-		 * yet (more logic will be needed then).
-		 */
-		donor->blocked_on = NULL;
-	}
-	return NULL;
+	/*
+	 * The class scheduler may have queued a balance callback
+	 * from pick_next_task() called earlier.
+	 *
+	 * So here we have to zap callbacks before unlocking the rq
+	 * as another CPU may jump in and call sched_balance_rq
+	 * which can trip the warning in rq_pin_lock() if we
+	 * leave callbacks set.
+	 *
+	 * After we later reaquire the rq lock, we will force __schedule()
+	 * to pick_again, so the callbacks will get re-established.
+	 */
+	zap_balance_callbacks(rq);
+	rq_unpin_lock(rq, rf);
+	raw_spin_rq_unlock(rq);
+}
+
+static inline void proxy_reacquire_rq_lock(struct rq *rq, struct rq_flags *rf)
+	__acquires(__rq_lockp(rq))
+{
+	raw_spin_rq_lock(rq);
+	rq_repin_lock(rq, rf);
+	update_rq_clock(rq);
 }
 
 /*
- * Find runnable lock owner to proxy for mutex blocked donor
+ * If the blocked-on relationship crosses CPUs, migrate @p to the
+ * owner's CPU.
+ *
+ * This is because we must respect the CPU affinity of execution
+ * contexts (owner) but we can ignore affinity for scheduling
+ * contexts (@p). So we have to move scheduling contexts towards
+ * potential execution contexts.
+ *
+ * Note: The owner can disappear, but simply migrate to @target_cpu
+ * and leave that CPU to sort things out.
+ */
+static void proxy_migrate_task(struct rq *rq, struct rq_flags *rf,
+			       struct task_struct *p, int target_cpu)
+	__must_hold(__rq_lockp(rq))
+{
+	struct rq *target_rq = cpu_rq(target_cpu);
+
+	lockdep_assert_rq_held(rq);
+	WARN_ON(p == rq->curr);
+	atomic64_inc(&sched_proxy_exec_diag_migrate_task);
+	/*
+	 * Since we are migrating a blocked donor, it could be rq->donor,
+	 * and we want to make sure there aren't any references from this
+	 * rq to it before we drop the lock. This avoids another cpu
+	 * jumping in and grabbing the rq lock and referencing rq->donor
+	 * or cfs_rq->curr, etc after we have migrated it to another cpu,
+	 * and before we pick_again in __schedule.
+	 *
+	 * So call proxy_resched_idle() to drop the rq->donor references
+	 * before we release the lock.
+	 */
+	proxy_resched_idle(rq);
+
+	deactivate_task(rq, p, DEQUEUE_NOCLOCK);
+	proxy_set_task_cpu(p, target_cpu);
+
+	proxy_release_rq_lock(rq, rf);
+
+	attach_one_task(target_rq, p);
+
+	proxy_reacquire_rq_lock(rq, rf);
+}
+
+static void proxy_force_return(struct rq *rq, struct rq_flags *rf,
+			       struct task_struct *p)
+	__must_hold(__rq_lockp(rq))
+{
+	struct rq *task_rq, *target_rq = NULL;
+	int cpu, wake_flag = WF_TTWU;
+
+	lockdep_assert_rq_held(rq);
+	WARN_ON(p == rq->curr);
+	atomic64_inc(&sched_proxy_exec_diag_force_return);
+
+	if (p == rq->donor)
+		proxy_resched_idle(rq);
+
+	proxy_release_rq_lock(rq, rf);
+	/*
+	 * We drop the rq lock, and re-grab task_rq_lock to get
+	 * the pi_lock (needed for select_task_rq) as well.
+	 */
+	scoped_guard (task_rq_lock, p) {
+		task_rq = scope.rq;
+
+		/*
+		 * Since we let go of the rq lock, the task may have been
+		 * woken or migrated to another rq before we  got the
+		 * task_rq_lock. So re-check we're on the same RQ. If
+		 * not, the task has already been migrated and that CPU
+		 * will handle any futher migrations.
+		 */
+		if (task_rq != rq)
+			break;
+
+		/*
+		 * Similarly, if we've been dequeued, someone else will
+		 * wake us
+		 */
+		if (!task_on_rq_queued(p))
+			break;
+
+		/*
+		 * Since we should only be calling here from __schedule()
+		 * -> find_proxy_task(), no one else should have
+		 * assigned current out from under us. But check and warn
+		 * if we see this, then bail.
+		 */
+		if (task_current(task_rq, p) || task_on_cpu(task_rq, p)) {
+			WARN_ONCE(1, "%s rq: %i current/on_cpu task %s %d  on_cpu: %i\n",
+				  __func__, cpu_of(task_rq),
+				  p->comm, p->pid, p->on_cpu);
+			break;
+		}
+
+		update_rq_clock(task_rq);
+		deactivate_task(task_rq, p, DEQUEUE_NOCLOCK);
+		cpu = select_task_rq(p, p->wake_cpu, &wake_flag);
+		set_task_cpu(p, cpu);
+		target_rq = cpu_rq(cpu);
+		clear_task_blocked_on(p, NULL);
+	}
+
+	if (target_rq)
+		attach_one_task(target_rq, p);
+
+	proxy_reacquire_rq_lock(rq, rf);
+}
+
+static void proxy_put_task_ref(struct task_struct **p)
+{
+	if (*p) {
+		put_task_struct(*p);
+		*p = NULL;
+	}
+}
+
+/*
+ * Find runnable lock owner to proxy for a blocked donor.
  *
  * Follow the blocked-on relation:
- *   task->blocked_on -> mutex->owner -> task...
+ *   task->blocked_on/type -> lock owner -> task...
  *
  * Lock order:
  *
  *   p->pi_lock
  *     rq->lock
- *       mutex->wait_lock
+ *       lock->wait_lock
+ *         p->blocked_lock
  *
  * Returns the task that is going to be used as execution context (the one
  * that is actually going to be run on cpu_of(rq)).
  */
 static struct task_struct *
 find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
+	__must_hold(__rq_lockp(rq))
 {
 	struct task_struct *owner = NULL;
+	/*
+	 * Lock-specific sampling can drop its protection before we know whether
+	 * rq->lock owns @owner. Hold a transient ref until that decision is made.
+	 */
+	struct task_struct *owner_ref = NULL;
+	bool curr_in_chain = false;
 	int this_cpu = cpu_of(rq);
 	struct task_struct *p;
-	struct mutex *mutex;
+	struct task_struct *handoff_waiter = NULL;
+	struct mutex *blocked_on;
+	int owner_cpu;
+	int chain_depth = 0;
+
+	atomic64_inc(&sched_proxy_exec_diag_attempts);
 
 	/* Follow blocked_on chain. */
-	for (p = donor; task_is_blocked(p); p = owner) {
-		mutex = p->blocked_on;
-		/* Something changed in the chain, so pick again */
-		if (!mutex)
-			return NULL;
-		/*
-		 * By taking mutex->wait_lock we hold off concurrent mutex_unlock()
-		 * and ensure @owner sticks around.
-		 */
-		guard(raw_spinlock)(&mutex->wait_lock);
+	for (p = donor; (blocked_on = READ_ONCE(p->blocked_on)); p = owner) {
+		enum sched_proxy_blocked_on_type type;
+		bool p_current = false;
+		bool chain_changed = false;
+		bool ownerless_runnable = false;
+		bool no_proxy_owner = false;
+		bool rwsem_reader_multi = false;
+		bool rwsem_owner_unknown = false;
+		bool percpu_rwsem_owner_unknown = false;
+		bool percpu_rwsem_reader_untracked = false;
 
-		/* Check again that p is blocked with wait_lock held */
-		if (mutex != __get_task_blocked_on(p)) {
+		owner_ref = NULL;
+		atomic64_inc(&sched_proxy_exec_diag_chain_steps);
+		if (++chain_depth > SCHED_PROXY_EXEC_MAX_CHAIN_DEPTH) {
+			atomic64_inc(&sched_proxy_exec_diag_chain_too_deep);
+			goto deactivate;
+		}
+
+		type = READ_ONCE(p->blocked_on_type);
+
+		/* if its PROXY_WAKING, do return migration or run if current */
+		if (blocked_on == PROXY_WAKING ||
+		    type == SCHED_PROXY_BLOCKED_ON_WAKING) {
+			if (task_current(rq, p)) {
+				atomic64_inc(&sched_proxy_exec_diag_proxy_waking_current);
+				clear_task_blocked_on(p, PROXY_WAKING);
+				return p;
+			}
+			goto force_return;
+		}
+
+		switch (type) {
+		case SCHED_PROXY_BLOCKED_ON_MUTEX: {
+			struct mutex *mutex = blocked_on;
+
+			/*
+			 * By taking mutex->wait_lock we hold off concurrent
+			 * mutex_unlock() and ensure @owner sticks around.
+			 */
+			raw_spin_lock(&mutex->wait_lock);
+			raw_spin_lock(&p->blocked_lock);
+
+			chain_changed = !__task_blocked_on_matches(p, type, mutex);
+			if (!chain_changed) {
+				p_current = task_current(rq, p);
+				if (p_current)
+					curr_in_chain = true;
+				owner = __mutex_owner(mutex);
+				if (owner)
+					owner_ref = get_task_struct(owner);
+				if (!owner && p_current)
+					__clear_task_blocked_on(p, NULL);
+			}
+
+			raw_spin_unlock(&p->blocked_lock);
+			raw_spin_unlock(&mutex->wait_lock);
+			break;
+		}
+		case SCHED_PROXY_BLOCKED_ON_RWSEM: {
+			enum rwsem_proxy_owner_state rwsem_state;
+			struct rw_semaphore *sem = (struct rw_semaphore *)blocked_on;
+
+			raw_spin_lock(&sem->wait_lock);
+			raw_spin_lock(&p->blocked_lock);
+
+			chain_changed = !__task_blocked_on_matches(p, type, sem);
+			if (!chain_changed) {
+				p_current = task_current(rq, p);
+				if (p_current)
+					curr_in_chain = true;
+				owner = rwsem_proxy_owner(sem, &rwsem_state);
+				if (owner)
+					owner_ref = owner;
+				ownerless_runnable =
+					rwsem_state == RWSEM_PROXY_OWNER_OWNERLESS;
+				if (rwsem_state == RWSEM_PROXY_OWNER_WRITER)
+					atomic64_inc(&sched_proxy_exec_diag_chain_rwsem_writer);
+				rwsem_reader_multi =
+					rwsem_state == RWSEM_PROXY_OWNER_READER_MULTI;
+				rwsem_owner_unknown =
+					rwsem_state == RWSEM_PROXY_OWNER_UNKNOWN;
+				if (rwsem_state == RWSEM_PROXY_OWNER_READER_SINGLE)
+					atomic64_inc(&sched_proxy_exec_diag_chain_rwsem_reader_single);
+				if (rwsem_state == RWSEM_PROXY_OWNER_READER_REPRESENTATIVE)
+					atomic64_inc(&sched_proxy_exec_diag_chain_rwsem_reader_representative);
+				no_proxy_owner = !owner && !ownerless_runnable;
+				if (!owner && p_current && ownerless_runnable)
+					__clear_task_blocked_on_rwsem(p, sem);
+			}
+
+			raw_spin_unlock(&p->blocked_lock);
+			raw_spin_unlock(&sem->wait_lock);
+			break;
+		}
+		case SCHED_PROXY_BLOCKED_ON_PERCPU_RWSEM: {
+			enum percpu_rwsem_proxy_owner_state pcpu_state;
+			struct percpu_rw_semaphore *sem =
+				(struct percpu_rw_semaphore *)blocked_on;
+
+			/*
+			 * percpu-rwsem wakeups hold waiters.lock and can reach
+			 * rq->lock.  The proxy scheduler already holds rq->lock
+			 * here, so only sample an uncontended waiters.lock and
+			 * retry later if the lock is busy.
+			 */
+			if (!spin_trylock(&sem->waiters.lock)) {
+				atomic64_inc(&sched_proxy_exec_diag_chain_lock_busy);
+				/*
+				 * The waiter wake path can hold waiters.lock
+				 * while reaching for rq->lock.  Drop this rq
+				 * instead of looping in pick_again with IRQs off.
+				 */
+				owner = proxy_resched_idle(rq);
+				return owner;
+			}
+			raw_spin_lock(&p->blocked_lock);
+
+			chain_changed = !__task_blocked_on_matches(p, type, sem);
+			if (!chain_changed) {
+				p_current = task_current(rq, p);
+				if (p_current)
+					curr_in_chain = true;
+				owner = percpu_rwsem_proxy_owner(sem, &pcpu_state);
+				if (owner)
+					owner_ref = owner;
+				if (pcpu_state == PERCPU_RWSEM_PROXY_OWNER_WRITER)
+					atomic64_inc(&sched_proxy_exec_diag_chain_percpu_rwsem_writer);
+				if (pcpu_state == PERCPU_RWSEM_PROXY_OWNER_READER_REPRESENTATIVE)
+					atomic64_inc(&sched_proxy_exec_diag_chain_percpu_rwsem_reader_representative);
+				ownerless_runnable =
+					pcpu_state == PERCPU_RWSEM_PROXY_OWNER_OWNERLESS;
+				percpu_rwsem_reader_untracked =
+					pcpu_state == PERCPU_RWSEM_PROXY_OWNER_READER_UNTRACKED;
+				percpu_rwsem_owner_unknown =
+					pcpu_state == PERCPU_RWSEM_PROXY_OWNER_UNKNOWN;
+				no_proxy_owner = !owner && !ownerless_runnable;
+				if (!owner && p_current && ownerless_runnable)
+					__clear_task_blocked_on_percpu_rwsem(p, sem);
+			}
+
+			raw_spin_unlock(&p->blocked_lock);
+			spin_unlock(&sem->waiters.lock);
+			break;
+		}
+		case SCHED_PROXY_BLOCKED_ON_RTMUTEX: {
+#ifdef CONFIG_RT_MUTEXES
+			struct rt_mutex_base *rtlock =
+				(struct rt_mutex_base *)blocked_on;
+
+			/*
+			 * RT mutex PI normally nests wait_lock -> pi_lock and
+			 * can reach rq->lock through rt_mutex_setprio().  The
+			 * proxy scheduler already holds rq->lock here, so only
+			 * sample an uncontended wait_lock and retry later if PI
+			 * owns it.
+			 */
+			if (!raw_spin_trylock(&rtlock->wait_lock)) {
+				atomic64_inc(&sched_proxy_exec_diag_chain_lock_busy);
+				/*
+				 * PI wakeup/priority adjustment can nest toward
+				 * rq->lock.  Let that owner make progress before
+				 * sampling again.
+				 */
+				owner = proxy_resched_idle(rq);
+				return owner;
+			}
+
+			raw_spin_lock(&p->blocked_lock);
+
+			chain_changed = !__task_blocked_on_matches(p, type, rtlock);
+			if (!chain_changed) {
+				p_current = task_current(rq, p);
+				if (p_current)
+					curr_in_chain = true;
+				owner = rt_mutex_owner(rtlock);
+				if (owner) {
+					owner_ref = get_task_struct(owner);
+					atomic64_inc(&sched_proxy_exec_diag_chain_rtmutex_owner);
+				}
+				if (!owner && p_current)
+					__clear_task_blocked_on_rtmutex(p, rtlock);
+			}
+
+			raw_spin_unlock(&p->blocked_lock);
+			raw_spin_unlock(&rtlock->wait_lock);
+			break;
+#else
+			atomic64_inc(&sched_proxy_exec_diag_chain_unknown_type);
+			chain_changed = true;
+			break;
+#endif
+		}
+		default:
+			atomic64_inc(&sched_proxy_exec_diag_chain_unknown_type);
+			chain_changed = true;
+			break;
+		}
+
+		if (chain_changed) {
 			/*
 			 * Something changed in the blocked_on chain and
 			 * we don't know if only at this level. So, let's
 			 * just bail out completely and let __schedule()
 			 * figure things out (pick_again loop).
 			 */
+			atomic64_inc(&sched_proxy_exec_diag_chain_changed);
+			proxy_put_task_ref(&owner_ref);
 			return NULL;
 		}
 
-		owner = __mutex_owner(mutex);
 		if (!owner) {
-			__clear_task_blocked_on(p, mutex);
-			return p;
+			atomic64_inc(&sched_proxy_exec_diag_owner_none);
+			if (rwsem_reader_multi)
+				atomic64_inc(&sched_proxy_exec_diag_chain_rwsem_reader_multi);
+			if (rwsem_owner_unknown)
+				atomic64_inc(&sched_proxy_exec_diag_chain_rwsem_owner_unknown);
+			if (percpu_rwsem_owner_unknown)
+				atomic64_inc(&sched_proxy_exec_diag_chain_percpu_rwsem_owner_unknown);
+			if (percpu_rwsem_reader_untracked)
+				atomic64_inc(&sched_proxy_exec_diag_chain_percpu_rwsem_reader_untracked);
+			/*
+			 * If there is no owner, either clear blocked_on
+			 * and return p (if it is current and safe to
+			 * just run on this rq), or return-migrate the task.
+			 */
+			if (p_current && !no_proxy_owner)
+				return p;
+			if (no_proxy_owner)
+				goto deactivate;
+			goto force_return;
+		}
+		handoff_waiter = p;
+
+		if (owner == donor && p != donor) {
+			atomic64_inc(&sched_proxy_exec_diag_chain_cycle);
+			goto deactivate;
 		}
 
-		if (!READ_ONCE(owner->on_rq) || owner->se.sched_delayed) {
-			/* XXX Don't handle blocked owners/delayed dequeue yet */
-			return proxy_deactivate(rq, donor);
+		if (!READ_ONCE(owner->on_rq)) {
+			bool owner_running = READ_ONCE(owner->__state) == TASK_RUNNING;
+
+			/*
+			 * The rq lock no longer owns an off-rq owner, so proxy
+			 * execution must not return @owner from here.  If the
+			 * owner is still TASK_RUNNING on another CPU, move the
+			 * blocked scheduling context toward that CPU and let the
+			 * normal queued-owner path handle it after the owner is
+			 * visible again.  Same-CPU off-rq owners remain ineligible:
+			 * task-based CFS throttling should not leave a lock-holding
+			 * owner in throttled limbo, and running arbitrary off-rq
+			 * owners directly would bypass scheduler ownership rules.
+			 */
+			atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq);
+			owner_cpu = task_cpu(owner);
+			if (owner_cpu == this_cpu)
+				atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq_same_cpu);
+			else
+				atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq_remote_cpu);
+			if (sched_proxy_exec_task_throttled(owner))
+				atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq_throttled);
+			if (sched_proxy_exec_task_hierarchy_throttled(owner))
+				atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq_hierarchy_throttled);
+			if (owner_running)
+				atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq_task_running);
+			else
+				atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq_task_sleeping);
+			if (READ_ONCE(owner->se.sched_delayed))
+				atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq_sched_delayed);
+			if (owner_running && owner_cpu != this_cpu && !p_current) {
+				atomic64_inc(&sched_proxy_exec_diag_owner_not_on_rq_remote_migrate);
+				goto migrate_task;
+			}
+			if (curr_in_chain) {
+				owner = proxy_resched_idle(rq);
+				proxy_put_task_ref(&owner_ref);
+				return owner;
+			}
+			goto deactivate;
 		}
 
-		if (task_cpu(owner) != this_cpu) {
-			/* XXX Don't handle migrations yet */
-			return proxy_deactivate(rq, donor);
+		owner_cpu = task_cpu(owner);
+		if (owner_cpu != this_cpu) {
+			/*
+			 * @owner can disappear, simply migrate to @owner_cpu
+			 * and leave that CPU to sort things out.
+			 */
+			atomic64_inc(&sched_proxy_exec_diag_owner_remote_cpu);
+			if (curr_in_chain) {
+				owner = proxy_resched_idle(rq);
+				proxy_put_task_ref(&owner_ref);
+				return owner;
+			}
+			goto migrate_task;
 		}
 
 		if (task_on_rq_migrating(owner)) {
 			/*
-			 * One of the chain of mutex owners is currently migrating to this
+			 * One of the chain of lock owners is currently migrating to this
 			 * CPU, but has not yet been enqueued because we are holding the
 			 * rq lock. As a simple solution, just schedule rq->idle to give
 			 * the migration a chance to complete. Much like the migrate_task
 			 * case we should end up back in find_proxy_task(), this time
 			 * hopefully with all relevant tasks already enqueued.
 			 */
-			return proxy_resched_idle(rq);
+			atomic64_inc(&sched_proxy_exec_diag_owner_migrating);
+			owner = proxy_resched_idle(rq);
+			proxy_put_task_ref(&owner_ref);
+			return owner;
 		}
 
 		/*
@@ -6683,8 +7493,23 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 		 * we are still on this cpu and not migrating. If we get
 		 * inconsistent results, try again.
 		 */
-		if (!task_on_rq_queued(owner) || task_cpu(owner) != this_cpu)
+		if (!task_on_rq_queued(owner) || task_cpu(owner) != this_cpu) {
+			atomic64_inc(&sched_proxy_exec_diag_chain_changed);
+			proxy_put_task_ref(&owner_ref);
 			return NULL;
+		}
+
+		if (sched_proxy_exec_task_throttled(owner))
+			atomic64_inc(&sched_proxy_exec_diag_owner_on_rq_throttled);
+		if (sched_proxy_exec_task_hierarchy_throttled(owner))
+			atomic64_inc(&sched_proxy_exec_diag_owner_on_rq_hierarchy_throttled);
+
+		if (owner->se.sched_delayed) {
+			atomic64_inc(&sched_proxy_exec_diag_owner_sched_delayed);
+			update_rq_clock(rq);
+			enqueue_task(rq, owner, ENQUEUE_NOCLOCK | ENQUEUE_DELAYED);
+			atomic64_inc(&sched_proxy_exec_diag_owner_sched_delayed_requeued);
+		}
 
 		if (owner == p) {
 			/*
@@ -6709,17 +7534,43 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 			 * So schedule rq->idle so that ttwu_runnable() can get the rq
 			 * lock and mark owner as running.
 			 */
-			return proxy_resched_idle(rq);
+			atomic64_inc(&sched_proxy_exec_diag_owner_self);
+			owner = proxy_resched_idle(rq);
+			proxy_put_task_ref(&owner_ref);
+			return owner;
 		}
 		/*
 		 * OK, now we're absolutely sure @owner is on this
 		 * rq, therefore holding @rq->lock is sufficient to
 		 * guarantee its existence, as per ttwu_remote().
 		 */
+		proxy_put_task_ref(&owner_ref);
 	}
-
 	WARN_ON_ONCE(owner && !owner->on_rq);
+	if (owner && proxy_core_cookie_mismatch(rq, donor, owner)) {
+		owner = proxy_resched_idle(rq);
+		return owner;
+	}
+	if (owner) {
+		WRITE_ONCE(rq->proxy_exec_handoff_waiter, handoff_waiter);
+		sched_proxy_exec_note_success(owner);
+	}
 	return owner;
+
+deactivate:
+	proxy_put_task_ref(&owner_ref);
+	if (proxy_deactivate(rq, donor))
+		return NULL;
+	/* If deactivate fails, force return */
+	p = donor;
+force_return:
+	proxy_put_task_ref(&owner_ref);
+	proxy_force_return(rq, rf, p);
+	return NULL;
+migrate_task:
+	proxy_put_task_ref(&owner_ref);
+	proxy_migrate_task(rq, rf, p, owner_cpu);
+	return NULL;
 }
 #else /* SCHED_PROXY_EXEC */
 static struct task_struct *
@@ -6729,23 +7580,6 @@ find_proxy_task(struct rq *rq, struct task_struct *donor, struct rq_flags *rf)
 	return donor;
 }
 #endif /* SCHED_PROXY_EXEC */
-
-static inline void proxy_tag_curr(struct rq *rq, struct task_struct *owner)
-{
-	if (!sched_proxy_exec())
-		return;
-	/*
-	 * pick_next_task() calls set_next_task() on the chosen task
-	 * at some point, which ensures it is not push/pullable.
-	 * However, the chosen/donor task *and* the mutex owner form an
-	 * atomic pair wrt push/pull.
-	 *
-	 * Make sure owner we run is not pushable. Unfortunately we can
-	 * only deal with that by means of a dequeue/enqueue cycle. :-/
-	 */
-	dequeue_task(rq, owner, DEQUEUE_NOCLOCK | DEQUEUE_SAVE);
-	enqueue_task(rq, owner, ENQUEUE_NOCLOCK | ENQUEUE_RESTORE);
-}
 
 /*
  * __schedule() is the main scheduler function.
@@ -6861,26 +7695,54 @@ static void __sched notrace __schedule(int sched_mode)
 		}
 	} else if (!preempt && prev_state) {
 		/*
-		 * We pass task_is_blocked() as the should_block arg
-		 * in order to keep mutex-blocked tasks on the runqueue
-		 * for slection with proxy-exec (without proxy-exec
+		 * We pass task_is_blocked() as the should_block arg in order
+		 * to keep proxy-blocked scheduling contexts on the runqueue
+		 * for selection with proxy-exec (without proxy-exec
 		 * task_is_blocked() will always be false).
 		 */
-		try_to_block_task(rq, prev, &prev_state,
-				  !task_is_blocked(prev));
+		try_to_block_task(rq, prev, &prev_state, !task_is_blocked(prev));
 		switch_count = &prev->nvcsw;
 	}
 
 pick_again:
+	assert_balance_callbacks_empty(rq);
 	next = pick_next_task(rq, rq->donor, &rf);
-	rq_set_donor(rq, next);
-	if (unlikely(task_is_blocked(next))) {
-		next = find_proxy_task(rq, next, &rf);
-		if (!next)
-			goto pick_again;
-		if (next == rq->idle)
-			goto keep_resched;
+	if (sched_proxy_exec()) {
+		struct task_struct *prev_donor = rq->donor;
+
+		rq_set_donor(rq, next);
+		if (unlikely(READ_ONCE(next->blocked_on))) {
+			next = find_proxy_task(rq, next, &rf);
+			if (!next) {
+				zap_balance_callbacks(rq);
+				goto pick_again;
+			}
+			if (next == rq->idle) {
+				zap_balance_callbacks(rq);
+				goto keep_resched;
+			}
+		}
+		if (rq->donor == prev_donor && prev != next) {
+			struct task_struct *donor = rq->donor;
+			/*
+			 * When transitioning like:
+			 *
+			 *         prev         next
+			 * donor:    B            B
+			 * curr:     A          B or C
+			 *
+			 * then put_prev_set_next_task() will not have done
+			 * anything, since B == B. However, A might have
+			 * missed a RT/DL balance opportunity due to being
+			 * on_cpu.
+			 */
+			donor->sched_class->put_prev_task(rq, donor, donor);
+			donor->sched_class->set_next_task(rq, donor, true);
+		}
+	} else {
+		rq_set_donor(rq, next);
 	}
+
 picked:
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
@@ -6895,9 +7757,6 @@ keep_resched:
 		 * changes to task_struct made by pick_next_task().
 		 */
 		RCU_INIT_POINTER(rq->curr, next);
-
-		if (!task_current_donor(rq, next))
-			proxy_tag_curr(rq, next);
 
 		/*
 		 * The membarrier system call requires each architecture
@@ -6933,10 +7792,6 @@ keep_resched:
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next, &rf);
 	} else {
-		/* In case next was already curr but just got blocked_donor */
-		if (!task_current_donor(rq, next))
-			proxy_tag_curr(rq, next);
-
 		rq_unpin_lock(rq, &rf);
 		__balance_callbacks(rq);
 		raw_spin_rq_unlock_irq(rq);
@@ -11205,7 +12060,7 @@ void sched_deq_and_put_task(struct task_struct *p, int queue_flags,
 		.p = p,
 		.queue_flags = queue_flags,
 		.queued = task_on_rq_queued(p),
-		.running = task_current(rq, p),
+		.running = task_current_donor(rq, p),
 	};
 
 	update_rq_clock(rq);

@@ -1191,7 +1191,8 @@ static enum hrtimer_restart dl_server_timer(struct hrtimer *timer, struct sched_
 
 		enqueue_dl_entity(dl_se, ENQUEUE_REPLENISH);
 
-		if (!dl_task(dl_se->rq->curr) || dl_entity_preempt(dl_se, &dl_se->rq->curr->dl))
+		if (!dl_task(dl_se->rq->donor) ||
+		    dl_entity_preempt(dl_se, &dl_se->rq->donor->dl))
 			resched_curr(rq);
 
 		__push_dl_task(rq, rf);
@@ -1587,7 +1588,8 @@ void dl_server_start(struct sched_dl_entity *dl_se)
 
 	dl_se->dl_server_active = 1;
 	enqueue_dl_entity(dl_se, ENQUEUE_WAKEUP);
-	if (!dl_task(dl_se->rq->curr) || dl_entity_preempt(dl_se, &rq->curr->dl))
+	if (!dl_task(dl_se->rq->donor) ||
+	    dl_entity_preempt(dl_se, &rq->donor->dl))
 		resched_curr(dl_se->rq);
 }
 
@@ -2107,7 +2109,7 @@ static void enqueue_task_dl(struct rq *rq, struct task_struct *p, int flags)
 	if (task_is_blocked(p))
 		return;
 
-	if (!task_current(rq, p) && !p->dl.dl_throttled && p->nr_cpus_allowed > 1)
+	if (!task_current_donor(rq, p) && !p->dl.dl_throttled && p->nr_cpus_allowed > 1)
 		enqueue_pushable_dl_task(rq, p);
 }
 
@@ -2168,7 +2170,7 @@ static int find_later_rq(struct task_struct *task);
 static int
 select_task_rq_dl(struct task_struct *p, int cpu, int flags)
 {
-	struct task_struct *curr, *donor;
+	struct task_struct *donor;
 	bool select_rq;
 	struct rq *rq;
 
@@ -2178,7 +2180,6 @@ select_task_rq_dl(struct task_struct *p, int cpu, int flags)
 	rq = cpu_rq(cpu);
 
 	rcu_read_lock();
-	curr = READ_ONCE(rq->curr); /* unlocked access */
 	donor = READ_ONCE(rq->donor);
 
 	/*
@@ -2191,7 +2192,7 @@ select_task_rq_dl(struct task_struct *p, int cpu, int flags)
 	 * try to make it stay here, it might be important.
 	 */
 	select_rq = unlikely(dl_task(donor)) &&
-		    (curr->nr_cpus_allowed < 2 ||
+		    (donor->nr_cpus_allowed < 2 ||
 		     !dl_entity_preempt(&p->dl, &donor->dl)) &&
 		    p->nr_cpus_allowed > 1;
 
@@ -2253,7 +2254,7 @@ static void check_preempt_equal_dl(struct rq *rq, struct task_struct *p)
 	 * Current can't be migrated, useless to reschedule,
 	 * let's hope p can move out.
 	 */
-	if (rq->curr->nr_cpus_allowed == 1 ||
+	if (rq->donor->nr_cpus_allowed == 1 ||
 	    !cpudl_find(&rq->rd->cpudl, rq->donor, NULL))
 		return;
 
@@ -2556,15 +2557,30 @@ static int find_later_rq(struct task_struct *task)
 
 static struct task_struct *pick_next_pushable_dl_task(struct rq *rq)
 {
-	struct task_struct *p;
+	struct task_struct *i, *p = NULL;
+	struct rb_node *next_node;
 
 	if (!has_pushable_dl_tasks(rq))
 		return NULL;
 
-	p = __node_2_pdl(rb_first_cached(&rq->dl.pushable_dl_tasks_root));
+	next_node = rb_first_cached(&rq->dl.pushable_dl_tasks_root);
+	while (next_node) {
+		i = __node_2_pdl(next_node);
+		/* make sure task isn't on_cpu (possible with proxy-exec) */
+		if (!task_on_cpu(rq, i) && !task_current_donor(rq, i)) {
+			p = i;
+			break;
+		}
+
+		next_node = rb_next(next_node);
+	}
+
+	if (!p)
+		return NULL;
 
 	WARN_ON_ONCE(rq->cpu != task_cpu(p));
 	WARN_ON_ONCE(task_current(rq, p));
+	WARN_ON_ONCE(task_current_donor(rq, p));
 	WARN_ON_ONCE(p->nr_cpus_allowed <= 1);
 
 	WARN_ON_ONCE(!task_on_rq_queued(p));
@@ -2676,7 +2692,7 @@ retry:
 	 */
 	if (dl_task(rq->donor) &&
 	    dl_time_before(next_task->dl.deadline, rq->donor->dl.deadline) &&
-	    rq->curr->nr_cpus_allowed > 1) {
+	    rq->donor->nr_cpus_allowed > 1) {
 		resched_curr(rq);
 		return 0;
 	}
@@ -2838,7 +2854,7 @@ static void task_woken_dl(struct rq *rq, struct task_struct *p)
 	    !test_tsk_need_resched(rq->curr) &&
 	    p->nr_cpus_allowed > 1 &&
 	    dl_task(rq->donor) &&
-	    (rq->curr->nr_cpus_allowed < 2 ||
+	    (rq->donor->nr_cpus_allowed < 2 ||
 	     !dl_entity_preempt(&p->dl, &rq->donor->dl))) {
 		push_dl_tasks(rq);
 	}
@@ -3079,8 +3095,8 @@ static void prio_changed_dl(struct rq *rq, struct task_struct *p,
 		 *
 		 * Otherwise, if p was given an earlier deadline, reschedule.
 		 */
-		if (!dl_task(rq->curr) ||
-		    dl_time_before(p->dl.deadline, rq->curr->dl.deadline))
+		if (!dl_task(rq->donor) ||
+		    dl_time_before(p->dl.deadline, rq->donor->dl.deadline))
 			resched_curr(rq);
 	}
 }
