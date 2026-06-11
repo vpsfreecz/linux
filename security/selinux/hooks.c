@@ -2571,11 +2571,12 @@ static int selinux_outercontext_inner_inode_sid(const struct cred *cred,
 	return rc;
 }
 
-static int selinux_outercontext_inner_has_perm(const struct cred *cred,
-					       struct inode *inode,
-					       struct dentry *dentry,
-					       u16 tclass, u32 perms,
-					       struct common_audit_data *adp)
+static int selinux_outercontext_inner_has_perm_sid(const struct cred *cred,
+						   u32 actor_sid,
+						   struct inode *inode,
+						   struct dentry *dentry,
+						   u16 tclass, u32 perms,
+						   struct common_audit_data *adp)
 {
 	struct superblock_security_struct *sbsec =
 		selinux_superblock(inode->i_sb);
@@ -2590,8 +2591,17 @@ static int selinux_outercontext_inner_has_perm(const struct cred *cred,
 	if (rc)
 		return rc;
 
-	return avc_has_perm_state(state, cred_sid(cred), isid, tclass, perms,
-				  adp);
+	return avc_has_perm_state(state, actor_sid, isid, tclass, perms, adp);
+}
+
+static int selinux_outercontext_inner_has_perm(const struct cred *cred,
+					       struct inode *inode,
+					       struct dentry *dentry,
+					       u16 tclass, u32 perms,
+					       struct common_audit_data *adp)
+{
+	return selinux_outercontext_inner_has_perm_sid(
+		cred, cred_sid(cred), inode, dentry, tclass, perms, adp);
 }
 
 static int selinux_outercontext_inode_has_xperm(
@@ -5107,17 +5117,29 @@ static int selinux_inode_permission(struct inode *inode, int requested)
 	perms = file_mask_to_av(inode->i_mode, mask);
 
 	if (selinux_sb_outer_active(selinux_superblock(inode->i_sb))) {
+		const struct cred *cred = current_cred();
+		const struct cred_security_struct *crsec = selinux_cred(cred);
+		bool explicit_payload_exec = isec->sclass == SECCLASS_FILE &&
+					     perms == FILE__EXECUTE &&
+					     crsec->exec_sid &&
+					     cred_pending_outer_active(cred);
+
 		if (requested & MAY_NOT_BLOCK)
 			return -ECHILD;
 
 		ad.type = LSM_AUDIT_DATA_INODE;
 		ad.u.inode = inode;
-		rc = selinux_outercontext_inode_has_perm(
-			current_cred(), inode, isec->sclass, perms, &ad);
+		rc = selinux_outercontext_inode_has_perm_class(
+			cred, inode, isec->sclass, perms, &ad,
+			explicit_payload_exec);
 		if (rc)
 			return rc;
+		if (explicit_payload_exec)
+			return selinux_outercontext_inner_has_perm_sid(
+				cred, crsec->exec_sid, inode, NULL,
+				isec->sclass, perms, &ad);
 		return selinux_outercontext_inner_has_perm(
-			current_cred(), inode, NULL, isec->sclass, perms, &ad);
+			cred, inode, NULL, isec->sclass, perms, &ad);
 	}
 
 	rc = selinux_cred_inode_sid_state(current_cred(), inode, &state, &sid);
