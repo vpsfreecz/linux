@@ -9514,13 +9514,14 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 	char *str = value;
 
 	/*
-	 * Child states may still drive task-domain changes, but explicit object
-	 * label override controls remain frozen while the object model is shared.
+	 * Child states may still drive task-domain changes.  Keep explicit
+	 * filesystem/socket label override controls frozen while those object
+	 * models are shared; key objects carry explicit SELinux state and outer
+	 * owner sidecars, so keycreate remains state-local.
 	 */
 	if (selinux_state_shares_object_model(state)) {
 		switch (attr) {
 		case LSM_ATTR_FSCREATE:
-		case LSM_ATTR_KEYCREATE:
 		case LSM_ATTR_SOCKCREATE:
 			return -EOPNOTSUPP;
 		default:
