@@ -2537,6 +2537,15 @@ static bool selinux_outercontext_needs_inner(
 {
 	struct selinux_state *state = cred_selinux_state(cred);
 
+	/*
+	 * A freshly cloned child state still uses the parent policy while the
+	 * guest is bootstrapping toward its first load_policy.  Enforce the
+	 * host outer data owner now, but do not interpret guest rootfs xattrs
+	 * through the temporary parent-policy clone.
+	 */
+	if (selinux_state_child_policy_load_pending(state))
+		return false;
+
 	return selinux_sb_outer_active(sbsec) && state != sbsec->outer_state &&
 	       selinux_initialized_state(state);
 }

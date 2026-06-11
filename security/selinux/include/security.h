@@ -267,6 +267,14 @@ static inline void selinux_state_clear_child_policy_load(struct selinux_state *s
 		WRITE_ONCE(state->child_policy_load_allowed, false);
 }
 
+static inline bool selinux_state_child_policy_load_pending(struct selinux_state *state)
+{
+	if (!state || !state->parent || !selinux_initialized_state(state))
+		return false;
+
+	return READ_ONCE(state->child_policy_load_allowed);
+}
+
 static inline bool selinux_state_allows_runtime_enforcing_change(struct selinux_state *state)
 {
 	if (!state)
