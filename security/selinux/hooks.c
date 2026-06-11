@@ -1323,7 +1323,13 @@ static bool selinux_sb_state_matches_mnt_opts(
 	const struct superblock_security_struct *sbsec,
 	const struct selinux_mnt_opts *opts)
 {
+	const struct cred *cred = current_cred();
+
 	if (selinux_sb_state_matches(sbsec, current_selinux_state()))
+		return true;
+
+	if (!opts && cred_outer_active(cred) &&
+	    selinux_sb_state_matches(sbsec, cred_outer_state(cred)))
 		return true;
 
 	/*
