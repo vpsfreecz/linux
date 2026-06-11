@@ -4039,7 +4039,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	struct selinux_state *state;
 	struct common_audit_data ad;
 	struct inode *inode = file_inode(bprm->file);
-	u32 oldsid, file_sid;
+	u32 oldsid, file_sid, check_newsid;
 	bool explicit_exec_sid;
 	int rc;
 
@@ -4115,33 +4115,41 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 
 	if (explicit_exec_sid) {
 		new_crsec->sid = old_crsec->exec_sid;
+		check_newsid = new_crsec->sid;
+		if (cred_pending_outer_active(current_cred()) &&
+		    cred_pending_outer_state(current_cred()) == state)
+			check_newsid = cred_pending_outer_sid(current_cred());
+
 		/* Reset exec SID on execve. */
 		new_crsec->exec_sid = 0;
 
 		/* Fail on NNP or nosuid if not an allowed transition. */
 		rc = check_nnp_nosuid_state(state, bprm, oldsid,
-					    new_crsec->sid);
+					    check_newsid);
 		if (rc)
 			return rc;
 	} else {
 		/* Check for a default transition on this program. */
 		rc = security_transition_sid_state(state, oldsid, file_sid,
 						   SECCLASS_PROCESS, NULL,
-						   &new_crsec->sid);
+						   &check_newsid);
 		if (rc)
 			return rc;
+		new_crsec->sid = check_newsid;
 
 		/*
 		 * Fallback to old SID on NNP or nosuid if not an allowed
 		 * transition.
 		 */
 		rc = check_nnp_nosuid_state(state, bprm, oldsid,
-					    new_crsec->sid);
-		if (rc)
+					    check_newsid);
+		if (rc) {
 			new_crsec->sid = oldsid;
+			check_newsid = oldsid;
+		}
 	}
 
-	if (new_crsec->sid == old_crsec->sid) {
+	if (check_newsid == oldsid) {
 		rc = avc_has_perm_state(state, oldsid, file_sid,
 					SECCLASS_FILE, FILE__EXECUTE_NO_TRANS,
 					&ad);
@@ -4149,20 +4157,20 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 			return rc;
 	} else {
 		/* Check permissions for the transition. */
-		rc = avc_has_perm_state(state, oldsid, new_crsec->sid,
+		rc = avc_has_perm_state(state, oldsid, check_newsid,
 					SECCLASS_PROCESS, PROCESS__TRANSITION,
 					&ad);
 		if (rc)
 			return rc;
 
-		rc = avc_has_perm_state(state, new_crsec->sid, file_sid,
+		rc = avc_has_perm_state(state, check_newsid, file_sid,
 					SECCLASS_FILE, FILE__ENTRYPOINT, &ad);
 		if (rc)
 			return rc;
 
 		/* Check for shared state */
 		if (bprm->unsafe & LSM_UNSAFE_SHARE) {
-			rc = avc_has_perm_state(state, oldsid, new_crsec->sid,
+			rc = avc_has_perm_state(state, oldsid, check_newsid,
 						SECCLASS_PROCESS,
 						PROCESS__SHARE, NULL);
 			if (rc)
@@ -4178,7 +4186,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 				return -EPERM;
 			if (ptsid != 0) {
 				rc = avc_has_perm_state(state, ptsid,
-							new_crsec->sid,
+							check_newsid,
 							SECCLASS_PROCESS,
 							PROCESS__PTRACE, NULL);
 				if (rc)
@@ -4192,7 +4200,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 		/* Enable secure mode for SIDs transitions unless
 		   the noatsecure permission is granted between
 		   the two SIDs, i.e. ahp returns 0. */
-		rc = avc_has_perm_state(state, oldsid, new_crsec->sid,
+		rc = avc_has_perm_state(state, oldsid, check_newsid,
 					SECCLASS_PROCESS, PROCESS__NOATSECURE,
 					NULL);
 		bprm->secureexec |= !!rc;
