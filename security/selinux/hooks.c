@@ -4198,7 +4198,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 		bprm->secureexec |= !!rc;
 	}
 
-	if (explicit_exec_sid && new_crsec->sid != oldsid) {
+	if (explicit_exec_sid) {
 		rc = selinux_cred_activate_pending_outer(bprm->cred);
 		if (rc)
 			return rc;
