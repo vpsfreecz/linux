@@ -48,6 +48,9 @@ struct cred_security_struct {
 	u32 outer_sid; /* immutable host SID for child LSM namespace payloads */
 	struct selinux_state *outer_state; /* host state for outer_sid */
 	bool outer_active; /* outer_sid/outer_state must be enforced */
+	u32 pending_outer_sid; /* host SID to activate on managed payload exec */
+	struct selinux_state *pending_outer_state; /* host state for pending SID */
+	bool pending_outer_active; /* pending_outer_* is valid */
 } __randomize_layout;
 
 struct task_security_struct {

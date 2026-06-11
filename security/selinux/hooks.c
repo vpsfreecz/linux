@@ -117,6 +117,9 @@ struct selinux_lsmns_backend_data {
 	struct selinux_state *outer_state;
 	u32 outer_sid;
 	bool outer_active;
+	struct selinux_state *pending_outer_state;
+	u32 pending_outer_sid;
+	bool pending_outer_active;
 };
 #endif
 
@@ -361,6 +364,64 @@ static int selinux_cred_install_outer(struct cred *cred,
 	return 0;
 }
 
+static int selinux_cred_install_pending_outer(struct cred *cred,
+					      struct selinux_state *outer_state,
+					      u32 outer_sid,
+					      bool outer_active)
+{
+	struct cred_security_struct *crsec;
+	struct selinux_state *old_state;
+
+	if (!cred)
+		return -EINVAL;
+
+	crsec = selinux_cred(cred);
+	old_state = crsec->pending_outer_state;
+
+	if (!outer_active || !outer_state ||
+	    !selinux_initialized_state(outer_state)) {
+		crsec->pending_outer_sid = SECINITSID_UNLABELED;
+		crsec->pending_outer_state = NULL;
+		crsec->pending_outer_active = false;
+		put_selinux_state(old_state);
+		return 0;
+	}
+
+	crsec->pending_outer_sid = outer_sid;
+	crsec->pending_outer_state = get_selinux_state(outer_state);
+	crsec->pending_outer_active = true;
+	put_selinux_state(old_state);
+	return 0;
+}
+
+static int selinux_cred_activate_pending_outer(struct cred *cred)
+{
+	struct cred_security_struct *crsec;
+	struct selinux_state *pending_state;
+	u32 pending_sid;
+	bool pending_active;
+	int error;
+
+	if (!cred)
+		return -EINVAL;
+
+	crsec = selinux_cred(cred);
+	pending_state = crsec->pending_outer_state;
+	pending_sid = crsec->pending_outer_sid;
+	pending_active = crsec->pending_outer_active;
+
+	if (!pending_active)
+		return 0;
+
+	error = selinux_cred_install_outer(cred, pending_state, pending_sid,
+					   pending_active);
+	if (error)
+		return error;
+
+	return selinux_cred_install_pending_outer(cred, NULL,
+						  SECINITSID_UNLABELED, false);
+}
+
 static int selinux_sid_translate_state(struct selinux_state *from,
 				       struct selinux_state *to, u32 *sid)
 {
@@ -466,7 +527,10 @@ static int selinux_task_install_state(struct task_struct *task,
 				      struct selinux_state *state,
 				      struct selinux_state *outer_state,
 				      u32 outer_sid,
-				      bool outer_active)
+				      bool outer_active,
+				      struct selinux_state *pending_outer_state,
+				      u32 pending_outer_sid,
+				      bool pending_outer_active)
 {
 	struct task_security_struct *tsec;
 	int error;
@@ -479,6 +543,12 @@ static int selinux_task_install_state(struct task_struct *task,
 
 	error = selinux_cred_install_outer(new_cred, outer_state, outer_sid,
 					   outer_active);
+	if (error)
+		return error;
+
+	error = selinux_cred_install_pending_outer(new_cred, pending_outer_state,
+						   pending_outer_sid,
+						   pending_outer_active);
 	if (error)
 		return error;
 
@@ -539,6 +609,8 @@ static int selinux_lsmns_backend_create(struct lsm_namespace *ns,
 	struct selinux_state *outer_state = current_selinux_state();
 	u32 outer_sid = current_sid();
 	bool outer_active = selinux_initialized_state(outer_state);
+	u32 pending_outer_sid = SECINITSID_UNLABELED;
+	bool pending_outer_active = false;
 	const struct cred *cred = current_cred();
 	const struct cred_security_struct *crsec = selinux_cred(cred);
 	int error;
@@ -556,10 +628,15 @@ static int selinux_lsmns_backend_create(struct lsm_namespace *ns,
 		outer_active = true;
 	}
 
-	error = selinux_lsmns_outer_sid_from_ctx(outer_state, ctx, outer_sid,
-						 &outer_sid);
-	if (error)
-		return error;
+	if (ctx && ctx->ctx_len) {
+		pending_outer_sid = outer_sid;
+		error = selinux_lsmns_outer_sid_from_ctx(outer_state, ctx,
+							 outer_sid,
+							 &pending_outer_sid);
+		if (error)
+			return error;
+		pending_outer_active = outer_active;
+	}
 
 	backend = kzalloc(sizeof(*backend), GFP_KERNEL);
 	if (!backend)
@@ -578,11 +655,18 @@ static int selinux_lsmns_backend_create(struct lsm_namespace *ns,
 	backend->outer_state = outer_active ? get_selinux_state(outer_state) : NULL;
 	backend->outer_sid = outer_sid;
 	backend->outer_active = outer_active;
+	backend->pending_outer_state =
+		pending_outer_active ? get_selinux_state(outer_state) : NULL;
+	backend->pending_outer_sid = pending_outer_sid;
+	backend->pending_outer_active = pending_outer_active;
 
 	error = selinux_task_install_state(task, new_cred, state,
-					   backend->outer_state,
-					   backend->outer_sid,
-					   backend->outer_active);
+						   backend->outer_state,
+						   backend->outer_sid,
+						   backend->outer_active,
+						   backend->pending_outer_state,
+						   backend->pending_outer_sid,
+						   backend->pending_outer_active);
 	if (error)
 		goto fail_state;
 
@@ -595,6 +679,7 @@ static int selinux_lsmns_backend_create(struct lsm_namespace *ns,
 	return 0;
 
 fail_state:
+	put_selinux_state(backend->pending_outer_state);
 	put_selinux_state(backend->outer_state);
 	put_selinux_state(state);
 fail_backend:
@@ -626,7 +711,10 @@ static int selinux_lsmns_backend_install(struct lsm_namespace *ns,
 	return selinux_task_install_state(task, new_cred, backend->state,
 					  backend->outer_state,
 					  backend->outer_sid,
-					  backend->outer_active);
+					  backend->outer_active,
+					  backend->pending_outer_state,
+					  backend->pending_outer_sid,
+					  backend->pending_outer_active);
 }
 
 static void selinux_lsmns_backend_destroy(struct lsm_namespace *ns)
@@ -637,6 +725,7 @@ static void selinux_lsmns_backend_destroy(struct lsm_namespace *ns)
 		return;
 
 	ns->backend_data = NULL;
+	put_selinux_state(backend->pending_outer_state);
 	put_selinux_state(backend->outer_state);
 	put_selinux_state(backend->state);
 	kfree(backend);
@@ -695,6 +784,26 @@ static inline u32 cred_outer_sid(const struct cred *cred)
 	return selinux_cred(cred)->outer_sid;
 }
 
+static inline bool cred_pending_outer_active(const struct cred *cred)
+{
+	const struct cred_security_struct *crsec = selinux_cred(cred);
+
+	return crsec->pending_outer_active && crsec->pending_outer_state &&
+	       cred_selinux_state(cred) != crsec->pending_outer_state &&
+	       selinux_initialized_state(crsec->pending_outer_state);
+}
+
+static inline struct selinux_state *cred_pending_outer_state(
+	const struct cred *cred)
+{
+	return selinux_cred(cred)->pending_outer_state;
+}
+
+static inline u32 cred_pending_outer_sid(const struct cred *cred)
+{
+	return selinux_cred(cred)->pending_outer_sid;
+}
+
 static inline u32 cred_sid_for_global(const struct cred *cred)
 {
 	if (cred_outer_active(cred) &&
@@ -719,6 +828,19 @@ static bool cred_sid_for_state(const struct cred *cred,
 	}
 
 	return false;
+}
+
+static bool cred_sid_for_state_maybe_pending_outer(
+	const struct cred *cred, const struct selinux_state *state, u32 *sid,
+	bool use_pending_outer)
+{
+	if (use_pending_outer && cred_pending_outer_active(cred) &&
+	    cred_pending_outer_state(cred) == state) {
+		*sid = cred_pending_outer_sid(cred);
+		return true;
+	}
+
+	return cred_sid_for_state(cred, state, sid);
 }
 
 static bool selinux_sb_outer_active(const struct superblock_security_struct *sbsec)
@@ -862,7 +984,8 @@ static int selinux_outercontext_inode_sid(const struct cred *cred,
 					  const struct inode *inode,
 					  struct selinux_state **statep,
 					  u32 *actor_sidp,
-					  u32 *data_sidp)
+					  u32 *data_sidp,
+					  bool use_pending_outer)
 {
 	struct superblock_security_struct *sbsec =
 		selinux_superblock(inode->i_sb);
@@ -871,7 +994,8 @@ static int selinux_outercontext_inode_sid(const struct cred *cred,
 	if (!selinux_sb_outer_active(sbsec))
 		return -EOPNOTSUPP;
 
-	if (!cred_sid_for_state(cred, sbsec->outer_state, &actor_sid))
+	if (!cred_sid_for_state_maybe_pending_outer(
+		    cred, sbsec->outer_state, &actor_sid, use_pending_outer))
 		return -EACCES;
 
 	*statep = sbsec->outer_state;
@@ -882,14 +1006,14 @@ static int selinux_outercontext_inode_sid(const struct cred *cred,
 
 static int selinux_outercontext_inode_has_perm_class(
 	const struct cred *cred, struct inode *inode, u16 tclass, u32 perms,
-	struct common_audit_data *adp)
+	struct common_audit_data *adp, bool use_pending_outer)
 {
 	struct selinux_state *state;
 	u32 actor_sid, data_sid;
 	int rc;
 
 	rc = selinux_outercontext_inode_sid(cred, inode, &state, &actor_sid,
-					    &data_sid);
+					    &data_sid, use_pending_outer);
 	if (rc)
 		return rc;
 
@@ -903,7 +1027,7 @@ static int selinux_outercontext_inode_has_perm(const struct cred *cred,
 					       struct common_audit_data *adp)
 {
 	return selinux_outercontext_inode_has_perm_class(cred, inode, tclass,
-							perms, adp);
+							perms, adp, false);
 }
 
 static bool selinux_cred_subject_match(const struct cred *a,
@@ -2476,7 +2600,7 @@ static int selinux_outercontext_inode_has_xperm(
 	int rc;
 
 	rc = selinux_outercontext_inode_sid(cred, inode, &state, &actor_sid,
-					    &data_sid);
+					    &data_sid, false);
 	if (rc)
 		return rc;
 
@@ -3012,7 +3136,7 @@ static int may_create(struct inode *dir,
 		u32 data_sid;
 
 		rc = selinux_outercontext_inode_sid(cred, dir, &state, &sid,
-						    &data_sid);
+						    &data_sid, false);
 		if (rc)
 			return rc;
 
@@ -3113,13 +3237,13 @@ static int may_link(struct inode *dir,
 		u32 data_sid, target_data_sid;
 
 		rc = selinux_outercontext_inode_sid(cred, dir, &state, &sid,
-						    &data_sid);
+						    &data_sid, false);
 		if (rc)
 			return rc;
 		rc = selinux_outercontext_inode_sid(cred,
 						    d_backing_inode(dentry),
 						    &target_state, &target_sid,
-						    &target_data_sid);
+						    &target_data_sid, false);
 		if (rc)
 			return rc;
 		if (state != target_state || data_sid != target_data_sid)
@@ -3264,19 +3388,20 @@ static inline int may_rename(struct inode *old_dir,
 		u32 object_data_sid;
 
 		rc = selinux_outercontext_inode_sid(cred, old_dir, &state, &sid,
-						    &old_data_sid);
+						    &old_data_sid, false);
 		if (rc)
 			return rc;
 		rc = selinux_outercontext_inode_sid(cred,
 						    d_backing_inode(old_dentry),
 						    &other_state, &other_sid,
-						    &object_data_sid);
+						    &object_data_sid, false);
 		if (rc)
 			return rc;
 		if (state != other_state || old_data_sid != object_data_sid)
 			return -EACCES;
 		rc = selinux_outercontext_inode_sid(cred, new_dir, &other_state,
-						    &other_sid, &new_data_sid);
+						    &other_sid, &new_data_sid,
+						    false);
 		if (rc)
 			return rc;
 		if (state != other_state || old_data_sid != new_data_sid)
@@ -3314,7 +3439,7 @@ static inline int may_rename(struct inode *old_dir,
 				new_is_dir = d_is_dir(new_dentry);
 				rc = selinux_outercontext_inode_sid(
 					cred, d_backing_inode(new_dentry), &other_state,
-					&other_sid, &object_data_sid);
+					&other_sid, &object_data_sid, false);
 				if (rc)
 					return rc;
 				if (state != other_state || new_data_sid != object_data_sid)
@@ -3890,6 +4015,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	struct common_audit_data ad;
 	struct inode *inode = file_inode(bprm->file);
 	u32 oldsid, file_sid;
+	bool explicit_exec_sid;
 	int rc;
 
 	/* SELinux context only depends on initial program or script and not
@@ -3902,6 +4028,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	state = old_crsec->state ?: &selinux_state;
 	oldsid = old_crsec->sid;
 	file_sid = isec->sid;
+	explicit_exec_sid = old_crsec->exec_sid;
 
 	/* Default to the current task SID. */
 	new_crsec->sid = oldsid;
@@ -3929,9 +4056,9 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	ad.u.file = bprm->file;
 
 	if (selinux_sb_outer_active(sbsec)) {
-		rc = selinux_outercontext_inode_has_perm(
+		rc = selinux_outercontext_inode_has_perm_class(
 			current_cred(), inode, isec->sclass,
-			FILE__EXECUTE_NO_TRANS, &ad);
+			FILE__EXECUTE_NO_TRANS, &ad, explicit_exec_sid);
 		if (rc)
 			return rc;
 
@@ -3946,7 +4073,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 
 			rc = selinux_outercontext_inode_sid(
 				current_cred(), inode, &state, &oldsid,
-				&data_sid);
+				&data_sid, false);
 			if (rc)
 				return rc;
 			file_sid = data_sid;
@@ -3961,7 +4088,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 					  FILE__EXECUTE_NO_TRANS, &ad);
 	}
 
-	if (old_crsec->exec_sid) {
+	if (explicit_exec_sid) {
 		new_crsec->sid = old_crsec->exec_sid;
 		/* Reset exec SID on execve. */
 		new_crsec->exec_sid = 0;
@@ -4019,20 +4146,19 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 
 		/* Make sure that anyone attempting to ptrace over a task that
 		 * changes its SID has the appropriate permit */
-			if (bprm->unsafe & LSM_UNSAFE_PTRACE) {
-				u32 ptsid;
+		if (bprm->unsafe & LSM_UNSAFE_PTRACE) {
+			u32 ptsid;
 
-				if (!ptrace_parent_sid_for_state(state,
-								 &ptsid))
+			if (!ptrace_parent_sid_for_state(state, &ptsid))
+				return -EPERM;
+			if (ptsid != 0) {
+				rc = avc_has_perm_state(state, ptsid,
+							new_crsec->sid,
+							SECCLASS_PROCESS,
+							PROCESS__PTRACE, NULL);
+				if (rc)
 					return -EPERM;
-				if (ptsid != 0) {
-					rc = avc_has_perm_state(
-						state, ptsid, new_crsec->sid,
-						SECCLASS_PROCESS,
-						PROCESS__PTRACE, NULL);
-					if (rc)
-						return -EPERM;
-				}
+			}
 		}
 
 		/* Clear any possibly unsafe personality bits on exec: */
@@ -4045,6 +4171,12 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 					SECCLASS_PROCESS, PROCESS__NOATSECURE,
 					NULL);
 		bprm->secureexec |= !!rc;
+	}
+
+	if (explicit_exec_sid && new_crsec->sid != oldsid) {
+		rc = selinux_cred_activate_pending_outer(bprm->cred);
+		if (rc)
+			return rc;
 	}
 
 	return 0;
@@ -6149,6 +6281,9 @@ static int selinux_cred_prepare(struct cred *new, const struct cred *old,
 	crsec->state = get_selinux_state(crsec->state);
 	if (crsec->outer_state)
 		crsec->outer_state = get_selinux_state(crsec->outer_state);
+	if (crsec->pending_outer_state)
+		crsec->pending_outer_state =
+			get_selinux_state(crsec->pending_outer_state);
 	return 0;
 }
 
@@ -6164,6 +6299,9 @@ static void selinux_cred_transfer(struct cred *new, const struct cred *old)
 	crsec->state = get_selinux_state(crsec->state);
 	if (crsec->outer_state)
 		crsec->outer_state = get_selinux_state(crsec->outer_state);
+	if (crsec->pending_outer_state)
+		crsec->pending_outer_state =
+			get_selinux_state(crsec->pending_outer_state);
 }
 
 static void selinux_cred_free(struct cred *cred)
@@ -6172,6 +6310,7 @@ static void selinux_cred_free(struct cred *cred)
 
 	put_selinux_state(crsec->state);
 	put_selinux_state(crsec->outer_state);
+	put_selinux_state(crsec->pending_outer_state);
 }
 
 static void selinux_cred_getsecid(const struct cred *c, u32 *secid)
@@ -6298,7 +6437,7 @@ static int selinux_kernel_load_from_file(struct file *file, u32 requested)
 	inode = file_inode(file);
 	if (selinux_sb_outer_active(selinux_superblock(inode->i_sb)))
 		return selinux_outercontext_inode_has_perm_class(
-			cred, inode, SECCLASS_SYSTEM, requested, &ad);
+			cred, inode, SECCLASS_SYSTEM, requested, &ad, false);
 
 	isec = inode_security(inode);
 	rc = selinux_cred_inode_sid_state(cred, inode, &state, &sid);
@@ -10414,7 +10553,8 @@ static int selinux_uring_cmd(struct io_uring_cmd *ioucmd)
 			return rc;
 
 		rc = selinux_outercontext_inode_has_perm_class(
-			cred, inode, SECCLASS_IO_URING, IO_URING__CMD, &ad);
+			cred, inode, SECCLASS_IO_URING, IO_URING__CMD, &ad,
+			false);
 		if (rc)
 			return rc;
 
