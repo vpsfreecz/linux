@@ -3612,12 +3612,32 @@ static int selinux_binder_transfer_file(const struct cred *from,
 static int selinux_ptrace_access_check(struct task_struct *child,
 				       unsigned int mode)
 {
-	if (mode & PTRACE_MODE_READ)
-		return selinux_task_has_perm(current_cred(), child,
-					     SECCLASS_FILE, FILE__READ, NULL);
+	const struct cred *scred = current_cred();
+	const struct cred *tcred;
+	int rc;
 
-	return selinux_task_has_perm(current_cred(), child, SECCLASS_PROCESS,
-				     PROCESS__PTRACE, NULL);
+	if (mode & PTRACE_MODE_READ)
+		rc = selinux_task_has_perm(scred, child, SECCLASS_FILE,
+					   FILE__READ, NULL);
+	else
+		rc = selinux_task_has_perm(scred, child, SECCLASS_PROCESS,
+					   PROCESS__PTRACE, NULL);
+
+	if (!rc)
+		return 0;
+
+	tcred = get_task_cred(child);
+	pr_notice_ratelimited(
+		"vpsadminos_lsmct_diag: selinux ptrace deny rc=%d mode=0x%x current=%d child=%d sstate=%p ssid=%u souter=%d tstate=%p tsid=%u touter=%d touter_global=%d toutersid=%u\n",
+		rc, mode, task_pid_nr(current), task_pid_nr(child),
+		cred_selinux_state(scred), cred_sid(scred),
+		cred_outer_active(scred),
+		cred_selinux_state(tcred), cred_sid(tcred),
+		cred_outer_active(tcred),
+		cred_outer_active(tcred) && cred_outer_state(tcred) == &selinux_state,
+		cred_outer_active(tcred) ? cred_outer_sid(tcred) : 0);
+	put_cred(tcred);
+	return rc;
 }
 
 static int selinux_ptrace_traceme(struct task_struct *parent)
@@ -5005,6 +5025,12 @@ static int selinux_inode_permission(struct inode *inode, int requested)
 	}
 
 audit:
+	if (rc && inode->i_sb->s_magic == NSFS_MAGIC)
+		pr_notice_ratelimited(
+			"vpsadminos_lsmct_diag: selinux nsfs inode_permission deny rc=%d current=%d requested=0x%x perms=0x%x state=%p sid=%u isid=%u class=%u audited=0x%x denied=0x%x\n",
+			rc, task_pid_nr(current), requested, perms, state, sid,
+			isec->sid, isec->sclass, audited, denied);
+
 	if (likely(!audited))
 		return rc;
 
@@ -6065,6 +6091,7 @@ static int selinux_file_open(struct file *file)
 {
 	struct file_security_struct *fsec;
 	struct inode_security_struct *isec;
+	int rc;
 
 	fsec = selinux_file(file);
 	isec = inode_security(file_inode(file));
@@ -6086,7 +6113,14 @@ static int selinux_file_open(struct file *file)
 	 * new inode label or new policy.
 	 * This check is not redundant - do not remove.
 	 */
-	return file_path_has_perm(file->f_cred, file, open_file_to_av(file));
+	rc = file_path_has_perm(file->f_cred, file, open_file_to_av(file));
+	if (rc && file_inode(file)->i_sb->s_magic == NSFS_MAGIC)
+		pr_notice_ratelimited(
+			"vpsadminos_lsmct_diag: selinux nsfs file_open deny rc=%d current=%d fcred_sid=%u fcred_state=%p isid=%u class=%u flags=0x%x\n",
+			rc, task_pid_nr(current), cred_sid(file->f_cred),
+			cred_selinux_state(file->f_cred), isec->sid,
+			isec->sclass, file->f_flags);
+	return rc;
 }
 
 /* task security operations */
@@ -6152,6 +6186,19 @@ static void selinux_cred_getsecid(const struct cred *c, u32 *secid)
 
 static void selinux_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
 {
+	prop->selinux.secid = cred_sid(c);
+	prop->selinux.state = cred_selinux_state(c);
+}
+
+static void selinux_cred_getlsmprop_global(const struct cred *c,
+					   struct lsm_prop *prop)
+{
+	if (cred_outer_active(c) && cred_outer_state(c) == &selinux_state) {
+		prop->selinux.secid = cred_outer_sid(c);
+		prop->selinux.state = cred_outer_state(c);
+		return;
+	}
+
 	prop->selinux.secid = cred_sid(c);
 	prop->selinux.state = cred_selinux_state(c);
 }
@@ -6461,6 +6508,24 @@ static void selinux_cred_to_inode(const struct cred *cred, struct inode *inode)
 		sid = cred_outer_sid(cred);
 	else
 		sid = cred_sid(cred);
+
+	spin_lock(&isec->lock);
+	isec->sclass = inode_mode_to_security_class(inode->i_mode);
+	isec->sid = sid;
+	isec->initialized = LABEL_INITIALIZED;
+	spin_unlock(&isec->lock);
+}
+
+static void selinux_lsmprop_to_inode(const struct lsm_prop *prop,
+				     struct inode *inode)
+{
+	struct inode_security_struct *isec = selinux_inode(inode);
+	struct selinux_state *sb_state = selinux_superblock_state(inode->i_sb);
+	struct selinux_state *state = prop->selinux.state ?: &selinux_state;
+	u32 sid = prop->selinux.secid;
+
+	if (state != sb_state)
+		sid = SECINITSID_UNLABELED;
 
 	spin_lock(&isec->lock);
 	isec->sclass = inode_mode_to_security_class(inode->i_mode);
@@ -10491,6 +10556,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_free, selinux_cred_free),
 	LSM_HOOK_INIT(cred_getsecid, selinux_cred_getsecid),
 	LSM_HOOK_INIT(cred_getlsmprop, selinux_cred_getlsmprop),
+	LSM_HOOK_INIT(cred_getlsmprop_global, selinux_cred_getlsmprop_global),
 	LSM_HOOK_INIT(kernel_act_as, selinux_kernel_act_as),
 	LSM_HOOK_INIT(kernel_create_files_as, selinux_kernel_create_files_as),
 	LSM_HOOK_INIT(kernel_module_request, selinux_kernel_module_request),
@@ -10512,6 +10578,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(task_kill, selinux_task_kill),
 	LSM_HOOK_INIT(task_to_inode, selinux_task_to_inode),
 	LSM_HOOK_INIT(cred_to_inode, selinux_cred_to_inode),
+	LSM_HOOK_INIT(lsmprop_to_inode, selinux_lsmprop_to_inode),
 	LSM_HOOK_INIT(userns_create, selinux_userns_create),
 
 	LSM_HOOK_INIT(ipc_permission, selinux_ipc_permission),

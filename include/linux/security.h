@@ -498,6 +498,7 @@ int security_prepare_creds(struct cred *new, const struct cred *old, gfp_t gfp);
 void security_transfer_creds(struct cred *new, const struct cred *old);
 void security_cred_getsecid(const struct cred *c, u32 *secid);
 void security_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop);
+void security_cred_getlsmprop_global(const struct cred *c, struct lsm_prop *prop);
 int security_kernel_act_as(struct cred *new, u32 secid);
 int security_kernel_create_files_as(struct cred *new, struct inode *inode);
 int security_kernel_module_request(char *kmod_name);
@@ -537,6 +538,7 @@ int security_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 			unsigned long arg4, unsigned long arg5);
 void security_task_to_inode(struct task_struct *p, struct inode *inode);
 void security_cred_to_inode(const struct cred *cred, struct inode *inode);
+void security_lsmprop_to_inode(const struct lsm_prop *prop, struct inode *inode);
 int security_create_user_ns(const struct cred *cred);
 int security_ipc_permission(struct kern_ipc_perm *ipcp, short flag);
 void security_ipc_getlsmprop(struct kern_ipc_perm *ipcp, struct lsm_prop *prop);
@@ -1259,7 +1261,15 @@ static inline void security_cred_getsecid(const struct cred *c, u32 *secid)
 
 static inline void security_cred_getlsmprop(const struct cred *c,
 					    struct lsm_prop *prop)
-{ }
+{
+	lsmprop_init(prop);
+}
+
+static inline void security_cred_getlsmprop_global(const struct cred *c,
+						   struct lsm_prop *prop)
+{
+	lsmprop_init(prop);
+}
 
 static inline int security_kernel_act_as(struct cred *cred, u32 secid)
 {
@@ -1582,6 +1592,11 @@ static inline void security_lsmprop_hold(struct lsm_prop *prop)
 static inline void security_release_lsmprop(struct lsm_prop *prop)
 {
 	lsmprop_init(prop);
+}
+
+static inline void security_lsmprop_to_inode(const struct lsm_prop *prop,
+					     struct inode *inode)
+{
 }
 
 static inline int security_secctx_to_secid(const char *secdata,

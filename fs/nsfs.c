@@ -4,7 +4,6 @@
 #include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/fs.h>
-#include <linux/init_task.h>
 #include <linux/proc_fs.h>
 #include <linux/proc_ns.h>
 #include <linux/magic.h>
@@ -419,15 +418,12 @@ static const struct super_operations nsfs_ops = {
 static int nsfs_init_inode(struct inode *inode, void *data)
 {
 	struct ns_common *ns = data;
-	const struct cred *owner_cred = READ_ONCE(ns->owner_cred);
 
 	inode->i_private = data;
 	inode->i_mode |= S_IRUGO;
 	inode->i_fop = &ns_file_operations;
 	inode->i_ino = ns->inum;
-	if (!owner_cred)
-		owner_cred = &init_cred;
-	security_cred_to_inode(owner_cred, inode);
+	ns_common_owner_to_inode(ns, inode);
 	return 0;
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/proc_fs.h>
 #include <linux/nsproxy.h>
+#include <linux/ns_common.h>
 #include <linux/ptrace.h>
 #include <linux/namei.h>
 #include <linux/file.h>
@@ -67,12 +68,21 @@ static const char *proc_ns_get_link(struct dentry *dentry,
 	if (!task)
 		return ERR_PTR(-EACCES);
 
-	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
+		pr_notice_ratelimited(
+			"vpsadminos_lsmct_diag: proc ns get_link ptrace deny current=%d target=%d ns=%s\n",
+			task_pid_nr(current), task_pid_nr(task), ns_ops->name);
 		goto out;
+	}
 
 	error = ns_get_path(&ns_path, task, ns_ops);
-	if (error)
+	if (error) {
+		pr_notice_ratelimited(
+			"vpsadminos_lsmct_diag: proc ns get_link ns_get_path fail current=%d target=%d ns=%s rc=%d\n",
+			task_pid_nr(current), task_pid_nr(task), ns_ops->name,
+			error);
 		goto out;
+	}
 
 	error = nd_jump_link(&ns_path);
 out:
@@ -107,6 +117,28 @@ static const struct inode_operations proc_ns_link_inode_operations = {
 	.setattr	= proc_setattr,
 };
 
+static void proc_ns_update_inode_owner(struct task_struct *task,
+				       const struct proc_ns_operations *ns_ops,
+				       struct inode *inode)
+{
+	struct ns_common *ns;
+
+	ns = ns_ops->get(task);
+	if (!ns)
+		return;
+
+	/*
+	 * Static init namespaces do not carry retained owner state. Keep the
+	 * proc symlink label derived from the task in that case.
+	 */
+	if (!READ_ONCE(ns->owner_prop_set) && !READ_ONCE(ns->owner_cred))
+		goto out;
+
+	ns_common_owner_to_inode(ns, inode);
+out:
+	ns_ops->put(ns);
+}
+
 static struct dentry *proc_ns_instantiate(struct dentry *dentry,
 	struct task_struct *task, const void *ptr)
 {
@@ -122,6 +154,7 @@ static struct dentry *proc_ns_instantiate(struct dentry *dentry,
 	inode->i_op = &proc_ns_link_inode_operations;
 	ei->ns_ops = ns_ops;
 	pid_update_inode(task, inode);
+	proc_ns_update_inode_owner(task, ns_ops, inode);
 
 	return d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
 }

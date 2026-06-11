@@ -42,6 +42,53 @@ static bool lsm_child_ns_request_consumable(const struct task_struct *task,
 	return false;
 }
 
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+static void set_child_lsm_owner_creds(struct nsproxy *nsproxy, u64 flags,
+				      bool new_syslog_ns, bool new_tracing_ns,
+				      struct user_namespace *user_ns,
+				      struct lsm_namespace *lsm_ns,
+				      const struct cred *cred)
+{
+	if (!cred)
+		return;
+
+	if (user_ns && user_ns != current_user_ns())
+		ns_common_set_owner_prop(&user_ns->ns, cred);
+	if (lsm_ns && lsm_ns != &init_lsm_ns)
+		ns_common_set_owner_prop(&lsm_ns->ns, cred);
+	if ((flags & CLONE_NEWNS) && nsproxy->mnt_ns)
+		ns_common_set_owner_prop(from_mnt_ns(nsproxy->mnt_ns), cred);
+	if ((flags & CLONE_NEWUTS) && nsproxy->uts_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->uts_ns), cred);
+	if ((flags & CLONE_NEWIPC) && nsproxy->ipc_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->ipc_ns), cred);
+	if ((flags & CLONE_NEWPID) && nsproxy->pid_ns_for_children) {
+		struct ns_common *ns;
+
+		ns = to_ns_common(nsproxy->pid_ns_for_children);
+		ns_common_set_owner_prop(ns, cred);
+	}
+	if ((flags & CLONE_NEWCGROUP) && nsproxy->cgroup_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->cgroup_ns), cred);
+	if ((flags & CLONE_NEWNET) && nsproxy->net_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->net_ns), cred);
+	if ((flags & CLONE_NEWTIME) && nsproxy->time_ns_for_children) {
+		struct ns_common *ns;
+
+		ns = to_ns_common(nsproxy->time_ns_for_children);
+		ns_common_set_owner_prop(ns, cred);
+	}
+	if (new_syslog_ns && nsproxy->syslog_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->syslog_ns), cred);
+#ifdef CONFIG_TRACING_NS
+	if (new_tracing_ns && nsproxy->tracing_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->tracing_ns), cred);
+#else
+	(void)new_tracing_ns;
+#endif
+}
+#endif
+
 static bool has_pending_child_ns_request(const struct task_struct *task,
 				 const struct user_namespace *user_ns)
 {
@@ -263,6 +310,9 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 			err = PTR_ERR(created_lsm_ns);
 			goto out_lsm;
 		}
+		set_child_lsm_owner_creds(new_nsp, flags, new_syslog_ns,
+					  new_tracing_ns, user_ns,
+					  created_lsm_ns, new_cred);
 		put_lsm_ns(created_lsm_ns);
 	}
 #endif

@@ -137,6 +137,10 @@ static int apparmor_ptrace_access_check(struct task_struct *child,
 	error = aa_may_ptrace(current_cred(), tracer, cred, tracee,
 			(mode & PTRACE_MODE_READ) ? AA_PTRACE_READ
 						  : AA_PTRACE_TRACE);
+	if (error)
+		pr_notice_ratelimited(
+			"vpsadminos_lsmct_diag: apparmor ptrace deny rc=%d mode=0x%x current=%d child=%d\n",
+			error, mode, task_pid_nr(current), task_pid_nr(child));
 	__end_current_label_crit_section(tracer, needput);
 	put_cred(cred);
 

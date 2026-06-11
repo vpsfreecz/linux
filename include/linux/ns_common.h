@@ -8,6 +8,8 @@
 
 struct proc_ns_operations;
 struct cred;
+struct inode;
+struct lsm_prop;
 
 struct cgroup_namespace;
 struct ipc_namespace;
@@ -50,6 +52,8 @@ struct ns_common {
 	struct dentry *stashed;
 	const struct proc_ns_operations *ops;
 	const struct cred *owner_cred;
+	struct lsm_prop *owner_prop;
+	bool owner_prop_set;
 	unsigned int inum;
 	refcount_t __ns_ref; /* do not use directly */
 	union {
@@ -62,7 +66,10 @@ struct ns_common {
 	};
 };
 
-int __ns_common_init(struct ns_common *ns, u32 ns_type, const struct proc_ns_operations *ops, int inum);
+int __ns_common_init(struct ns_common *ns, u32 ns_type,
+		     const struct proc_ns_operations *ops, int inum);
+void ns_common_set_owner_prop(struct ns_common *ns, const struct cred *cred);
+void ns_common_owner_to_inode(struct ns_common *ns, struct inode *inode);
 void __ns_common_free(struct ns_common *ns);
 
 #define to_ns_common(__ns)                                    \

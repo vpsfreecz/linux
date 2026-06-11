@@ -222,6 +222,8 @@ LSM_HOOK(void, LSM_RET_VOID, cred_transfer, struct cred *new,
 LSM_HOOK(void, LSM_RET_VOID, cred_getsecid, const struct cred *c, u32 *secid)
 LSM_HOOK(void, LSM_RET_VOID, cred_getlsmprop, const struct cred *c,
 	 struct lsm_prop *prop)
+LSM_HOOK(void, LSM_RET_VOID, cred_getlsmprop_global, const struct cred *c,
+	 struct lsm_prop *prop)
 LSM_HOOK(int, 0, kernel_act_as, struct cred *new, u32 secid)
 LSM_HOOK(int, 0, kernel_create_files_as, struct cred *new, struct inode *inode)
 LSM_HOOK(int, 0, kernel_module_request, char *kmod_name)
@@ -260,6 +262,8 @@ LSM_HOOK(int, -ENOSYS, task_prctl, int option, unsigned long arg2,
 LSM_HOOK(void, LSM_RET_VOID, task_to_inode, struct task_struct *p,
 	 struct inode *inode)
 LSM_HOOK(void, LSM_RET_VOID, cred_to_inode, const struct cred *cred,
+	 struct inode *inode)
+LSM_HOOK(void, LSM_RET_VOID, lsmprop_to_inode, const struct lsm_prop *prop,
 	 struct inode *inode)
 LSM_HOOK(int, 0, userns_create, const struct cred *cred)
 LSM_HOOK(int, 0, ipc_permission, struct kern_ipc_perm *ipcp, short flag)

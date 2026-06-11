@@ -3387,6 +3387,23 @@ void security_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
 EXPORT_SYMBOL(security_cred_getlsmprop);
 
 /**
+ * security_cred_getlsmprop_global() - Get a cred's global object LSM data
+ * @c: credentials
+ * @prop: destination for the LSM data
+ *
+ * Retrieve security data for host/global objects associated with @c.  For LSMs
+ * with nested state, this may differ from the credential's current inner
+ * subject identity.  Retained callers should call security_lsmprop_hold() and
+ * later security_release_lsmprop().
+ */
+void security_cred_getlsmprop_global(const struct cred *c, struct lsm_prop *prop)
+{
+	lsmprop_init(prop);
+	call_void_hook(cred_getlsmprop_global, c, prop);
+}
+EXPORT_SYMBOL(security_cred_getlsmprop_global);
+
+/**
  * security_kernel_act_as() - Set the kernel credentials to act as secid
  * @new: credentials
  * @secid: secid
@@ -3852,6 +3869,18 @@ void security_task_to_inode(struct task_struct *p, struct inode *inode)
 void security_cred_to_inode(const struct cred *cred, struct inode *inode)
 {
 	call_void_hook(cred_to_inode, cred, inode);
+}
+
+/**
+ * security_lsmprop_to_inode() - Set inode security from retained LSM data
+ * @prop: retained LSM data
+ * @inode: inode
+ *
+ * Set inode security attributes from a retained LSM property snapshot.
+ */
+void security_lsmprop_to_inode(const struct lsm_prop *prop, struct inode *inode)
+{
+	call_void_hook(lsmprop_to_inode, prop, inode);
 }
 
 /**
