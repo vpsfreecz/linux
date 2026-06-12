@@ -4040,7 +4040,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	struct common_audit_data ad;
 	struct inode *inode = file_inode(bprm->file);
 	u32 oldsid, file_sid, check_newsid;
-	bool explicit_exec_sid;
+	bool explicit_exec_sid, managed_payload_exec;
 	int rc;
 
 	/* SELinux context only depends on initial program or script and not
@@ -4054,6 +4054,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	oldsid = old_crsec->sid;
 	file_sid = isec->sid;
 	explicit_exec_sid = old_crsec->exec_sid;
+	managed_payload_exec = false;
 
 	/* Default to the current task SID. */
 	new_crsec->sid = oldsid;
@@ -4114,11 +4115,16 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	}
 
 	if (explicit_exec_sid) {
-		new_crsec->sid = old_crsec->exec_sid;
-		check_newsid = new_crsec->sid;
-		if (cred_pending_outer_active(current_cred()) &&
-		    cred_pending_outer_state(current_cred()) == state)
+		managed_payload_exec =
+			cred_pending_outer_active(current_cred()) &&
+			cred_pending_outer_state(current_cred()) == state;
+		if (managed_payload_exec) {
+			new_crsec->sid = SECINITSID_INIT;
 			check_newsid = cred_pending_outer_sid(current_cred());
+		} else {
+			new_crsec->sid = old_crsec->exec_sid;
+			check_newsid = new_crsec->sid;
+		}
 
 		/* Reset exec SID on execve. */
 		new_crsec->exec_sid = 0;
