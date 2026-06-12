@@ -4119,7 +4119,11 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 			cred_pending_outer_active(current_cred()) &&
 			cred_pending_outer_state(current_cred()) == state;
 		if (managed_payload_exec) {
-			new_crsec->sid = SECINITSID_INIT;
+			/*
+			 * The pending outer SID is the host-state check target.
+			 * Keep the explicit exec SID as the child-state current SID.
+			 */
+			new_crsec->sid = old_crsec->exec_sid;
 			check_newsid = cred_pending_outer_sid(current_cred());
 		} else {
 			new_crsec->sid = old_crsec->exec_sid;
