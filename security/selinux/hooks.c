@@ -3625,16 +3625,26 @@ static int superblock_has_perm(const struct cred *cred,
 {
 	struct superblock_security_struct *sbsec;
 	struct selinux_state *state;
-	u32 sid = cred_sid(cred);
+	u32 sid;
+	u32 target_sid;
 
 	sbsec = selinux_superblock(sb);
-	state = selinux_superblock_state_from_sec(sbsec);
-	if (cred_outer_active(cred) && state == cred_outer_state(cred))
-		sid = cred_outer_sid(cred);
-	else if (state != cred_selinux_state(cred))
-		return -EACCES;
+	if (selinux_sb_outer_active(sbsec)) {
+		state = sbsec->outer_state;
+		if (!cred_sid_for_state(cred, state, &sid))
+			return -EACCES;
+		target_sid = sbsec->outer_sid;
+	} else {
+		state = selinux_superblock_state_from_sec(sbsec);
+		sid = cred_sid(cred);
+		if (cred_outer_active(cred) && state == cred_outer_state(cred))
+			sid = cred_outer_sid(cred);
+		else if (state != cred_selinux_state(cred))
+			return -EACCES;
+		target_sid = sbsec->sid;
+	}
 
-	return avc_has_perm_state(state, sid, sbsec->sid, SECCLASS_FILESYSTEM,
+	return avc_has_perm_state(state, sid, target_sid, SECCLASS_FILESYSTEM,
 				  perms, ad);
 }
 
