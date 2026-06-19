@@ -730,6 +730,8 @@ static inline int security_get_allow_unknown(void)
 
 int security_fs_use_state(struct selinux_state *state, struct super_block *sb);
 
+int security_genfs_sid_state(struct selinux_state *state, const char *fstype,
+			     const char *path, u16 sclass, u32 *sid);
 int security_genfs_sid(const char *fstype, const char *path, u16 sclass,
 		       u32 *sid);
 

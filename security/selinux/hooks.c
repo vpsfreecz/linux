@@ -2448,8 +2448,9 @@ static int selinux_genfs_get_sid(struct dentry *dentry,
 				path++;
 			}
 		}
-		rc = security_genfs_sid(sb->s_type->name,
-					path, tclass, sid);
+		rc = security_genfs_sid_state(selinux_superblock_state(sb),
+					      sb->s_type->name, path, tclass,
+					      sid);
 		if (rc == -ENOENT) {
 			/* No match in policy, mark as unlabeled. */
 			*sid = SECINITSID_UNLABELED;

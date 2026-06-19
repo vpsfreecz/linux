@@ -3120,7 +3120,8 @@ static inline int __security_genfs_sid(struct selinux_policy *policy,
 }
 
 /**
- * security_genfs_sid - Obtain a SID for a file in a filesystem
+ * security_genfs_sid_state - Obtain a SID for a file in a filesystem
+ * @state: SELinux state used for policy lookup
  * @fstype: filesystem type
  * @path: path from root of mount
  * @orig_sclass: file security class
@@ -3129,12 +3130,12 @@ static inline int __security_genfs_sid(struct selinux_policy *policy,
  * Acquire policy_rwlock before calling __security_genfs_sid() and release
  * it afterward.
  */
-int security_genfs_sid(const char *fstype,
-		       const char *path,
-		       u16 orig_sclass,
-		       u32 *sid)
+int security_genfs_sid_state(struct selinux_state *state,
+			     const char *fstype,
+			     const char *path,
+			     u16 orig_sclass,
+			     u32 *sid)
 {
-	struct selinux_state *state = &selinux_state;
 	struct selinux_policy *policy;
 	int retval;
 
@@ -3154,6 +3155,15 @@ int security_genfs_sid(const char *fstype,
 		rcu_read_unlock();
 	} while (retval == -ESTALE);
 	return retval;
+}
+
+int security_genfs_sid(const char *fstype,
+		       const char *path,
+		       u16 orig_sclass,
+		       u32 *sid)
+{
+	return security_genfs_sid_state(&selinux_state, fstype, path,
+					orig_sclass, sid);
 }
 
 int selinux_policy_genfs_sid(struct selinux_policy *policy,
