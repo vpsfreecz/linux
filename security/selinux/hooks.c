@@ -4051,7 +4051,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	struct common_audit_data ad;
 	struct inode *inode = file_inode(bprm->file);
 	u32 oldsid, file_sid, check_newsid;
-	bool explicit_exec_sid, managed_payload_exec;
+	bool explicit_exec_sid, managed_payload_exec, defer_inner_exec_transition;
 	int rc;
 
 	/* SELinux context only depends on initial program or script and not
@@ -4066,6 +4066,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	file_sid = isec->sid;
 	explicit_exec_sid = old_crsec->exec_sid;
 	managed_payload_exec = false;
+	defer_inner_exec_transition = false;
 
 	/* Default to the current task SID. */
 	new_crsec->sid = oldsid;
@@ -4105,6 +4106,18 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 				&file_sid);
 			if (rc)
 				return rc;
+		} else if (!explicit_exec_sid &&
+			   selinux_state_child_policy_load_pending(state)) {
+			/*
+			 * The child namespace is still running the cloned parent
+			 * policy, so guest rootfs xattrs are not a meaningful
+			 * inner-policy input yet.  The outer data execute check
+			 * above is the enforcement point until the guest policy
+			 * is loaded; keep the child task in its current SID for
+			 * this exec instead of treating a host/outer data SID as
+			 * a child process SID.
+			 */
+			defer_inner_exec_transition = true;
 		} else {
 			u32 data_sid;
 
@@ -4149,6 +4162,9 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 					    check_newsid);
 		if (rc)
 			return rc;
+	} else if (defer_inner_exec_transition) {
+		check_newsid = oldsid;
+		new_crsec->sid = oldsid;
 	} else {
 		/* Check for a default transition on this program. */
 		rc = security_transition_sid_state(state, oldsid, file_sid,
@@ -4169,6 +4185,9 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 			check_newsid = oldsid;
 		}
 	}
+
+	if (defer_inner_exec_transition)
+		return 0;
 
 	if (check_newsid == oldsid) {
 		rc = avc_has_perm_state(state, oldsid, file_sid,
