@@ -95,11 +95,24 @@ int __ns_common_init(struct ns_common *ns, u32 ns_type,
 
 void ns_common_set_owner_prop(struct ns_common *ns, const struct cred *cred)
 {
+	const struct cred *old_cred;
+
 	if (!ns || !cred)
 		return;
 
 	if (!ns->owner_prop)
 		return;
+
+	/*
+	 * Keep the full credential for inode materialization so LSMs with
+	 * nested state can choose the identity that matches the inode's
+	 * superblock. The retained prop below is the host/global snapshot used
+	 * as a fallback for callers that cannot consume creds.
+	 */
+	old_cred = ns->owner_cred;
+	ns->owner_cred = get_cred(cred);
+	if (old_cred)
+		put_cred(old_cred);
 
 	security_release_lsmprop(ns->owner_prop);
 	security_cred_getlsmprop_global(cred, ns->owner_prop);
@@ -117,14 +130,18 @@ void ns_common_owner_to_inode(struct ns_common *ns, struct inode *inode)
 
 	owner_cred = READ_ONCE(ns->owner_cred);
 	owner_prop = READ_ONCE(ns->owner_prop);
+	if (owner_cred) {
+		/* Selects host/global or child-local identity by inode state. */
+		security_cred_to_inode(owner_cred, inode);
+		return;
+	}
+
 	if (READ_ONCE(ns->owner_prop_set) && owner_prop) {
 		security_lsmprop_to_inode(owner_prop, inode);
 		return;
 	}
 
-	if (!owner_cred)
-		owner_cred = &init_cred;
-	security_cred_to_inode(owner_cred, inode);
+	security_cred_to_inode(&init_cred, inode);
 }
 
 void __ns_common_free(struct ns_common *ns)
