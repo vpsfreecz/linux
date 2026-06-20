@@ -912,6 +912,7 @@ struct perf_event {
 	const struct btf_type		*container_kprobe_func_proto;
 	u16				container_kprobe_argc;
 	bool				container_kprobe_access_safe;
+	bool				container_kprobe_userns_lifecycle;
 
 #ifdef CONFIG_EVENT_TRACING
 	struct trace_event_call		*tp_event;

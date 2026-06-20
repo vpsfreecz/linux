@@ -91,6 +91,15 @@ static bool perf_event_container_current_ok(const struct perf_event *event)
 	       bpf_token_task_match(event->token, current);
 }
 
+static bool perf_event_current_container_allowed(const struct perf_event *event)
+{
+	if (!bpf_token_current_container_member())
+		return true;
+
+	return perf_event_token_is_container(event) &&
+	       bpf_token_task_match(event->token, current);
+}
+
 static bool perf_event_container_same_domain(const struct perf_event *event,
 					 const struct bpf_prog *prog)
 {
@@ -129,11 +138,38 @@ static bool perf_event_container_tracing_pmu(const struct perf_event *event)
 
 static bool perf_event_container_mmappable(const struct perf_event *event)
 {
+	if (!perf_event_current_container_allowed(event))
+		return false;
+
 	if (!perf_event_token_is_container(event))
 		return true;
 
-	return event->attr.type == PERF_TYPE_SOFTWARE &&
-	       event->attr.config == PERF_COUNT_SW_BPF_OUTPUT;
+	if (!bpf_token_task_match(event->token, current))
+		return false;
+
+	if (event->attr.type == PERF_TYPE_SOFTWARE &&
+	    event->attr.config == PERF_COUNT_SW_BPF_OUTPUT)
+		return true;
+
+	return bpf_token_capable(event->token, CAP_PERFMON) &&
+	       (READ_ONCE(event->attach_state) & PERF_ATTACH_TASK) &&
+	       bpf_token_task_match(event->token, event->hw.target);
+}
+
+static bool perf_event_container_readable(const struct perf_event *event)
+{
+	if (!perf_event_current_container_allowed(event))
+		return false;
+
+	if (!perf_event_token_is_container(event))
+		return true;
+
+	if (event->attr.type == PERF_TYPE_SOFTWARE &&
+	    event->attr.config == PERF_COUNT_SW_BPF_OUTPUT)
+		return true;
+
+	return bpf_token_capable(event->token, CAP_PERFMON) &&
+	       (READ_ONCE(event->attach_state) & PERF_ATTACH_TASK);
 }
 
 static bool perf_event_container_perfmon_capable(const struct perf_event *event)
@@ -152,6 +188,10 @@ static int perf_allow_kernel_container_event(const struct perf_event *event)
 {
 	int err = perf_allow_kernel();
 
+	if (!perf_event_token_is_container(event))
+		return err;
+	if (!err && !perf_event_container_tracing_pmu(event))
+		return -EACCES;
 	if (!err)
 		return 0;
 	if (perf_event_container_tracing_pmu(event) &&
@@ -164,6 +204,10 @@ static int perf_allow_cpu_container_event(const struct perf_event *event)
 {
 	int err = perf_allow_cpu();
 
+	if (!perf_event_token_is_container(event))
+		return err;
+	if (!err && !perf_event_container_tracing_pmu(event))
+		return -EACCES;
 	if (!err)
 		return 0;
 	if (perf_event_container_tracing_pmu(event) &&
@@ -182,6 +226,11 @@ static bool perf_event_container_current_ok(const struct perf_event *event)
 	return true;
 }
 
+static bool perf_event_current_container_allowed(const struct perf_event *event)
+{
+	return true;
+}
+
 static bool perf_event_container_same_domain(const struct perf_event *event,
 					 const struct bpf_prog *prog)
 {
@@ -189,6 +238,11 @@ static bool perf_event_container_same_domain(const struct perf_event *event,
 }
 
 static bool perf_event_container_mmappable(const struct perf_event *event)
+{
+	return true;
+}
+
+static bool perf_event_container_readable(const struct perf_event *event)
 {
 	return true;
 }
@@ -6266,7 +6320,10 @@ perf_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	ret = security_perf_event_read(event);
 	if (ret)
 		return ret;
-	if (perf_event_token_is_container(event))
+	if (!perf_event_current_container_allowed(event))
+		return -EACCES;
+	if (perf_event_token_is_container(event) &&
+	    !perf_event_container_readable(event))
 		return -EACCES;
 
 	ctx = perf_event_ctx_lock(event);
@@ -6283,6 +6340,8 @@ static __poll_t perf_poll(struct file *file, poll_table *wait)
 	__poll_t events = EPOLLHUP;
 
 	if (event->state <= PERF_EVENT_STATE_REVOKED)
+		return EPOLLERR;
+	if (!perf_event_current_container_allowed(event))
 		return EPOLLERR;
 
 	poll_wait(file, &event->waitq, wait);
@@ -6580,6 +6639,9 @@ static long perf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct perf_event *event = file->private_data;
 	struct perf_event_context *ctx;
 	long ret;
+
+	if (!perf_event_current_container_allowed(event))
+		return -EACCES;
 
 	/* Treat ioctl like writes as it is likely a mutating operation. */
 	ret = security_perf_event_write(event);
@@ -7357,6 +7419,8 @@ static int perf_fasync(int fd, struct file *filp, int on)
 
 	if (event->state <= PERF_EVENT_STATE_REVOKED)
 		return -ENODEV;
+	if (!perf_event_current_container_allowed(event))
+		return -EACCES;
 
 	inode_lock(inode);
 	retval = fasync_helper(fd, filp, on, &event->fasync);
@@ -11021,6 +11085,10 @@ static int perf_tp_event_init(struct perf_event *event)
 
 	if (event->attr.type != PERF_TYPE_TRACEPOINT)
 		return -ENOENT;
+#ifdef CONFIG_BPF_SYSCALL
+	if (perf_event_token_is_container(event))
+		return -EACCES;
+#endif
 
 	/*
 	 * no branch sampling for tracepoint events
@@ -11379,6 +11447,8 @@ static int __perf_event_set_bpf_prog(struct perf_event *event,
 
 	if (event->state <= PERF_EVENT_STATE_REVOKED)
 		return -ENODEV;
+	if (bpf_prog_container_libbpf_probe_only(prog))
+		return -EPERM;
 	if (!perf_event_container_same_domain(event, prog))
 		return -EACCES;
 
@@ -11412,6 +11482,10 @@ static int __perf_event_set_bpf_prog(struct perf_event *event,
 
 	if (is_kprobe && perf_event_token_is_container(event) &&
 	    !event->container_kprobe_func_proto)
+		return -EACCES;
+	if (prog->aux->container_userns_lifecycle_kprobe_only &&
+	    (!is_kprobe || !event->container_kprobe_userns_lifecycle ||
+	     !prog->aux->container_userns_lifecycle_kprobe_rdonly_cast))
 		return -EACCES;
 
 	if (is_tracepoint || is_syscall_tp) {
@@ -13090,6 +13164,8 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 		event->container_kprobe_argc = parent_event->container_kprobe_argc;
 		event->container_kprobe_access_safe =
 			parent_event->container_kprobe_access_safe;
+		event->container_kprobe_userns_lifecycle =
+			parent_event->container_kprobe_userns_lifecycle;
 		if (event->container_kprobe_btf)
 			btf_get(event->container_kprobe_btf);
 	} else if (sysctl_bpf_container_tracing_enabled) {
@@ -13590,7 +13666,6 @@ SYSCALL_DEFINE5(perf_event_open,
 	int err;
 	int f_flags = O_RDWR;
 	int cgroup_fd = -1;
-	bool defer_container_kernel_check = false;
 
 	/* for future expandability... */
 	if (flags & ~PERF_FLAG_ALL)
@@ -13611,7 +13686,6 @@ SYSCALL_DEFINE5(perf_event_open,
 			if (!(sysctl_bpf_container_tracing_enabled &&
 			      bpf_token_current_container_capable(CAP_PERFMON)))
 				return err;
-			defer_container_kernel_check = true;
 		}
 	}
 
@@ -13682,6 +13756,10 @@ SYSCALL_DEFINE5(perf_event_open,
 			err = -ENODEV;
 			goto err_fd;
 		}
+		if (!perf_event_current_container_allowed(group_leader)) {
+			err = -EACCES;
+			goto err_fd;
+		}
 		if (flags & PERF_FLAG_FD_OUTPUT)
 			output_event = group_leader;
 		if (flags & PERF_FLAG_FD_NO_GROUP)
@@ -13725,7 +13803,7 @@ SYSCALL_DEFINE5(perf_event_open,
 	 */
 	pmu = event->pmu;
 
-	if (!attr.exclude_kernel && defer_container_kernel_check) {
+	if (!attr.exclude_kernel) {
 		err = perf_allow_kernel_container_event(event);
 		if (err)
 			goto err_alloc;
@@ -14439,6 +14517,8 @@ void perf_event_delayed_put(struct task_struct *task)
 struct file *perf_event_get(unsigned int fd)
 {
 	struct file *file = fget(fd);
+	struct perf_event *event;
+
 	if (!file)
 		return ERR_PTR(-EBADF);
 
@@ -14447,15 +14527,27 @@ struct file *perf_event_get(unsigned int fd)
 		return ERR_PTR(-EBADF);
 	}
 
+	event = file->private_data;
+	if (!perf_event_current_container_allowed(event)) {
+		fput(file);
+		return ERR_PTR(-EACCES);
+	}
+
 	return file;
 }
 
 const struct perf_event *perf_get_event(struct file *file)
 {
+	const struct perf_event *event;
+
 	if (file->f_op != &perf_fops)
 		return ERR_PTR(-EINVAL);
 
-	return file->private_data;
+	event = file->private_data;
+	if (!perf_event_current_container_allowed(event))
+		return ERR_PTR(-EACCES);
+
+	return event;
 }
 
 const struct perf_event_attr *perf_event_attrs(struct perf_event *event)

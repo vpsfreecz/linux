@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/kprobes.h>
 #include <linux/security.h>
+#include <linux/string.h>
 #include <linux/bpf.h>
 #include "trace.h"
 #include "trace_probe.h"
@@ -292,6 +293,9 @@ static int perf_container_prepare_kprobe_target(struct perf_event *p_event,
 	p_event->container_kprobe_argc = btf_type_vlen(proto);
 	p_event->container_kprobe_access_safe =
 		bpf_token_allow_tracing_symbol_accesses(p_event->token, func);
+	p_event->container_kprobe_userns_lifecycle =
+		!strcmp(func, "free_user_ns") ||
+		!strcmp(func, "retire_userns_sysctls");
 	return 0;
 }
 #else
