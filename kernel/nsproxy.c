@@ -452,6 +452,225 @@ out:
 	return -ENOMEM;
 }
 
+static int pidfd_install_vpsadminos_tracing_ns(struct nsset *nsset,
+					       struct tracing_namespace *ns,
+					       struct user_namespace *user_ns,
+					       struct pid_namespace *pid_ns)
+{
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *old_ns;
+
+	if (!ns)
+		ns = &init_tracing_ns;
+
+	if (nsset->nsproxy->tracing_ns == ns)
+		return 0;
+
+	if (ns != &init_tracing_ns) {
+		if (!tracing_ns_matches_user_ns(ns, user_ns))
+			return -EPERM;
+		if (!tracing_ns_matches_pid_ns(ns, pid_ns))
+			return -EPERM;
+	}
+
+	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	old_ns = nsset->nsproxy->tracing_ns;
+	nsset->nsproxy->tracing_ns = get_tracing_ns(ns);
+	put_tracing_ns(old_ns);
+#endif
+	return 0;
+}
+
+#if defined(CONFIG_SYSLOG_NS) && !defined(CONFIG_TRACING_NS)
+static bool pidfd_vpsadminos_user_matches(const struct user_namespace *ns_user,
+					  const struct user_namespace *set_user)
+{
+	return ns_user == set_user || set_user == &init_user_ns;
+}
+#endif
+
+#ifdef CONFIG_SYSLOG_NS
+/*
+ * A staged non-initial tracing namespace carries the direct syslog-boundary
+ * membership validated by tracing_ns_check_syslogns_setns_from() and supplies
+ * the authority domain for installing that member. Without tracing namespaces,
+ * retain the syslog namespace's user-owner checks.
+ */
+static int pidfd_check_syslog_ns(const struct syslog_namespace *syslog_ns,
+				 const struct tracing_namespace *tracing_ns __maybe_unused,
+				 const struct user_namespace *user_ns __maybe_unused)
+{
+#ifdef CONFIG_TRACING_NS
+	return tracing_ns_check_syslogns_setns_from(syslog_ns, tracing_ns);
+#else
+	if (syslog_ns == &init_syslog_ns)
+		return 0;
+
+	return user_ns &&
+	       pidfd_vpsadminos_user_matches(syslog_ns->user_ns, user_ns) ?
+		0 : -EPERM;
+#endif
+}
+#endif
+
+static int pidfd_install_vpsadminos_syslog_ns(struct nsset *nsset,
+					      struct syslog_namespace *ns,
+					      struct user_namespace *user_ns)
+{
+#ifdef CONFIG_SYSLOG_NS
+	struct user_namespace *authority_user_ns;
+	int ret;
+
+	if (!ns)
+		ns = &init_syslog_ns;
+	authority_user_ns = ns->user_ns;
+
+	if (nsset->nsproxy->syslog_ns == ns)
+		return 0;
+
+	ret = pidfd_check_syslog_ns(ns, nsset->nsproxy->tracing_ns, user_ns);
+	if (ret)
+		return ret;
+
+#ifdef CONFIG_TRACING_NS
+	if (nsset->nsproxy->tracing_ns != &init_tracing_ns)
+		authority_user_ns = nsset->nsproxy->tracing_ns->user_ns;
+#endif
+	if (!ns_capable(authority_user_ns, CAP_SYS_ADMIN))
+		return -EPERM;
+
+	put_syslog_ns(nsset->nsproxy->syslog_ns);
+	nsset->nsproxy->syslog_ns = get_syslog_ns(ns);
+#endif
+	return 0;
+}
+
+/*
+ * Hidden namespaces accompany a visible pidfd namespace transition. Keep a
+ * capability probe whose requested visible memberships are already shared
+ * non-mutating; the ordinary install hooks below still enforce permissions.
+ */
+static bool pidfd_changes_visible_ns(struct nsset *nsset,
+				     const struct nsproxy *target,
+				     struct user_namespace *user_ns __maybe_unused,
+				     struct pid_namespace *pid_ns __maybe_unused)
+{
+	unsigned int flags = nsset->flags;
+	struct nsproxy *current_nsproxy = nsset->nsproxy;
+
+#ifdef CONFIG_USER_NS
+	if ((flags & CLONE_NEWUSER) && nsset->cred->user_ns != user_ns)
+		return true;
+#endif
+	if ((flags & CLONE_NEWNS) &&
+	    current_nsproxy->mnt_ns != target->mnt_ns)
+		return true;
+#ifdef CONFIG_UTS_NS
+	if ((flags & CLONE_NEWUTS) &&
+	    current_nsproxy->uts_ns != target->uts_ns)
+		return true;
+#endif
+#ifdef CONFIG_IPC_NS
+	if ((flags & CLONE_NEWIPC) &&
+	    current_nsproxy->ipc_ns != target->ipc_ns)
+		return true;
+#endif
+#ifdef CONFIG_PID_NS
+	if ((flags & CLONE_NEWPID) &&
+	    current_nsproxy->pid_ns_for_children != pid_ns)
+		return true;
+#endif
+#ifdef CONFIG_CGROUPS
+	if ((flags & CLONE_NEWCGROUP) &&
+	    current_nsproxy->cgroup_ns != target->cgroup_ns)
+		return true;
+#endif
+#ifdef CONFIG_NET_NS
+	if ((flags & CLONE_NEWNET) &&
+	    current_nsproxy->net_ns != target->net_ns)
+		return true;
+#endif
+#ifdef CONFIG_TIME_NS
+	if ((flags & CLONE_NEWTIME) &&
+	    (current_nsproxy->time_ns != target->time_ns ||
+	     current_nsproxy->time_ns_for_children != target->time_ns))
+		return true;
+#endif
+
+	return false;
+}
+
+static bool pidfd_vpsadminos_has_hidden(struct nsproxy *target)
+{
+#ifdef CONFIG_TRACING_NS
+	if (target->tracing_ns && target->tracing_ns != &init_tracing_ns)
+		return true;
+#endif
+
+#ifdef CONFIG_SYSLOG_NS
+	if (target->syslog_ns && target->syslog_ns != &init_syslog_ns)
+		return true;
+#endif
+
+	return false;
+}
+
+static int pidfd_prepare_vpsadminos_namespaces(struct nsset *nsset,
+					       struct nsproxy *target,
+					       struct user_namespace *user_ns,
+					       struct pid_namespace *pid_ns,
+					       struct user_namespace *target_user_ns,
+					       struct pid_namespace *target_pid_ns)
+{
+	struct user_namespace *hidden_user_ns = user_ns ?: target_user_ns;
+	struct pid_namespace *hidden_pid_ns = pid_ns ?: target_pid_ns;
+	int ret;
+
+#ifdef CONFIG_TRACING_NS
+	if (target->tracing_ns && target->tracing_ns != &init_tracing_ns &&
+	    (!hidden_user_ns || !hidden_pid_ns))
+		return -EINVAL;
+#endif
+#ifdef CONFIG_SYSLOG_NS
+	if (target->syslog_ns && target->syslog_ns != &init_syslog_ns &&
+	    !hidden_user_ns)
+		return -EINVAL;
+#endif
+
+	if (!pidfd_vpsadminos_has_hidden(target))
+		return 0;
+
+#ifdef CONFIG_TRACING_NS
+	if (target->tracing_ns && target->tracing_ns != &init_tracing_ns &&
+	    (!tracing_ns_matches_pid_ns(target->tracing_ns, hidden_pid_ns) ||
+	     !tracing_ns_matches_user_ns(target->tracing_ns,
+					 hidden_user_ns)))
+		return -EPERM;
+#endif
+#ifdef CONFIG_SYSLOG_NS
+	if (target->syslog_ns && target->syslog_ns != &init_syslog_ns) {
+		ret = pidfd_check_syslog_ns(target->syslog_ns,
+					    target->tracing_ns, hidden_user_ns);
+		if (ret)
+			return ret;
+	}
+#endif
+
+	ret = pidfd_install_vpsadminos_tracing_ns(nsset, target->tracing_ns,
+						  hidden_user_ns, hidden_pid_ns);
+	if (ret)
+		return ret;
+
+	ret = pidfd_install_vpsadminos_syslog_ns(nsset, target->syslog_ns,
+						 hidden_user_ns);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
 static inline int validate_ns(struct nsset *nsset, struct ns_common *ns)
 {
 	return ns->ops->install(nsset, ns);
@@ -469,7 +688,9 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 	int ret = 0;
 	unsigned flags = nsset->flags;
 	struct user_namespace *user_ns = NULL;
+	struct user_namespace *target_user_ns = NULL;
 	struct pid_namespace *pid_ns = NULL;
+	struct pid_namespace *target_pid_ns = NULL;
 	struct nsproxy *nsp;
 	struct task_struct *tsk;
 
@@ -497,22 +718,34 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 	}
 
 #ifdef CONFIG_PID_NS
+	target_pid_ns = task_active_pid_ns(tsk);
+	if (unlikely(!target_pid_ns)) {
+		rcu_read_unlock();
+		ret = -ESRCH;
+		goto out;
+	}
+	get_pid_ns(target_pid_ns);
+
 	if (flags & CLONE_NEWPID) {
-		pid_ns = task_active_pid_ns(tsk);
-		if (unlikely(!pid_ns)) {
-			rcu_read_unlock();
-			ret = -ESRCH;
-			goto out;
-		}
-		get_pid_ns(pid_ns);
+		pid_ns = get_pid_ns(target_pid_ns);
 	}
 #endif
 
 #ifdef CONFIG_USER_NS
+	target_user_ns = get_user_ns(__task_cred(tsk)->user_ns);
 	if (flags & CLONE_NEWUSER)
-		user_ns = get_user_ns(__task_cred(tsk)->user_ns);
+		user_ns = get_user_ns(target_user_ns);
 #endif
 	rcu_read_unlock();
+
+	if (pidfd_changes_visible_ns(nsset, nsp, user_ns, pid_ns)) {
+		ret = pidfd_prepare_vpsadminos_namespaces(nsset, nsp, user_ns,
+							  pid_ns,
+							  target_user_ns,
+							  target_pid_ns);
+		if (ret)
+			goto out;
+	}
 
 	/*
 	 * Install requested namespaces. The caller will have
@@ -585,9 +818,12 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 out:
 	if (pid_ns)
 		put_pid_ns(pid_ns);
+	if (target_pid_ns)
+		put_pid_ns(target_pid_ns);
 	if (nsp)
 		put_nsproxy(nsp);
 	put_user_ns(user_ns);
+	put_user_ns(target_user_ns);
 
 	return ret;
 }
