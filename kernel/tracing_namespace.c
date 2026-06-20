@@ -61,6 +61,26 @@ static bool tracing_ns_pid_contains(const struct tracing_namespace *ns,
 	return false;
 }
 
+static bool tracing_ns_pid_matches(const struct tracing_namespace *ns,
+				   const struct task_struct *task,
+				   const struct nsproxy *nsproxy)
+{
+	if (tracing_ns_pid_contains(ns,
+			task_active_pid_ns((struct task_struct *)task)))
+		return true;
+
+	/*
+	 * setns(CLONE_NEWPID) changes pid_ns_for_children immediately, while
+	 * the caller's active PID namespace changes only after the next fork.
+	 * A task that has already entered the container tracing namespace must
+	 * still be constrained as a tracing guest during that transition.
+	 */
+	if (nsproxy && tracing_ns_pid_contains(ns, nsproxy->pid_ns_for_children))
+		return true;
+
+	return false;
+}
+
 static bool tracing_ns_user_contains(const struct tracing_namespace *ns,
 				     const struct user_namespace *user_ns)
 {
@@ -71,6 +91,21 @@ static bool tracing_ns_user_contains(const struct tracing_namespace *ns,
 	}
 
 	return false;
+}
+
+static bool tracing_ns_user_matches(const struct tracing_namespace *ns,
+				    const struct user_namespace *user_ns)
+{
+	/*
+	 * Unmapped/privileged containers can execute tasks in the child
+	 * tracing/pid/syslog boundary while their credentials remain anchored
+	 * in init_user_ns. They still need to be treated as members of the
+	 * tracing guest so BPF/tracing restrictions apply to them.
+	 */
+	if (user_ns == &init_user_ns && ns != &init_tracing_ns)
+		return true;
+
+	return tracing_ns_user_contains(ns, user_ns);
 }
 
 static bool tracing_ns_syslog_contains(const struct tracing_namespace *ns,
@@ -120,9 +155,8 @@ bool tracing_ns_matches_task(const struct tracing_namespace *ns,
 	cred = __task_cred(task);
 	if (nsproxy && cred && nsproxy->tracing_ns == ns &&
 	    tracing_ns_syslog_contains(ns, nsproxy->syslog_ns))
-		match = tracing_ns_pid_contains(ns,
-				task_active_pid_ns((struct task_struct *)task)) &&
-			tracing_ns_user_contains(ns, cred->user_ns);
+		match = tracing_ns_pid_matches(ns, task, nsproxy) &&
+			tracing_ns_user_matches(ns, cred->user_ns);
 	rcu_read_unlock();
 
 	return match;
