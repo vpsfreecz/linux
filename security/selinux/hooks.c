@@ -2925,7 +2925,13 @@ static int cred_has_capability(const struct cred *cred,
 		return -EINVAL;
 	}
 
-	if (initns && cred_outer_active(cred)) {
+	/*
+	 * Capability hooks do not carry a state-tagged object SID.  When a task
+	 * has an active host outer identity, classify both host capabilities and
+	 * user-namespace-scoped capabilities through that host/global identity
+	 * instead of reinterpreting setup/payload SIDs through a guest policy.
+	 */
+	if (cred_outer_active(cred)) {
 		state = cred_outer_state(cred);
 		sid = cred_outer_sid(cred);
 	}
