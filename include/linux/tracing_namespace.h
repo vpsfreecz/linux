@@ -37,11 +37,21 @@ struct tracing_namespace *copy_tracing_ns(bool new_child,
 bool tracing_ns_matches_task(const struct tracing_namespace *ns,
 			     const struct task_struct *task);
 bool tracing_ns_matches_current(const struct tracing_namespace *ns);
+bool tracing_ns_matches_user_ns(const struct tracing_namespace *ns,
+				const struct user_namespace *user_ns);
+bool tracing_ns_matches_pid_ns(const struct tracing_namespace *ns,
+			       const struct pid_namespace *pid_ns);
 int setup_tracing_namespace(struct tracing_namespace *ns);
 void free_tracing_ns(struct tracing_namespace *ns);
 int tracing_ns_check_userns_setns(const struct user_namespace *user_ns);
+int tracing_ns_check_userns_setns_from(const struct user_namespace *user_ns,
+				       const struct tracing_namespace *source_ns);
 int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns);
+int tracing_ns_check_pidns_setns_from(const struct pid_namespace *pid_ns,
+				      const struct tracing_namespace *source_ns);
 int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns);
+int tracing_ns_check_syslogns_setns_from(const struct syslog_namespace *syslog_ns,
+					 const struct tracing_namespace *source_ns);
 
 static inline struct tracing_namespace *current_tracing_ns(void)
 {
@@ -136,6 +146,20 @@ tracing_ns_matches_current(const struct tracing_namespace *ns)
 	return false;
 }
 
+static inline bool
+tracing_ns_matches_user_ns(const struct tracing_namespace *ns,
+			   const struct user_namespace *user_ns)
+{
+	return false;
+}
+
+static inline bool
+tracing_ns_matches_pid_ns(const struct tracing_namespace *ns,
+			  const struct pid_namespace *pid_ns)
+{
+	return false;
+}
+
 static inline int setup_tracing_namespace(struct tracing_namespace *ns)
 {
 	return 0;
@@ -148,12 +172,33 @@ static inline int tracing_ns_check_userns_setns(const struct user_namespace *use
 	return 0;
 }
 
+static inline int
+tracing_ns_check_userns_setns_from(const struct user_namespace *user_ns,
+				   const struct tracing_namespace *source_ns)
+{
+	return 0;
+}
+
 static inline int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns)
 {
 	return 0;
 }
 
+static inline int
+tracing_ns_check_pidns_setns_from(const struct pid_namespace *pid_ns,
+				  const struct tracing_namespace *source_ns)
+{
+	return 0;
+}
+
 static inline int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns)
+{
+	return 0;
+}
+
+static inline int
+tracing_ns_check_syslogns_setns_from(const struct syslog_namespace *syslog_ns,
+				     const struct tracing_namespace *source_ns)
 {
 	return 0;
 }
