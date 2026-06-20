@@ -297,7 +297,8 @@ static inline const char *kernel_load_data_id_str(enum kernel_load_data_id id)
  * lsmprop_init - initialize a lsm_prop structure
  * @prop: Pointer to the data to initialize
  *
- * Set all secid for all modules to the specified value.
+ * Clear all exported LSM identifiers and any auxiliary state identity carried
+ * alongside them.
  */
 static inline void lsmprop_init(struct lsm_prop *prop)
 {
@@ -497,6 +498,7 @@ int security_prepare_creds(struct cred *new, const struct cred *old, gfp_t gfp);
 void security_transfer_creds(struct cred *new, const struct cred *old);
 void security_cred_getsecid(const struct cred *c, u32 *secid);
 void security_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop);
+void security_cred_getlsmprop_global(const struct cred *c, struct lsm_prop *prop);
 int security_kernel_act_as(struct cred *new, u32 secid);
 int security_kernel_create_files_as(struct cred *new, struct inode *inode);
 int security_kernel_module_request(char *kmod_name);
@@ -518,6 +520,8 @@ int security_task_getpgid(struct task_struct *p);
 int security_task_getsid(struct task_struct *p);
 void security_current_getlsmprop_subj(struct lsm_prop *prop);
 void security_task_getlsmprop_obj(struct task_struct *p, struct lsm_prop *prop);
+void security_task_getlsmprop_obj_held(struct task_struct *p,
+				       struct lsm_prop *prop);
 int security_task_setnice(struct task_struct *p, int nice);
 int security_task_setioprio(struct task_struct *p, int ioprio);
 int security_task_getioprio(struct task_struct *p);
@@ -533,6 +537,8 @@ int security_task_kill(struct task_struct *p, struct kernel_siginfo *info,
 int security_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 			unsigned long arg4, unsigned long arg5);
 void security_task_to_inode(struct task_struct *p, struct inode *inode);
+void security_cred_to_inode(const struct cred *cred, struct inode *inode);
+void security_lsmprop_to_inode(const struct lsm_prop *prop, struct inode *inode);
 int security_create_user_ns(const struct cred *cred);
 int security_ipc_permission(struct kern_ipc_perm *ipcp, short flag);
 void security_ipc_getlsmprop(struct kern_ipc_perm *ipcp, struct lsm_prop *prop);
@@ -569,12 +575,16 @@ int security_ismaclabel(const char *name);
 int security_secid_to_secctx(u32 secid, struct lsm_context *cp);
 int security_lsmprop_to_secctx(struct lsm_prop *prop, struct lsm_context *cp,
 			       int lsmid);
+void security_lsmprop_hold(struct lsm_prop *prop);
+void security_release_lsmprop(struct lsm_prop *prop);
 int security_secctx_to_secid(const char *secdata, u32 seclen, u32 *secid);
 void security_release_secctx(struct lsm_context *cp);
 void security_inode_invalidate_secctx(struct inode *inode);
 int security_inode_notifysecctx(struct inode *inode, void *ctx, u32 ctxlen);
 int security_inode_setsecctx(struct dentry *dentry, void *ctx, u32 ctxlen);
 int security_inode_getsecctx(struct inode *inode, struct lsm_context *cp);
+int security_fsnotify_event(const struct cred *cred, struct inode *inode,
+			    struct inode *dir, u32 mask);
 int security_locked_down(enum lockdown_reason what);
 int lsm_fill_user_ctx(struct lsm_ctx __user *uctx, u32 *uctx_len,
 		      void *val, size_t val_len, u64 id, u64 flags);
@@ -1251,7 +1261,15 @@ static inline void security_cred_getsecid(const struct cred *c, u32 *secid)
 
 static inline void security_cred_getlsmprop(const struct cred *c,
 					    struct lsm_prop *prop)
-{ }
+{
+	lsmprop_init(prop);
+}
+
+static inline void security_cred_getlsmprop_global(const struct cred *c,
+						   struct lsm_prop *prop)
+{
+	lsmprop_init(prop);
+}
 
 static inline int security_kernel_act_as(struct cred *cred, u32 secid)
 {
@@ -1341,6 +1359,12 @@ static inline void security_task_getlsmprop_obj(struct task_struct *p,
 	lsmprop_init(prop);
 }
 
+static inline void security_task_getlsmprop_obj_held(struct task_struct *p,
+					     struct lsm_prop *prop)
+{
+	security_task_getlsmprop_obj(p, prop);
+}
+
 static inline int security_task_setnice(struct task_struct *p, int nice)
 {
 	return cap_task_setnice(p, nice);
@@ -1401,6 +1425,9 @@ static inline int security_task_prctl(int option, unsigned long arg2,
 }
 
 static inline void security_task_to_inode(struct task_struct *p, struct inode *inode)
+{ }
+
+static inline void security_cred_to_inode(const struct cred *cred, struct inode *inode)
 { }
 
 static inline int security_create_user_ns(const struct cred *cred)
@@ -1558,6 +1585,20 @@ static inline int security_lsmprop_to_secctx(struct lsm_prop *prop,
 	return -EOPNOTSUPP;
 }
 
+static inline void security_lsmprop_hold(struct lsm_prop *prop)
+{
+}
+
+static inline void security_release_lsmprop(struct lsm_prop *prop)
+{
+	lsmprop_init(prop);
+}
+
+static inline void security_lsmprop_to_inode(const struct lsm_prop *prop,
+					     struct inode *inode)
+{
+}
+
 static inline int security_secctx_to_secid(const char *secdata,
 					   u32 seclen,
 					   u32 *secid)
@@ -1585,6 +1626,12 @@ static inline int security_inode_getsecctx(struct inode *inode,
 					   struct lsm_context *cp)
 {
 	return -EOPNOTSUPP;
+}
+static inline int security_fsnotify_event(const struct cred *cred,
+					  struct inode *inode,
+					  struct inode *dir, u32 mask)
+{
+	return 0;
 }
 static inline int security_locked_down(enum lockdown_reason what)
 {
@@ -1661,7 +1708,8 @@ int security_socket_shutdown(struct socket *sock, int how);
 int security_sock_rcv_skb(struct sock *sk, struct sk_buff *skb);
 int security_socket_getpeersec_stream(struct socket *sock, sockptr_t optval,
 				      sockptr_t optlen, unsigned int len);
-int security_socket_getpeersec_dgram(struct socket *sock, struct sk_buff *skb, u32 *secid);
+int security_socket_getpeersec_dgram(struct socket *sock, struct sk_buff *skb,
+				     u32 *secid, struct lsm_prop *prop);
 int security_sk_alloc(struct sock *sk, int family, gfp_t priority);
 void security_sk_free(struct sock *sk);
 void security_sk_clone(const struct sock *sk, struct sock *newsk);
@@ -1677,6 +1725,7 @@ void security_inet_csk_clone(struct sock *newsk,
 void security_inet_conn_established(struct sock *sk,
 			struct sk_buff *skb);
 int security_secmark_relabel_packet(u32 secid);
+int security_secmark_raw_set(void);
 void security_secmark_refcount_inc(void);
 void security_secmark_refcount_dec(void);
 int security_tun_dev_alloc_security(void **security);
@@ -1811,8 +1860,13 @@ static inline int security_socket_getpeersec_stream(struct socket *sock,
 	return -ENOPROTOOPT;
 }
 
-static inline int security_socket_getpeersec_dgram(struct socket *sock, struct sk_buff *skb, u32 *secid)
+static inline int security_socket_getpeersec_dgram(struct socket *sock,
+						   struct sk_buff *skb,
+						   u32 *secid,
+						   struct lsm_prop *prop)
 {
+	if (prop)
+		lsmprop_init(prop);
 	return -ENOPROTOOPT;
 }
 
@@ -1860,6 +1914,11 @@ static inline void security_inet_conn_established(struct sock *sk,
 }
 
 static inline int security_secmark_relabel_packet(u32 secid)
+{
+	return 0;
+}
+
+static inline int security_secmark_raw_set(void)
 {
 	return 0;
 }

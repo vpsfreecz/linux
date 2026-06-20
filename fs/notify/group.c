@@ -6,6 +6,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/cred.h>
 #include <linux/srcu.h>
 #include <linux/rculist.h>
 #include <linux/wait.h>
@@ -24,6 +25,7 @@ static void fsnotify_final_destroy_group(struct fsnotify_group *group)
 	if (group->ops->free_group_priv)
 		group->ops->free_group_priv(group);
 
+	put_cred(group->owner_cred);
 	mem_cgroup_put(group->memcg);
 	mutex_destroy(&group->mark_mutex);
 
@@ -134,6 +136,7 @@ static struct fsnotify_group *__fsnotify_alloc_group(
 	INIT_LIST_HEAD(&group->marks_list);
 
 	group->ops = ops;
+	group->owner_cred = get_current_cred();
 	group->flags = flags;
 
 	return group;

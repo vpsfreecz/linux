@@ -15,6 +15,20 @@ config SECURITY_APPARMOR
 
 	  If you are unsure how to answer this question, answer N.
 
+config SECURITY_APPARMOR_ALLOW_ROOT_NS_POLICY
+	bool "Allow AppArmor policy administration in the root namespace"
+	depends on SECURITY_APPARMOR
+	default n
+	help
+	  Keep this disabled for a vpsAdminOS-style host where AppArmor is
+	  built in to support guest policy namespaces but the host/root
+	  AppArmor namespace should not become a policy administration
+	  target.
+
+	  When disabled, policy load/replace/remove operations against the
+	  AppArmor root namespace are rejected. A boot-time override is
+	  available with apparmor.root_ns_policy=1.
+
 config SECURITY_APPARMOR_DEBUG
 	bool "Build AppArmor with debug code"
 	depends on SECURITY_APPARMOR

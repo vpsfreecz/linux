@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/capability.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -17,6 +18,9 @@
 #endif
 #ifndef SYSLOG_ACTION_NEW_TRACING_NS
 #define SYSLOG_ACTION_NEW_TRACING_NS 12
+#endif
+#ifndef __NR_pidfd_open
+#define __NR_pidfd_open SYS_pidfd_open
 #endif
 
 #ifndef STACK_SIZE
@@ -115,6 +119,29 @@ static int setup_child_idmaps(pid_t pid)
 	return write_child_id_map(pid, "gid_map", getgid());
 }
 
+static int drop_cap_sys_admin(void)
+{
+	struct __user_cap_header_struct hdr = {
+		.version = _LINUX_CAPABILITY_VERSION_3,
+		.pid = 0,
+	};
+	struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = {};
+	unsigned int idx = CAP_SYS_ADMIN / 32;
+	__u32 mask = 1U << (CAP_SYS_ADMIN % 32);
+
+	if (syscall(SYS_capget, &hdr, data) < 0)
+		return errno;
+
+	data[idx].effective &= ~mask;
+	data[idx].permitted &= ~mask;
+	data[idx].inheritable &= ~mask;
+
+	if (syscall(SYS_capset, &hdr, data) < 0)
+		return errno;
+
+	return 0;
+}
+
 static void maybe_hold_for_parent_probe(struct child_cfg *cfg)
 {
 	char byte;
@@ -177,8 +204,10 @@ static int probe_ns_setns_errno(pid_t pid, const char *ns_name, int nstype)
 	if (waitpid(probe, &status, 0) < 0)
 		return errno;
 
-	if (!WIFEXITED(status))
-		return ECHILD;
+	if (!WIFEXITED(status)) {
+		err = ECHILD;
+		return err;
+	}
 
 	return err;
 }
@@ -196,6 +225,113 @@ static int probe_pidns_setns_errno(pid_t pid)
 static int probe_syslogns_setns_errno(pid_t pid)
 {
 	return probe_ns_setns_errno(pid, "syslog", 0);
+}
+
+static int probe_pidfd_setns_errno(pid_t pid)
+{
+	int pipefd[2];
+	pid_t probe;
+	int status;
+	int err = 0;
+
+	if (pipe(pipefd) < 0)
+		return errno;
+
+	probe = fork();
+	if (probe < 0) {
+		err = errno;
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return err;
+	}
+
+	if (probe == 0) {
+		int fd, ret, setns_errno = 0;
+
+		close(pipefd[0]);
+		fd = syscall(__NR_pidfd_open, pid, 0);
+		if (fd < 0) {
+			setns_errno = errno;
+		} else {
+			ret = setns(fd, CLONE_NEWUSER | CLONE_NEWPID);
+			setns_errno = ret < 0 ? errno : 0;
+			close(fd);
+		}
+		if (write(pipefd[1], &setns_errno, sizeof(setns_errno)) != sizeof(setns_errno))
+			;
+		close(pipefd[1]);
+		_exit(0);
+	}
+
+	close(pipefd[1]);
+	if (read(pipefd[0], &err, sizeof(err)) != sizeof(err))
+		err = EIO;
+	close(pipefd[0]);
+
+	if (waitpid(probe, &status, 0) < 0)
+		return errno;
+
+	if (!WIFEXITED(status)) {
+		err = ECHILD;
+		return err;
+	}
+
+	return err;
+}
+
+static int probe_pidfd_setns_without_source_cap_errno(pid_t pid)
+{
+	int pipefd[2];
+	pid_t probe;
+	int status;
+	int err = 0;
+
+	if (pipe(pipefd) < 0)
+		return errno;
+
+	probe = fork();
+	if (probe < 0) {
+		err = errno;
+		close(pipefd[0]);
+		close(pipefd[1]);
+		return err;
+	}
+
+	if (probe == 0) {
+		int fd, ret, setns_errno = 0;
+
+		close(pipefd[0]);
+		setns_errno = drop_cap_sys_admin();
+
+		if (!setns_errno) {
+			fd = syscall(__NR_pidfd_open, pid, 0);
+			if (fd < 0) {
+				setns_errno = errno;
+			} else {
+				ret = setns(fd, CLONE_NEWUSER | CLONE_NEWPID);
+				setns_errno = ret < 0 ? errno : 0;
+				close(fd);
+			}
+		}
+
+		if (write(pipefd[1], &setns_errno, sizeof(setns_errno)) != sizeof(setns_errno))
+			;
+		close(pipefd[1]);
+		_exit(0);
+	}
+
+	close(pipefd[1]);
+	if (read(pipefd[0], &err, sizeof(err)) != sizeof(err))
+		err = EIO;
+	close(pipefd[0]);
+
+	if (waitpid(probe, &status, 0) < 0)
+		return errno;
+
+	if (!WIFEXITED(status))
+		return ECHILD;
+
+	return err;
 }
 
 static int noop_child_main(void *arg)
@@ -326,6 +462,8 @@ int main(int argc, char **argv)
 	bool parent_setns_child_user = false;
 	bool parent_setns_child_pid = false;
 	bool parent_setns_child_syslog = false;
+	bool parent_pidfd_setns_child = false;
+	bool parent_pidfd_setns_child_without_source_cap = false;
 	bool retry_after_failed_first_clone = false;
 	const char *syslog_name = NULL;
 	const char *nested_syslog_name = NULL;
@@ -363,6 +501,10 @@ int main(int argc, char **argv)
 			parent_setns_child_pid = true;
 		} else if (!strcmp(argv[i], "--parent-setns-child-syslog")) {
 			parent_setns_child_syslog = true;
+		} else if (!strcmp(argv[i], "--parent-pidfd-setns-child")) {
+			parent_pidfd_setns_child = true;
+		} else if (!strcmp(argv[i], "--parent-pidfd-setns-child-without-source-cap")) {
+			parent_pidfd_setns_child_without_source_cap = true;
 		} else if (!strcmp(argv[i], "--retry-after-failed-first-clone")) {
 			retry_after_failed_first_clone = true;
 		} else if (!strcmp(argv[i], "--nested-syslog-name")) {
@@ -420,7 +562,8 @@ int main(int argc, char **argv)
 	}
 
 	need_parent_probe = parent_setns_child_user || parent_setns_child_pid ||
-		parent_setns_child_syslog;
+		parent_setns_child_syslog || parent_pidfd_setns_child ||
+		parent_pidfd_setns_child_without_source_cap;
 
 	if (pipe(pipefd) < 0) {
 		perror("pipe");
@@ -515,6 +658,13 @@ int main(int argc, char **argv)
 		if (parent_setns_child_syslog)
 			dprintf(STDOUT_FILENO, "parent_setns_child_syslog_errno=%d\n",
 				probe_syslogns_setns_errno(pid));
+		if (parent_pidfd_setns_child)
+			dprintf(STDOUT_FILENO, "parent_pidfd_setns_child_errno=%d\n",
+				probe_pidfd_setns_errno(pid));
+		if (parent_pidfd_setns_child_without_source_cap)
+			dprintf(STDOUT_FILENO,
+				"parent_pidfd_setns_child_without_source_cap_errno=%d\n",
+				probe_pidfd_setns_without_source_cap_errno(pid));
 
 		if (write(release_pipe[1], "R", 1) < 0)
 			perror("write");

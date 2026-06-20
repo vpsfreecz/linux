@@ -9,6 +9,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mount.h>
+#include <linux/security.h>
 #include <linux/srcu.h>
 
 #include <linux/fsnotify_backend.h>
@@ -387,7 +388,9 @@ static int send_to_group(__u32 mask, const void *data, int data_type,
 	__u32 marks_ignore_mask = 0;
 	bool is_dir = mask & FS_ISDIR;
 	struct fsnotify_mark *mark;
+	struct inode *event_inode;
 	int type;
+	int ret;
 
 	if (!iter_info->report_mask)
 		return 0;
@@ -415,6 +418,14 @@ static int send_to_group(__u32 mask, const void *data, int data_type,
 
 	if (!(test_mask & marks_mask & ~marks_ignore_mask))
 		return 0;
+
+	event_inode = fsnotify_data_inode(data, data_type);
+	if (!event_inode)
+		event_inode = dir;
+	ret = security_fsnotify_event(group->owner_cred, event_inode, dir,
+				      mask);
+	if (ret)
+		return ret;
 
 	if (group->ops->handle_event) {
 		return group->ops->handle_event(group, mask, data, data_type, dir,

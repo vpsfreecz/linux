@@ -13,6 +13,7 @@ struct pid_namespace;
 struct cgroup_namespace;
 struct syslog_namespace;
 struct tracing_namespace;
+struct lsm_namespace;
 struct fs_struct;
 
 /*
@@ -60,6 +61,7 @@ struct nsset {
 	struct nsproxy *nsproxy;
 	struct fs_struct *fs;
 	const struct cred *cred;
+	struct lsm_namespace *lsm_ns;
 };
 
 static inline struct cred *nsset_cred(struct nsset *set)

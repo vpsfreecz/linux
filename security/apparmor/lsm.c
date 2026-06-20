@@ -10,6 +10,7 @@
 
 #include <linux/lsm_hooks.h>
 #include <linux/moduleparam.h>
+#include <linux/lsm_namespace.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/mount.h>
@@ -17,6 +18,7 @@
 #include <linux/ptrace.h>
 #include <linux/ctype.h>
 #include <linux/sysctl.h>
+#include <linux/slab.h>
 #include <linux/audit.h>
 #include <linux/user_namespace.h>
 #include <linux/netfilter_ipv4.h>
@@ -135,6 +137,10 @@ static int apparmor_ptrace_access_check(struct task_struct *child,
 	error = aa_may_ptrace(current_cred(), tracer, cred, tracee,
 			(mode & PTRACE_MODE_READ) ? AA_PTRACE_READ
 						  : AA_PTRACE_TRACE);
+	if (error)
+		pr_notice_ratelimited(
+			"vpsadminos_lsmct_diag: apparmor ptrace deny rc=%d mode=0x%x current=%d child=%d\n",
+			error, mode, task_pid_nr(current), task_pid_nr(child));
 	__end_current_label_crit_section(tracer, needput);
 	put_cred(cred);
 
@@ -1607,7 +1613,8 @@ done:
  * Sets the netlabel socket state on sk from parent
  */
 static int apparmor_socket_getpeersec_dgram(struct socket *sock,
-					    struct sk_buff *skb, u32 *secid)
+					    struct sk_buff *skb, u32 *secid,
+					    struct lsm_prop *prop)
 
 {
 	/* TODO: requires secid support */
@@ -1874,6 +1881,11 @@ module_param_named(audit_header, aa_g_audit_header, aabool,
 bool aa_g_lock_policy;
 module_param_named(lock_policy, aa_g_lock_policy, aalockpolicy,
 		   S_IRUSR | S_IWUSR);
+
+/* allow policy administration in the AppArmor root namespace */
+bool aa_g_root_ns_policy =
+	IS_ENABLED(CONFIG_SECURITY_APPARMOR_ALLOW_ROOT_NS_POLICY);
+module_param_named(root_ns_policy, aa_g_root_ns_policy, bool, 0400);
 
 /* Syscall logging mode */
 bool aa_g_logsyscall;
@@ -2228,6 +2240,194 @@ void aa_put_buffer(char *buf)
 	put_cpu_ptr(&aa_local_buffers);
 }
 
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+struct aa_lsmns_backend_data {
+	struct aa_ns *ns;
+};
+
+static bool aa_lsmns_valid_name(const char *name)
+{
+	const char *p;
+
+	if (!name || !*name || name[0] == '/' || name[0] == '@')
+		return false;
+
+	for (p = name; *p; p++)
+		if (*p == '/' || *p == ':')
+			return false;
+
+	return true;
+}
+
+static int aa_lsmns_name(const struct lsm_namespace *ns,
+			 const struct lsm_ctx *ctx,
+			 char *name, size_t size)
+{
+	const char *ctx_name = (const char *)ctx->ctx;
+	size_t len;
+
+	if (ctx->ctx_len) {
+		len = strnlen(ctx_name, ctx->ctx_len);
+		if (len + 1 != ctx->ctx_len || !aa_lsmns_valid_name(ctx_name))
+			return -EINVAL;
+
+		return strscpy(name, ctx_name, size) < 0 ? -ENAMETOOLONG : 0;
+	}
+
+	return scnprintf(name, size, "lsmns-%u", ns->ns.inum) >= size ?
+		-ENAMETOOLONG : 0;
+}
+
+static void aa_lsmns_drop_child(struct aa_ns *child)
+{
+	struct aa_ns *parent;
+
+	if (!child)
+		return;
+
+	parent = aa_get_ns(child->parent);
+	if (parent) {
+		mutex_lock_nested(&parent->lock, parent->level);
+		__aa_remove_ns(child);
+		mutex_unlock(&parent->lock);
+		aa_put_ns(parent);
+	}
+
+	aa_put_ns(child);
+}
+
+static int aa_lsmns_install_cred_label(struct task_struct *task,
+			      struct cred *cred, struct aa_ns *child)
+{
+	struct aa_label *label;
+	struct aa_task_ctx *ctx;
+
+	if (!task || !cred || !child)
+		return -EINVAL;
+
+	label = ns_unconfined(child);
+	ctx = task_ctx(task);
+
+	if (task == current && ctx->nnp && label_is_stale(ctx->nnp)) {
+		struct aa_label *tmp = ctx->nnp;
+
+		ctx->nnp = aa_get_newest_label(tmp);
+		aa_put_label(tmp);
+	}
+
+	if (unconfined(label) || labels_ns(cred_label(cred)) != labels_ns(label))
+		aa_clear_task_ctx_trans(ctx);
+
+	aa_get_label(label);
+	aa_put_label(cred_label(cred));
+	set_cred_label(cred, label);
+
+	return 0;
+}
+
+static int aa_lsmns_install_task_label(struct task_struct *task,
+				       struct cred *new_cred, struct aa_ns *child)
+{
+	if (!task || !child)
+		return -EINVAL;
+
+	if (!new_cred)
+		return -EINVAL;
+
+	return aa_lsmns_install_cred_label(task, new_cred, child);
+}
+
+static int aa_lsmns_backend_prepare_unshare(const struct lsm_ctx *ctx)
+{
+	const char *name;
+	size_t len;
+
+	if (!apparmor_enabled || !apparmor_initialized || !root_ns)
+		return -EOPNOTSUPP;
+
+	if (!unprivileged_userns_apparmor_policy)
+		return -EPERM;
+
+	if (ctx->ctx_len) {
+		name = (const char *)ctx->ctx;
+		len = strnlen(name, ctx->ctx_len);
+		if (len + 1 != ctx->ctx_len || !aa_lsmns_valid_name(name))
+			return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int aa_lsmns_backend_create(struct lsm_namespace *ns,
+				   struct task_struct *task,
+				   struct cred *new_cred,
+				   const struct lsm_ctx *ctx)
+{
+	struct aa_lsmns_backend_data *backend;
+	struct aa_ns *child;
+	char name[64];
+	int error;
+
+	if (!ns || ns->lsmid != LSM_ID_APPARMOR)
+		return -EINVAL;
+
+	if (!apparmor_enabled || !apparmor_initialized || !root_ns)
+		return -EOPNOTSUPP;
+
+	if (ns->backend_data)
+		return -EBUSY;
+
+	error = aa_lsmns_name(ns, ctx, name, sizeof(name));
+	if (error)
+		return error;
+
+	backend = kzalloc(sizeof(*backend), GFP_KERNEL);
+	if (!backend)
+		return -ENOMEM;
+
+	mutex_lock_nested(&root_ns->lock, root_ns->level);
+	child = __aa_find_or_create_ns(root_ns, name, NULL);
+	mutex_unlock(&root_ns->lock);
+	if (IS_ERR(child)) {
+		error = PTR_ERR(child);
+		goto fail_backend;
+	}
+
+	error = aa_lsmns_install_task_label(task, new_cred, child);
+	if (error)
+		goto fail_child;
+
+	backend->ns = child;
+	ns->backend_data = backend;
+	return 0;
+
+fail_child:
+	aa_lsmns_drop_child(child);
+fail_backend:
+	kfree(backend);
+	return error;
+}
+
+static void aa_lsmns_backend_destroy(struct lsm_namespace *ns)
+{
+	struct aa_lsmns_backend_data *backend = ns->backend_data;
+
+	if (!backend)
+		return;
+
+	ns->backend_data = NULL;
+	aa_lsmns_drop_child(backend->ns);
+	kfree(backend);
+}
+
+static const struct lsm_namespace_backend aa_lsmns_backend = {
+	.lsmid = LSM_ID_APPARMOR,
+	.prepare_unshare = aa_lsmns_backend_prepare_unshare,
+	.create = aa_lsmns_backend_create,
+	.destroy = aa_lsmns_backend_destroy,
+};
+#endif
+
 /*
  * AppArmor init functions
  */
@@ -2529,6 +2729,14 @@ static int __init apparmor_init(void)
 	}
 	security_add_hooks(apparmor_hooks, ARRAY_SIZE(apparmor_hooks),
 				&apparmor_lsmid);
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	error = register_lsm_namespace_backend(&aa_lsmns_backend);
+	if (error && error != -EEXIST) {
+		AA_ERROR("Unable to register LSM namespace backend\n");
+		goto buffers_out;
+	}
+#endif
 
 	/* Inform the audit system that secctx is used */
 	audit_cfg_lsm(&apparmor_lsmid, AUDIT_CFG_LSM_SECCTX_SUBJECT);

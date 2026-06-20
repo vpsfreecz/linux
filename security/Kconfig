@@ -267,6 +267,34 @@ choice
 
 endchoice
 
+config SECURITY_VPSADMIN_STACK_SELINUX_APPARMOR
+	bool "Allow explicit SELinux+AppArmor coexistence for vpsAdminOS"
+	depends on SECURITY_SELINUX && SECURITY_APPARMOR
+	default n
+	help
+	  Allow an explicit SELinux+AppArmor pair to initialize together
+	  even though both are legacy major LSMs. This is vpsAdminOS
+	  groundwork for a host/init SELinux policy plus AppArmor-backed
+	  guest policy namespaces.
+
+	  This option does not broadly relax legacy major LSM exclusivity;
+	  it only allows the SELinux/AppArmor pair. To actually initialize
+	  both LSMs, list both in CONFIG_LSM or the lsm= kernel parameter.
+	  The legacy security= parameter still chooses only one major LSM.
+
+config SECURITY_LSM_NAMESPACE
+	bool "vpsAdminOS LSM namespace core"
+	depends on USER_NS && SECURITY_VPSADMIN_STACK_SELINUX_APPARMOR
+	default n
+	help
+	  Build the core vpsAdminOS LSM namespace boundary. This adds a
+	  separate, non-nestable /proc/<pid>/ns/lsm namespace object
+	  anchored to a first-level user namespace.
+
+	  Later patches add creation-time backend selection, backend-specific
+	  AppArmor/SELinux binding, and guest-visible procattr/module
+	  filtering on top of this boundary.
+
 config LSM
 	string "Ordered list of enabled LSMs"
 	depends on SECURITY

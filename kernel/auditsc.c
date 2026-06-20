@@ -933,6 +933,7 @@ static inline void audit_free_names(struct audit_context *context)
 
 	list_for_each_entry_safe(n, next, &context->names_list, list) {
 		list_del(&n->list);
+		security_release_lsmprop(&n->oprop);
 		if (n->name)
 			putname(n->name);
 		if (n->should_free)
@@ -954,6 +955,11 @@ static inline void audit_free_aux(struct audit_context *context)
 	}
 	context->aux = NULL;
 	while ((aux = context->aux_pids)) {
+		struct audit_aux_data_pids *axs = (void *)aux;
+		int i;
+
+		for (i = 0; i < axs->pid_count; i++)
+			security_release_lsmprop(&axs->target_ref[i]);
 		context->aux_pids = aux->next;
 		kfree(aux);
 	}
@@ -1019,7 +1025,9 @@ static void audit_reset_context(struct audit_context *ctx)
 	ctx->target_pid = 0;
 	ctx->target_auid = ctx->target_uid = KUIDT_INIT(0);
 	ctx->target_sessionid = 0;
-	lsmprop_init(&ctx->target_ref);
+	security_release_lsmprop(&ctx->target_ref);
+	if (ctx->type == AUDIT_IPC)
+		security_release_lsmprop(&ctx->ipc.oprop);
 	ctx->target_comm[0] = '\0';
 	unroll_tree_refs(ctx, NULL, 0);
 	WARN_ON(!list_empty(&ctx->killed_trees));
@@ -2251,12 +2259,21 @@ static void audit_copy_inode(struct audit_names *name,
 	name->uid   = inode->i_uid;
 	name->gid   = inode->i_gid;
 	name->rdev  = inode->i_rdev;
+	security_release_lsmprop(&name->oprop);
 	security_inode_getlsmprop(inode, &name->oprop);
+	security_lsmprop_hold(&name->oprop);
 	if (flags & AUDIT_INODE_NOEVAL) {
 		name->fcap_ver = -1;
 		return;
 	}
 	audit_copy_fcaps(name, dentry);
+}
+
+static void audit_capture_task_lsmprop(struct task_struct *t,
+				       struct lsm_prop *prop)
+{
+	security_release_lsmprop(prop);
+	security_task_getlsmprop_obj_held(t, prop);
 }
 
 /**
@@ -2601,7 +2618,10 @@ void __audit_ipc_obj(struct kern_ipc_perm *ipcp)
 	context->ipc.gid = ipcp->gid;
 	context->ipc.mode = ipcp->mode;
 	context->ipc.has_perm = 0;
+	if (context->type == AUDIT_IPC)
+		security_release_lsmprop(&context->ipc.oprop);
 	security_ipc_getlsmprop(ipcp, &context->ipc.oprop);
+	security_lsmprop_hold(&context->ipc.oprop);
 	context->type = AUDIT_IPC;
 }
 
@@ -2699,7 +2719,7 @@ void __audit_ptrace(struct task_struct *t)
 	context->target_uid = task_uid(t);
 	context->target_sessionid = audit_get_sessionid(t);
 	strscpy(context->target_comm, t->comm);
-	security_task_getlsmprop_obj(t, &context->target_ref);
+	audit_capture_task_lsmprop(t, &context->target_ref);
 }
 
 /**
@@ -2726,7 +2746,7 @@ int audit_signal_info_syscall(struct task_struct *t)
 		ctx->target_uid = t_uid;
 		ctx->target_sessionid = audit_get_sessionid(t);
 		strscpy(ctx->target_comm, t->comm);
-		security_task_getlsmprop_obj(t, &ctx->target_ref);
+		audit_capture_task_lsmprop(t, &ctx->target_ref);
 		return 0;
 	}
 
@@ -2746,7 +2766,7 @@ int audit_signal_info_syscall(struct task_struct *t)
 	axp->target_auid[axp->pid_count] = audit_get_loginuid(t);
 	axp->target_uid[axp->pid_count] = t_uid;
 	axp->target_sessionid[axp->pid_count] = audit_get_sessionid(t);
-	security_task_getlsmprop_obj(t, &axp->target_ref[axp->pid_count]);
+	audit_capture_task_lsmprop(t, &axp->target_ref[axp->pid_count]);
 	strscpy(axp->target_comm[axp->pid_count], t->comm);
 	axp->pid_count++;
 

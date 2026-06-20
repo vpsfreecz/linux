@@ -1428,6 +1428,7 @@ static bool bpf_container_cgroup_attach_type_allowed(enum bpf_attach_type attach
 	case BPF_CGROUP_INET6_BIND:
 	case BPF_CGROUP_DEVICE:
 	case BPF_CGROUP_SYSCTL:
+	case BPF_LSM_CGROUP:
 		return true;
 	default:
 		return false;
@@ -1456,8 +1457,9 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
 		return !attach_type || attach_type == BPF_CGROUP_SYSCTL;
 	case BPF_PROG_TYPE_LSM:
-		return attach_type == BPF_LSM_MAC &&
-		       bpf_lsm_is_container_hook(attach_btf_id);
+		return attach_type == BPF_LSM_CGROUP ||
+		       (attach_type == BPF_LSM_MAC &&
+			bpf_lsm_is_container_hook(attach_btf_id));
 	default:
 		return false;
 	}

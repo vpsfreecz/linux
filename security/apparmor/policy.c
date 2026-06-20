@@ -922,10 +922,17 @@ int aa_may_manage_policy(const struct cred *subj_cred, struct aa_label *label,
 	else
 		op = OP_PROF_LOAD;
 
+	if (!ns)
+		ns = labels_ns(label);
+
 	/* check if loading policy is locked out */
 	if (aa_g_lock_policy)
 		return audit_policy(label, op, NULL, NULL, "policy_locked",
 				    -EACCES);
+
+	if (ns == root_ns && !aa_g_root_ns_policy)
+		return audit_policy(label, op, NULL, NULL,
+				    "root_ns_policy_disabled", -EACCES);
 
 	if (!aa_policy_admin_capable(subj_cred, label, ns))
 		return audit_policy(label, op, NULL, NULL, "not policy admin",

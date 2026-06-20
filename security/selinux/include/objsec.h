@@ -44,6 +44,13 @@ struct cred_security_struct {
 	u32 create_sid; /* fscreate SID */
 	u32 keycreate_sid; /* keycreate SID */
 	u32 sockcreate_sid; /* fscreate SID */
+	struct selinux_state *state; /* SELinux state carried by these creds */
+	u32 outer_sid; /* immutable host SID for child LSM namespace payloads */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
+	u32 pending_outer_sid; /* host SID to activate on managed payload exec */
+	struct selinux_state *pending_outer_state; /* host state for pending SID */
+	bool pending_outer_active; /* pending_outer_* is valid */
 } __randomize_layout;
 
 struct task_security_struct {
@@ -84,6 +91,7 @@ struct inode_security_struct {
 struct file_security_struct {
 	u32 sid; /* SID of open file description */
 	u32 fown_sid; /* SID of file owner (for SIGIO) */
+	struct selinux_state *fown_state; /* SELinux state for fown_sid */
 	u32 isid; /* SID of inode at the time of file open */
 	u32 pseqno; /* Policy seqno at the time of file open */
 };
@@ -92,8 +100,11 @@ struct superblock_security_struct {
 	u32 sid; /* SID of file system superblock */
 	u32 def_sid; /* default SID for labeling */
 	u32 mntpoint_sid; /* SECURITY_FS_USE_MNTPOINT context for files */
+	u32 outer_sid; /* synthetic host SID for outer container data checks */
 	unsigned short behavior; /* labeling behavior */
 	unsigned short flags; /* which mount options were specified */
+	struct selinux_state *state; /* SELinux state bound to this superblock */
+	struct selinux_state *outer_state; /* host state bound to outer_sid */
 	struct mutex lock;
 	struct list_head isec_head;
 	spinlock_t isec_lock;
@@ -101,11 +112,19 @@ struct superblock_security_struct {
 
 struct msg_security_struct {
 	u32 sid; /* SID of message */
+	struct selinux_state *state; /* SELinux state bound to this message */
+	u32 outer_sid; /* immutable host SID of creator's outer owner */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
 };
 
 struct ipc_security_struct {
 	u16 sclass; /* security class of this object */
 	u32 sid; /* SID of IPC resource */
+	struct selinux_state *state; /* SELinux state bound to this IPC object */
+	u32 outer_sid; /* immutable host SID of creator's outer owner */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
 };
 
 struct netif_security_struct {
@@ -141,7 +160,9 @@ struct sk_security_struct {
 	struct netlbl_lsm_secattr *nlbl_secattr; /* NetLabel sec attributes */
 #endif
 	u32 sid; /* SID of this object */
+	struct selinux_state *state; /* SELinux state bound to this socket */
 	u32 peer_sid; /* SID of peer */
+	struct selinux_state *peer_sid_state; /* SELinux state bound to peer_sid */
 	u16 sclass; /* sock security class */
 	enum { /* SCTP association state */
 	       SCTP_ASSOC_UNSET = 0,
@@ -151,14 +172,20 @@ struct sk_security_struct {
 
 struct tun_security_struct {
 	u32 sid; /* SID for the tun device sockets */
+	struct selinux_state *state; /* SELinux state bound to this object */
 };
 
 struct key_security_struct {
 	u32 sid; /* SID of key */
+	struct selinux_state *state; /* SELinux state bound to this key */
+	u32 outer_sid; /* immutable host SID of creator's outer owner */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
 };
 
 struct ib_security_struct {
 	u32 sid; /* SID of the queue pair or MAD agent */
+	struct selinux_state *state; /* SELinux state bound to this object */
 };
 
 struct pkey_security_struct {
@@ -169,16 +196,30 @@ struct pkey_security_struct {
 
 struct bpf_security_struct {
 	u32 sid; /* SID of bpf obj creator */
+	struct selinux_state *state; /* SELinux state bound to this object */
 };
 
 struct perf_event_security_struct {
 	u32 sid; /* SID of perf_event obj creator */
+	struct selinux_state *state; /* SELinux state bound to this object */
 };
 
 extern struct lsm_blob_sizes selinux_blob_sizes;
 static inline struct cred_security_struct *selinux_cred(const struct cred *cred)
 {
 	return cred->security + selinux_blob_sizes.lbs_cred;
+}
+
+static inline struct selinux_state *cred_selinux_state(const struct cred *cred)
+{
+	struct selinux_state *state = selinux_cred(cred)->state;
+
+	return state ?: &selinux_state;
+}
+
+static inline struct selinux_state *current_selinux_state(void)
+{
+	return cred_selinux_state(current_cred());
 }
 
 static inline struct task_security_struct *
@@ -226,6 +267,20 @@ static inline struct superblock_security_struct *
 selinux_superblock(const struct super_block *superblock)
 {
 	return superblock->s_security + selinux_blob_sizes.lbs_superblock;
+}
+
+static inline struct selinux_state *
+selinux_superblock_state_from_sec(const struct superblock_security_struct *sbsec)
+{
+	struct selinux_state *state = READ_ONCE(sbsec->state);
+
+	return state ?: &selinux_state;
+}
+
+static inline struct selinux_state *
+selinux_superblock_state(const struct super_block *superblock)
+{
+	return selinux_superblock_state_from_sec(selinux_superblock(superblock));
 }
 
 #ifdef CONFIG_KEYS

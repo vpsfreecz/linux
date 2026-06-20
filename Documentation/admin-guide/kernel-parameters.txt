@@ -443,6 +443,17 @@
 			1 -- enable.
 			Default value is set via kernel config option.
 
+	apparmor.root_ns_policy=
+			[APPARMOR] Allow policy administration in the
+			AppArmor root namespace.
+			Format: { "0" | "1" }
+			0 -- reject policy load/replace/remove in the
+			     AppArmor root namespace.
+			1 -- allow policy administration in the AppArmor
+			     root namespace.
+			Default value is set by
+			CONFIG_SECURITY_APPARMOR_ALLOW_ROOT_NS_POLICY.
+
 	arcrimi=	[HW,NET] ARCnet - "RIM I" (entirely mem-mapped) cards
 			Format: <io>,<irq>,<nodeID>
 

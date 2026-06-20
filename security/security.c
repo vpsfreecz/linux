@@ -19,6 +19,7 @@
 #include <linux/kernel.h>
 #include <linux/kernel_read_file.h>
 #include <linux/lsm_hooks.h>
+#include <linux/lsm_namespace.h>
 #include <linux/mman.h>
 #include <linux/mount.h>
 #include <linux/personality.h>
@@ -229,6 +230,18 @@ static void __init append_ordered_lsm(struct lsm_info *lsm, const char *from)
 		   is_enabled(lsm) ? "enabled" : "disabled");
 }
 
+#ifdef CONFIG_SECURITY_VPSADMIN_STACK_SELINUX_APPARMOR
+static bool __init vpsadmin_selinux_apparmor_pair(const struct lsm_info *a,
+				      const struct lsm_info *b)
+{
+	if (!a || !b)
+		return false;
+
+	return (!strcmp(a->name, "selinux") && !strcmp(b->name, "apparmor")) ||
+	       (!strcmp(a->name, "apparmor") && !strcmp(b->name, "selinux"));
+}
+#endif
+
 /* Is an LSM allowed to be initialized? */
 static bool __init lsm_allowed(struct lsm_info *lsm)
 {
@@ -238,6 +251,13 @@ static bool __init lsm_allowed(struct lsm_info *lsm)
 
 	/* Not allowed if another exclusive LSM already initialized. */
 	if ((lsm->flags & LSM_FLAG_EXCLUSIVE) && exclusive) {
+#ifdef CONFIG_SECURITY_VPSADMIN_STACK_SELINUX_APPARMOR
+		if (vpsadmin_selinux_apparmor_pair(lsm, exclusive)) {
+			init_debug("exclusive coexistence allowed: %s with %s\n",
+				   lsm->name, exclusive->name);
+			return true;
+		}
+#endif
 		init_debug("exclusive disabled: %s\n", lsm->name);
 		return false;
 	}
@@ -2803,10 +2823,14 @@ EXPORT_SYMBOL(security_inode_listsecurity);
  * @inode: inode
  * @prop: lsm specific information to return
  *
- * Get the lsm specific information associated with the node.
+ * Get the lsm specific information associated with the node.  The returned
+ * snapshot is transient; callers that retain it beyond the inode's immediate
+ * lifetime should call security_lsmprop_hold() and later
+ * security_release_lsmprop().
  */
 void security_inode_getlsmprop(struct inode *inode, struct lsm_prop *prop)
 {
+	lsmprop_init(prop);
 	call_void_hook(inode_getlsmprop, inode, prop);
 }
 
@@ -3351,7 +3375,9 @@ EXPORT_SYMBOL(security_cred_getsecid);
  * @prop: destination for the LSM data
  *
  * Retrieve the security data of the cred structure @c.  In case of
- * failure, @prop will be cleared.
+ * failure, @prop will be cleared.  The returned snapshot is transient;
+ * callers that retain it beyond the cred's immediate lifetime should call
+ * security_lsmprop_hold() and later security_release_lsmprop().
  */
 void security_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
 {
@@ -3359,6 +3385,23 @@ void security_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
 	call_void_hook(cred_getlsmprop, c, prop);
 }
 EXPORT_SYMBOL(security_cred_getlsmprop);
+
+/**
+ * security_cred_getlsmprop_global() - Get a cred's global object LSM data
+ * @c: credentials
+ * @prop: destination for the LSM data
+ *
+ * Retrieve security data for host/global objects associated with @c.  For LSMs
+ * with nested state, this may differ from the credential's current inner
+ * subject identity.  Retained callers should call security_lsmprop_hold() and
+ * later security_release_lsmprop().
+ */
+void security_cred_getlsmprop_global(const struct cred *c, struct lsm_prop *prop)
+{
+	lsmprop_init(prop);
+	call_void_hook(cred_getlsmprop_global, c, prop);
+}
+EXPORT_SYMBOL(security_cred_getlsmprop_global);
 
 /**
  * security_kernel_act_as() - Set the kernel credentials to act as secid
@@ -3583,7 +3626,9 @@ int security_task_getsid(struct task_struct *p)
  * @prop: lsm specific information
  *
  * Retrieve the subjective security identifier of the current task and return
- * it in @prop.
+ * it in @prop.  The returned snapshot is transient; callers that retain it
+ * beyond the current task's immediate lifetime should call
+ * security_lsmprop_hold() and later security_release_lsmprop().
  */
 void security_current_getlsmprop_subj(struct lsm_prop *prop)
 {
@@ -3598,7 +3643,11 @@ EXPORT_SYMBOL(security_current_getlsmprop_subj);
  * @prop: lsm specific information
  *
  * Retrieve the objective security identifier of the task_struct in @p and
- * return it in @prop.
+ * return it in @prop.  Because task credentials are observed under RCU, an
+ * LSM may need to pin auxiliary state identity in the returned snapshot even
+ * for immediate callers.  Retained call sites should prefer
+ * security_task_getlsmprop_obj_held() so that stronger ownership is explicit
+ * at the capture site.
  */
 void security_task_getlsmprop_obj(struct task_struct *p, struct lsm_prop *prop)
 {
@@ -3606,6 +3655,26 @@ void security_task_getlsmprop_obj(struct task_struct *p, struct lsm_prop *prop)
 	call_void_hook(task_getlsmprop_obj, p, prop);
 }
 EXPORT_SYMBOL(security_task_getlsmprop_obj);
+
+/**
+ * security_task_getlsmprop_obj_held() - Get a retained task LSM snapshot
+ * @p: target task
+ * @prop: lsm specific information
+ *
+ * Retrieve the objective security identifier of the task_struct in @p for a
+ * caller that intends to retain the resulting snapshot and later release it
+ * with security_release_lsmprop().  This helper is intentionally a named
+ * wrapper around security_task_getlsmprop_obj() because task credential
+ * exporters may already need to return a stable snapshot when sampling under
+ * RCU; the wrapper makes retained ownership explicit at review sites without
+ * perturbing those lower-level semantics.
+ */
+void security_task_getlsmprop_obj_held(struct task_struct *p,
+				       struct lsm_prop *prop)
+{
+	security_task_getlsmprop_obj(p, prop);
+}
+EXPORT_SYMBOL(security_task_getlsmprop_obj_held);
 
 /**
  * security_task_setnice() - Check if setting a task's nice value is allowed
@@ -3790,6 +3859,31 @@ void security_task_to_inode(struct task_struct *p, struct inode *inode)
 }
 
 /**
+ * security_cred_to_inode() - Set the security attributes of a cred's inode
+ * @cred: credentials
+ * @inode: inode
+ *
+ * Set the security attributes for an inode based on an associated credential,
+ * e.g. for namespace inodes whose owner is captured at namespace creation.
+ */
+void security_cred_to_inode(const struct cred *cred, struct inode *inode)
+{
+	call_void_hook(cred_to_inode, cred, inode);
+}
+
+/**
+ * security_lsmprop_to_inode() - Set inode security from retained LSM data
+ * @prop: retained LSM data
+ * @inode: inode
+ *
+ * Set inode security attributes from a retained LSM property snapshot.
+ */
+void security_lsmprop_to_inode(const struct lsm_prop *prop, struct inode *inode)
+{
+	call_void_hook(lsmprop_to_inode, prop, inode);
+}
+
+/**
  * security_create_user_ns() - Check if creating a new userns is allowed
  * @cred: prepared creds
  *
@@ -3821,9 +3915,11 @@ int security_ipc_permission(struct kern_ipc_perm *ipcp, short flag)
  * @ipcp: ipc permission structure
  * @prop: pointer to lsm information
  *
- * Get the lsm information associated with the ipc object.
+ * Get the lsm information associated with the ipc object.  The returned
+ * snapshot is transient; callers that retain it beyond the IPC object's
+ * immediate lifetime should call security_lsmprop_hold() and later
+ * security_release_lsmprop().
  */
-
 void security_ipc_getlsmprop(struct kern_ipc_perm *ipcp, struct lsm_prop *prop)
 {
 	lsmprop_init(prop);
@@ -4203,6 +4299,8 @@ int security_getselfattr(unsigned int attr, struct lsm_ctx __user *uctx,
 		 */
 		if (lctx.id == LSM_ID_UNDEF)
 			return -EINVAL;
+		if (!lsm_ns_visible_lsmid(lctx.id))
+			return -EOPNOTSUPP;
 		single = true;
 	}
 
@@ -4211,6 +4309,8 @@ int security_getselfattr(unsigned int attr, struct lsm_ctx __user *uctx,
 	 * In the single case only get the data from the LSM specified.
 	 */
 	lsm_for_each_hook(scall, getselfattr) {
+		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id))
+			continue;
 		if (single && lctx.id != scall->hl->lsmid->id)
 			continue;
 		entrysize = left;
@@ -4286,6 +4386,16 @@ int security_setselfattr(unsigned int attr, struct lsm_ctx __user *uctx,
 		goto free_out;
 	}
 
+	if (attr == LSM_ATTR_UNSHARE) {
+		rc = lsm_ns_prepare_unshare(lctx);
+		goto free_out;
+	}
+
+	if (!lsm_ns_visible_lsmid(lctx->id)) {
+		rc = -EOPNOTSUPP;
+		goto free_out;
+	}
+
 	lsm_for_each_hook(scall, setselfattr)
 		if ((scall->hl->lsmid->id) == lctx->id) {
 			rc = scall->hl->hook.setselfattr(attr, lctx, size, flags);
@@ -4316,6 +4426,9 @@ int security_getprocattr(struct task_struct *p, int lsmid, const char *name,
 	lsm_for_each_hook(scall, getprocattr) {
 		if (lsmid != 0 && lsmid != scall->hl->lsmid->id)
 			continue;
+		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id) &&
+		    (lsmid == 0 || lsmid != LSM_ID_SELINUX))
+			continue;
 		return scall->hl->hook.getprocattr(p, name, value);
 	}
 	return LSM_RET_DEFAULT(getprocattr);
@@ -4339,6 +4452,9 @@ int security_setprocattr(int lsmid, const char *name, void *value, size_t size)
 
 	lsm_for_each_hook(scall, setprocattr) {
 		if (lsmid != 0 && lsmid != scall->hl->lsmid->id)
+			continue;
+		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id) &&
+		    (lsmid == 0 || lsmid != LSM_ID_SELINUX))
 			continue;
 		return scall->hl->hook.setprocattr(name, value, size);
 	}
@@ -4408,6 +4524,35 @@ int security_lsmprop_to_secctx(struct lsm_prop *prop, struct lsm_context *cp,
 	return LSM_RET_DEFAULT(lsmprop_to_secctx);
 }
 EXPORT_SYMBOL(security_lsmprop_to_secctx);
+
+/**
+ * security_lsmprop_hold() - Pin any internal references carried by an lsm_prop
+ * @prop: exported LSM data
+ *
+ * Some LSMs attach auxiliary state identity to @prop in addition to the raw
+ * exported identifier.  Call this helper before storing a transient @prop
+ * beyond the lifetime of the source object/task so those internal references
+ * remain stable until security_release_lsmprop() is called.
+ */
+void security_lsmprop_hold(struct lsm_prop *prop)
+{
+	call_void_hook(lsmprop_hold, prop);
+}
+EXPORT_SYMBOL(security_lsmprop_hold);
+
+/**
+ * security_release_lsmprop() - Drop internal references carried by an lsm_prop
+ * @prop: exported LSM data
+ *
+ * Release any auxiliary references carried by @prop and reinitialize it to an
+ * empty snapshot.
+ */
+void security_release_lsmprop(struct lsm_prop *prop)
+{
+	call_void_hook(lsmprop_release, prop);
+	lsmprop_init(prop);
+}
+EXPORT_SYMBOL(security_release_lsmprop);
 
 /**
  * security_secctx_to_secid() - Convert a secctx to a secid
@@ -4511,6 +4656,23 @@ int security_inode_getsecctx(struct inode *inode, struct lsm_context *cp)
 	return call_int_hook(inode_getsecctx, inode, cp);
 }
 EXPORT_SYMBOL(security_inode_getsecctx);
+
+/**
+ * security_fsnotify_event() - Check if an fsnotify event can be delivered
+ * @cred: credentials of the fsnotify group creator
+ * @inode: inode that generated the event
+ * @dir: optional directory associated with the event
+ * @mask: fsnotify event mask
+ *
+ * Check whether an fsnotify group may receive an event for the supplied object.
+ *
+ * Return: Returns 0 if permission is granted.
+ */
+int security_fsnotify_event(const struct cred *cred, struct inode *inode,
+			    struct inode *dir, u32 mask)
+{
+	return call_int_hook(fsnotify_event, cred, inode, dir, mask);
+}
 
 #ifdef CONFIG_WATCH_QUEUE
 /**
@@ -4892,6 +5054,7 @@ int security_socket_getpeersec_stream(struct socket *sock, sockptr_t optval,
  * @sock: socket
  * @skb: datagram packet
  * @secid: remote peer label secid
+ * @prop: optional stateful peer label property
  *
  * This hook allows the security module to provide peer socket security state
  * for udp sockets on a per-packet basis to userspace via getsockopt
@@ -4902,9 +5065,12 @@ int security_socket_getpeersec_stream(struct socket *sock, sockptr_t optval,
  * Return: Returns 0 on success, error on failure.
  */
 int security_socket_getpeersec_dgram(struct socket *sock,
-				     struct sk_buff *skb, u32 *secid)
+				     struct sk_buff *skb, u32 *secid,
+				     struct lsm_prop *prop)
 {
-	return call_int_hook(socket_getpeersec_dgram, sock, skb, secid);
+	if (prop)
+		lsmprop_init(prop);
+	return call_int_hook(socket_getpeersec_dgram, sock, skb, secid, prop);
 }
 EXPORT_SYMBOL(security_socket_getpeersec_dgram);
 
@@ -5071,6 +5237,21 @@ int security_secmark_relabel_packet(u32 secid)
 EXPORT_SYMBOL(security_secmark_relabel_packet);
 
 /**
+ * security_secmark_raw_set() - Check if raw secmark register writes are allowed
+ *
+ * Check if the process should be allowed to configure packet or conntrack
+ * secmark writes from raw integer registers instead of an LSM-resolved
+ * security context.
+ *
+ * Return: Returns 0 if permission is granted.
+ */
+int security_secmark_raw_set(void)
+{
+	return call_int_hook(secmark_raw_set);
+}
+EXPORT_SYMBOL(security_secmark_raw_set);
+
+/**
  * security_secmark_refcount_inc() - Increment the secmark labeling rule count
  *
  * Tells the LSM to increment the number of secmark labeling rules loaded.
@@ -5111,6 +5292,7 @@ int security_tun_dev_alloc_security(void **security)
 
 	rc = call_int_hook(tun_dev_alloc_security, *security);
 	if (rc) {
+		call_void_hook(tun_dev_free_security, *security);
 		kfree(*security);
 		*security = NULL;
 	}
@@ -5126,6 +5308,7 @@ EXPORT_SYMBOL(security_tun_dev_alloc_security);
  */
 void security_tun_dev_free_security(void *security)
 {
+	call_void_hook(tun_dev_free_security, security);
 	kfree(security);
 }
 EXPORT_SYMBOL(security_tun_dev_free_security);
@@ -5330,6 +5513,7 @@ int security_ib_alloc_security(void **sec)
 
 	rc = call_int_hook(ib_alloc_security, *sec);
 	if (rc) {
+		call_void_hook(ib_free_security, *sec);
 		kfree(*sec);
 		*sec = NULL;
 	}
@@ -5345,6 +5529,7 @@ EXPORT_SYMBOL(security_ib_alloc_security);
  */
 void security_ib_free_security(void *sec)
 {
+	call_void_hook(ib_free_security, sec);
 	kfree(sec);
 }
 EXPORT_SYMBOL(security_ib_free_security);
@@ -5579,6 +5764,7 @@ int security_key_alloc(struct key *key, const struct cred *cred,
  */
 void security_key_free(struct key *key)
 {
+	call_void_hook(key_free, key);
 	kfree(key->security);
 	key->security = NULL;
 }
@@ -6032,6 +6218,7 @@ int security_perf_event_alloc(struct perf_event *event)
 
 	rc = call_int_hook(perf_event_alloc, event);
 	if (rc) {
+		call_void_hook(perf_event_free, event);
 		kfree(event->security);
 		event->security = NULL;
 	}
@@ -6046,6 +6233,7 @@ int security_perf_event_alloc(struct perf_event *event)
  */
 void security_perf_event_free(struct perf_event *event)
 {
+	call_void_hook(perf_event_free, event);
 	kfree(event->security);
 	event->security = NULL;
 }

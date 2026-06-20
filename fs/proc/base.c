@@ -777,6 +777,37 @@ static bool has_pid_permissions(struct proc_fs_info *fs_info,
 	return ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS);
 }
 
+static void vpsa_proc_pid_permission_diag(const char *reason, int rc,
+					  struct inode *inode,
+					  struct task_struct *task,
+					  int mask,
+					  enum proc_hidepid hide_pid)
+{
+	const struct cred *cred = current_cred();
+	const struct cred *tcred = NULL;
+	kuid_t target_uid = INVALID_UID;
+	kgid_t target_gid = INVALID_GID;
+	int target_pid = -1;
+
+	if (task) {
+		tcred = get_task_cred(task);
+		target_uid = tcred->uid;
+		target_gid = tcred->gid;
+		target_pid = task_pid_nr(task);
+	}
+
+	pr_notice_ratelimited(
+		"vpsadminos_lsmct_diag: proc pid permission deny reason=%s rc=%d current=%d target=%d mask=0x%x hide_pid=%u fsuid=%u fsgid=%u target_uid=%u target_gid=%u inode_mode=%#o inode_uid=%u inode_gid=%u\n",
+		reason, rc, task_pid_nr(current), target_pid, mask, hide_pid,
+		__kuid_val(cred->fsuid), __kgid_val(cred->fsgid),
+		__kuid_val(target_uid), __kgid_val(target_gid),
+		inode->i_mode, __kuid_val(inode->i_uid),
+		__kgid_val(inode->i_gid));
+
+	if (tcred)
+		put_cred(tcred);
+}
+
 static bool vpsa_proc_dentry_path_build(const struct dentry *dentry,
 				const struct qstr *leaf,
 				const char **segments,
@@ -903,18 +934,27 @@ static int proc_pid_permission(struct mnt_idmap *idmap,
 	struct task_struct *task;
 	enum vpsa_kernfs_filter_decision decision;
 	bool has_perms;
+	int ret;
 
 	decision = vpsa_proc_inode_alias_decide(inode, mask);
-	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE) {
+		vpsa_proc_pid_permission_diag("filter_hide", -ENOENT, inode,
+					      NULL, mask, fs_info->hide_pid);
 		return -ENOENT;
-	if (decision == VPSA_KERNFS_FILTER_DECISION_DENY)
+	}
+	if (decision == VPSA_KERNFS_FILTER_DECISION_DENY) {
+		vpsa_proc_pid_permission_diag("filter_deny", -EACCES, inode,
+					      NULL, mask, fs_info->hide_pid);
 		return -EACCES;
+	}
 
 	task = get_proc_task(inode);
-	if (!task)
+	if (!task) {
+		vpsa_proc_pid_permission_diag("no_task", -ESRCH, inode, NULL,
+					      mask, fs_info->hide_pid);
 		return -ESRCH;
+	}
 	has_perms = has_pid_permissions(fs_info, task, HIDEPID_NO_ACCESS);
-	put_task_struct(task);
 
 	if (!has_perms) {
 		if (fs_info->hide_pid == HIDEPID_INVISIBLE) {
@@ -924,12 +964,27 @@ static int proc_pid_permission(struct mnt_idmap *idmap,
 			 * may not stat() a file, it shouldn't be seen
 			 * in procfs at all.
 			 */
+			vpsa_proc_pid_permission_diag("hidepid_invisible",
+						      -ENOENT, inode, task,
+						      mask, fs_info->hide_pid);
+			put_task_struct(task);
 			return -ENOENT;
 		}
 
+		vpsa_proc_pid_permission_diag("hidepid_no_access", -EPERM,
+					      inode, task, mask,
+					      fs_info->hide_pid);
+		put_task_struct(task);
 		return -EPERM;
 	}
-	return generic_permission(&nop_mnt_idmap, inode, mask);
+
+	ret = generic_permission(&nop_mnt_idmap, inode, mask);
+	if (ret)
+		vpsa_proc_pid_permission_diag("generic_permission", ret,
+					      inode, task, mask,
+					      fs_info->hide_pid);
+	put_task_struct(task);
+	return ret;
 }
 
 
@@ -3133,6 +3188,20 @@ static const struct pid_entry smack_attr_dir_stuff[] = {
 LSM_DIR_OPS(smack);
 #endif
 
+#ifdef CONFIG_SECURITY_SELINUX
+static const struct pid_entry selinux_attr_dir_stuff[] = {
+	ATTR(LSM_ID_SELINUX, "current",	0666),
+	ATTR(LSM_ID_SELINUX, "prev",		0444),
+	ATTR(LSM_ID_SELINUX, "exec",		0666),
+	ATTR(LSM_ID_SELINUX, "fscreate",	0666),
+	ATTR(LSM_ID_SELINUX, "keycreate",	0666),
+	ATTR(LSM_ID_SELINUX, "sockcreate",	0666),
+	ATTR(LSM_ID_SELINUX, "outer",		0444),
+};
+
+LSM_DIR_OPS(selinux);
+#endif
+
 #ifdef CONFIG_SECURITY_APPARMOR
 static const struct pid_entry apparmor_attr_dir_stuff[] = {
 	ATTR(LSM_ID_APPARMOR, "current",	0666),
@@ -3152,6 +3221,10 @@ static const struct pid_entry attr_dir_stuff[] = {
 #ifdef CONFIG_SECURITY_SMACK
 	DIR("smack",			0555,
 	    proc_smack_attr_dir_inode_ops, proc_smack_attr_dir_ops),
+#endif
+#ifdef CONFIG_SECURITY_SELINUX
+	DIR("selinux",			0555,
+	    proc_selinux_attr_dir_inode_ops, proc_selinux_attr_dir_ops),
 #endif
 #ifdef CONFIG_SECURITY_APPARMOR
 	DIR("apparmor",			0555,

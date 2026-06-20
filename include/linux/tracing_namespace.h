@@ -36,6 +36,12 @@ bool tracing_ns_matches_task(const struct tracing_namespace *ns,
 			    const struct task_struct *task);
 int setup_tracing_namespace(struct tracing_namespace *ns);
 void free_tracing_ns(struct tracing_namespace *ns);
+int tracing_ns_check_userns_setns_from(const struct user_namespace *user_ns,
+				       const struct tracing_namespace *current_ns);
+int tracing_ns_check_pidns_setns_from(const struct pid_namespace *pid_ns,
+				      const struct tracing_namespace *current_ns);
+int tracing_ns_check_syslogns_setns_from(const struct syslog_namespace *syslog_ns,
+					 const struct tracing_namespace *current_ns);
 int tracing_ns_check_userns_setns(const struct user_namespace *user_ns);
 int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns);
 int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns);
@@ -112,6 +118,27 @@ static inline int setup_tracing_namespace(struct tracing_namespace *ns)
 }
 
 static inline void free_tracing_ns(struct tracing_namespace *ns) {}
+
+static inline int tracing_ns_check_userns_setns_from(
+	const struct user_namespace *user_ns,
+	const struct tracing_namespace *current_ns)
+{
+	return 0;
+}
+
+static inline int tracing_ns_check_pidns_setns_from(
+	const struct pid_namespace *pid_ns,
+	const struct tracing_namespace *current_ns)
+{
+	return 0;
+}
+
+static inline int tracing_ns_check_syslogns_setns_from(
+	const struct syslog_namespace *syslog_ns,
+	const struct tracing_namespace *current_ns)
+{
+	return 0;
+}
 
 static inline int tracing_ns_check_userns_setns(const struct user_namespace *user_ns)
 {

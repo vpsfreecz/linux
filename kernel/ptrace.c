@@ -279,6 +279,7 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 	struct mm_struct *mm;
 	kuid_t caller_uid;
 	kgid_t caller_gid;
+	int rc;
 
 	if (!(mode & PTRACE_MODE_FSCREDS) == !(mode & PTRACE_MODE_REALCREDS)) {
 		WARN(1, "denying ptrace access check without PTRACE_MODE_*CREDS\n");
@@ -323,6 +324,12 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 		goto ok;
 	if (ptrace_has_cap(tcred->user_ns, mode))
 		goto ok;
+	pr_notice_ratelimited(
+		"vpsadminos_lsmct_diag: ptrace generic cred deny current=%d target=%d mode=0x%x caller=%u:%u target=%u:%u target_userns=%u\n",
+		task_pid_nr(current), task_pid_nr(task), mode,
+		__kuid_val(caller_uid), __kgid_val(caller_gid),
+		__kuid_val(tcred->uid), __kgid_val(tcred->gid),
+		tcred->user_ns ? tcred->user_ns->ns.inum : 0);
 	rcu_read_unlock();
 	return -EPERM;
 ok:
@@ -340,10 +347,22 @@ ok:
 	mm = task->mm;
 	if (mm &&
 	    ((get_dumpable(mm) != SUID_DUMP_USER) &&
-	     !ptrace_has_cap(mm->user_ns, mode)))
-	    return -EPERM;
+	     !ptrace_has_cap(mm->user_ns, mode))) {
+		pr_notice_ratelimited(
+			"vpsadminos_lsmct_diag: ptrace generic dumpable deny current=%d target=%d mode=0x%x dumpable=%d mm_userns=%u\n",
+			task_pid_nr(current), task_pid_nr(task), mode,
+			get_dumpable(mm),
+			mm->user_ns ? mm->user_ns->ns.inum : 0);
+		return -EPERM;
+	}
 
-	return security_ptrace_access_check(task, mode);
+	rc = security_ptrace_access_check(task, mode);
+	if (rc)
+		pr_notice_ratelimited(
+			"vpsadminos_lsmct_diag: ptrace security deny current=%d target=%d mode=0x%x rc=%d\n",
+			task_pid_nr(current), task_pid_nr(task), mode, rc);
+
+	return rc;
 }
 
 bool ptrace_may_access(struct task_struct *task, unsigned int mode)

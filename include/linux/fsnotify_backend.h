@@ -133,6 +133,7 @@ struct fsnotify_event_private_data;
 struct fsnotify_fname;
 struct fsnotify_iter_info;
 
+struct cred;
 struct mem_cgroup;
 
 /*
@@ -212,6 +213,7 @@ enum fsnotify_group_prio {
  */
 struct fsnotify_group {
 	const struct fsnotify_ops *ops;	/* how this group handles things */
+	const struct cred *owner_cred;	/* creds of group creator */
 
 	/*
 	 * How the refcnt is used is up to each group.  When the refcnt hits 0

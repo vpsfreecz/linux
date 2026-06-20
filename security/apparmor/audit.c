@@ -9,10 +9,14 @@
  */
 
 #include <linux/audit.h>
+#include <linux/lsm_namespace.h>
+#include <linux/printk.h>
+#include <linux/syslog_namespace.h>
 #include <linux/socket.h>
 
 #include "include/apparmor.h"
 #include "include/audit.h"
+#include "include/cred.h"
 #include "include/policy.h"
 #include "include/policy_ns.h"
 #include "include/secid.h"
@@ -71,6 +75,85 @@ static const char *const aa_class_names[] = {
 	"X",
 	"dbus",
 };
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+static bool aa_guest_syslog_mirror_needed(const struct apparmor_audit_data *ad)
+{
+	struct aa_ns *current_ns;
+	bool needed = false;
+
+	if (!ad->subj_label)
+		return false;
+
+	if (!lsm_ns_current_syslog_routes_lsm(LSM_ID_APPARMOR))
+		return false;
+
+	/* Keep guest mirroring scoped to the current AppArmor namespace. */
+	current_ns = aa_get_current_ns();
+	if (!current_ns)
+		return false;
+
+	needed = labels_ns(ad->subj_label) == current_ns;
+	aa_put_ns(current_ns);
+	return needed;
+}
+
+static void aa_guest_syslog_mirror(struct apparmor_audit_data *ad)
+{
+	struct syslog_namespace *syslog_ns;
+	const char *op = ad->op ?: "unknown";
+	const char *name = ad->name ?: "?";
+	const char *info = ad->info ?: "?";
+	const char *type = "UNKNOWN";
+	const char *klass = "unknown";
+	const char *profile_name = "?";
+	char comm[sizeof(current->comm)];
+	char msg[512];
+	char *label = NULL;
+	int len;
+
+	if (!aa_guest_syslog_mirror_needed(ad))
+		return;
+
+	if (ad->type >= 0 && ad->type < ARRAY_SIZE(aa_audit_type))
+		type = aa_audit_type[ad->type];
+
+	if (ad->class && ad->class <= AA_CLASS_LAST)
+		klass = aa_class_names[ad->class];
+
+	if (ad->subj_label) {
+		if (label_isprofile(ad->subj_label)) {
+			struct aa_profile *profile = labels_profile(ad->subj_label);
+
+			profile_name = profile->base.hname;
+		} else if (aa_label_asxprint(&label, root_ns, ad->subj_label,
+					     FLAG_VIEW_SUBNS, GFP_ATOMIC) > 0) {
+			profile_name = label;
+		}
+	}
+
+	syslog_ns = current_syslog_ns();
+	get_task_comm(comm, current);
+	len = scnprintf(msg, sizeof(msg),
+			"AppArmor: %s operation=%s class=%s profile=%s",
+			type, op, klass, profile_name);
+	len += scnprintf(msg + len, sizeof(msg) - len,
+			 " name=%s comm=%s",
+			 name, comm);
+	len += scnprintf(msg + len, sizeof(msg) - len,
+			 " requested=0x%x denied=0x%x",
+			 ad->request, ad->denied);
+	len += scnprintf(msg + len, sizeof(msg) - len,
+			 " error=%d info=%s",
+			 ad->error, info);
+	ns_printk(syslog_ns, KERN_WARNING "%s\n", msg);
+	kfree(label);
+}
+#else
+static inline void aa_guest_syslog_mirror(struct apparmor_audit_data *ad)
+{
+}
+#endif
 
 
 /*
@@ -190,6 +273,9 @@ int aa_audit(int type, struct aa_profile *profile,
 	ad->subj_label = &profile->label;
 
 	aa_audit_msg(type, ad, cb);
+	if (ad->type == AUDIT_APPARMOR_DENIED ||
+	    ad->type == AUDIT_APPARMOR_KILL)
+		aa_guest_syslog_mirror(ad);
 
 	if (ad->type == AUDIT_APPARMOR_KILL)
 		(void)send_sig_info(profile->signal, NULL,

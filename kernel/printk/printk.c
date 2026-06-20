@@ -614,6 +614,11 @@ static int check_syslog_permissions(int type, int source,
 	    current_user_ns() == &init_user_ns)
 		return 0;
 
+	/* Namespace owners may stage another child syslog namespace. */
+	if (type == SYSLOG_ACTION_NEW_NS &&
+	    ns->user_ns == current_user_ns())
+		goto ok;
+
 	if (syslog_action_restricted(type, ns)) {
 		if (ns_capable(ns->user_ns, CAP_SYSLOG))
 			goto ok;

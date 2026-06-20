@@ -7,6 +7,9 @@
 #include <uapi/linux/sched.h>
 
 struct proc_ns_operations;
+struct cred;
+struct inode;
+struct lsm_prop;
 
 struct cgroup_namespace;
 struct ipc_namespace;
@@ -15,6 +18,7 @@ struct net;
 struct pid_namespace;
 struct syslog_namespace;
 struct tracing_namespace;
+struct lsm_namespace;
 struct time_namespace;
 struct user_namespace;
 struct uts_namespace;
@@ -25,6 +29,7 @@ extern struct mnt_namespace init_mnt_ns;
 extern struct net init_net;
 extern struct pid_namespace init_pid_ns;
 extern struct tracing_namespace init_tracing_ns;
+extern struct lsm_namespace init_lsm_ns;
 extern struct time_namespace init_time_ns;
 extern struct user_namespace init_user_ns;
 extern struct uts_namespace init_uts_ns;
@@ -34,6 +39,7 @@ extern const struct proc_ns_operations utsns_operations;
 extern const struct proc_ns_operations ipcns_operations;
 extern const struct proc_ns_operations pidns_operations;
 extern const struct proc_ns_operations tracingns_operations;
+extern const struct proc_ns_operations lsmns_operations;
 extern const struct proc_ns_operations pidns_for_children_operations;
 extern const struct proc_ns_operations userns_operations;
 extern const struct proc_ns_operations mntns_operations;
@@ -45,6 +51,9 @@ struct ns_common {
 	u32 ns_type;
 	struct dentry *stashed;
 	const struct proc_ns_operations *ops;
+	const struct cred *owner_cred;
+	struct lsm_prop *owner_prop;
+	bool owner_prop_set;
 	unsigned int inum;
 	refcount_t __ns_ref; /* do not use directly */
 	union {
@@ -57,7 +66,10 @@ struct ns_common {
 	};
 };
 
-int __ns_common_init(struct ns_common *ns, u32 ns_type, const struct proc_ns_operations *ops, int inum);
+int __ns_common_init(struct ns_common *ns, u32 ns_type,
+		     const struct proc_ns_operations *ops, int inum);
+void ns_common_set_owner_prop(struct ns_common *ns, const struct cred *cred);
+void ns_common_owner_to_inode(struct ns_common *ns, struct inode *inode);
 void __ns_common_free(struct ns_common *ns);
 
 #define to_ns_common(__ns)                                    \
@@ -76,6 +88,8 @@ void __ns_common_free(struct ns_common *ns);
 		const struct syslog_namespace * : &(__ns)->ns, \
 		struct tracing_namespace *:      &(__ns)->ns, \
 		const struct tracing_namespace *: &(__ns)->ns, \
+		struct lsm_namespace * :         &(__ns)->ns, \
+		const struct lsm_namespace * :   &(__ns)->ns, \
 		struct time_namespace *:         &(__ns)->ns, \
 		const struct time_namespace *:   &(__ns)->ns, \
 		struct user_namespace *:         &(__ns)->ns, \
@@ -90,6 +104,7 @@ void __ns_common_free(struct ns_common *ns);
 		struct mnt_namespace *:    MNT_NS_INIT_INO,    \
 		struct net *:              NET_NS_INIT_INO,    \
 		struct pid_namespace *:    PID_NS_INIT_INO,    \
+		struct lsm_namespace * :  LSM_NS_INIT_INO,    \
 		struct time_namespace *:   TIME_NS_INIT_INO,   \
 		struct user_namespace *:   USER_NS_INIT_INO,   \
 		struct uts_namespace *:    UTS_NS_INIT_INO)
@@ -101,6 +116,7 @@ void __ns_common_free(struct ns_common *ns);
 		struct mnt_namespace *:    &init_mnt_ns,     \
 		struct net *:              &init_net,       \
 		struct pid_namespace *:    &init_pid_ns,    \
+		struct lsm_namespace * :  &init_lsm_ns,    \
 		struct time_namespace *:   &init_time_ns,   \
 		struct user_namespace *:   &init_user_ns,   \
 		struct uts_namespace *:    &init_uts_ns)
@@ -112,6 +128,8 @@ void __ns_common_free(struct ns_common *ns);
 		struct mnt_namespace *:    &mntns_operations,                                          \
 		struct net *:              (IS_ENABLED(CONFIG_NET_NS)  ? &netns_operations    : NULL), \
 		struct pid_namespace *:    (IS_ENABLED(CONFIG_PID_NS)  ? &pidns_operations    : NULL), \
+		struct lsm_namespace * :	(IS_ENABLED(CONFIG_SECURITY_LSM_NAMESPACE) ? \
+				 &lsmns_operations : NULL), \
 		struct time_namespace *:   (IS_ENABLED(CONFIG_TIME_NS) ? &timens_operations   : NULL), \
 		struct user_namespace *:   (IS_ENABLED(CONFIG_USER_NS) ? &userns_operations   : NULL), \
 		struct uts_namespace *:    (IS_ENABLED(CONFIG_UTS_NS)  ? &utsns_operations    : NULL))
@@ -123,6 +141,7 @@ void __ns_common_free(struct ns_common *ns);
 		struct mnt_namespace *:    CLONE_NEWNS,     \
 		struct net *:              CLONE_NEWNET,    \
 		struct pid_namespace *:    CLONE_NEWPID,    \
+		struct lsm_namespace * :  LSM_NS_INIT_INO, \
 		struct time_namespace *:   CLONE_NEWTIME,   \
 		struct user_namespace *:   CLONE_NEWUSER,   \
 		struct uts_namespace *:    CLONE_NEWUTS)

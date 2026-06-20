@@ -421,7 +421,7 @@ static int pidns_install(struct nsset *nsset, struct ns_common *ns)
 	if (!pidns_is_ancestor(new, active))
 		return -EINVAL;
 
-	ret = tracing_ns_check_pidns_setns(new);
+	ret = tracing_ns_check_pidns_setns_from(new, nsset->nsproxy->tracing_ns);
 	if (ret)
 		return ret;
 

@@ -196,14 +196,16 @@ void free_tracing_ns(struct tracing_namespace *ns)
 }
 EXPORT_SYMBOL_GPL(free_tracing_ns);
 
-int tracing_ns_check_userns_setns(const struct user_namespace *user_ns)
+int tracing_ns_check_userns_setns_from(const struct user_namespace *user_ns,
+				       const struct tracing_namespace *current_ns)
 {
-	struct tracing_namespace *target_ns, *current_ns;
+	struct tracing_namespace *target_ns;
 
 	if (!user_ns)
 		return -EINVAL;
 
-	current_ns = current_tracing_ns();
+	if (!current_ns)
+		current_ns = current_tracing_ns();
 	target_ns = user_ns->tracing_ns ? user_ns->tracing_ns : &init_tracing_ns;
 
 	if (target_ns == current_ns)
@@ -217,16 +219,24 @@ int tracing_ns_check_userns_setns(const struct user_namespace *user_ns)
 			 NULL, NULL, -EPERM);
 	return -EPERM;
 }
+EXPORT_SYMBOL_GPL(tracing_ns_check_userns_setns_from);
+
+int tracing_ns_check_userns_setns(const struct user_namespace *user_ns)
+{
+	return tracing_ns_check_userns_setns_from(user_ns, current_tracing_ns());
+}
 EXPORT_SYMBOL_GPL(tracing_ns_check_userns_setns);
 
-int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns)
+int tracing_ns_check_pidns_setns_from(const struct pid_namespace *pid_ns,
+				      const struct tracing_namespace *current_ns)
 {
-	struct tracing_namespace *target_ns, *current_ns;
+	struct tracing_namespace *target_ns;
 
 	if (!pid_ns)
 		return -EINVAL;
 
-	current_ns = current_tracing_ns();
+	if (!current_ns)
+		current_ns = current_tracing_ns();
 	target_ns = (pid_ns->user_ns && pid_ns->user_ns->tracing_ns) ?
 		pid_ns->user_ns->tracing_ns : &init_tracing_ns;
 
@@ -241,11 +251,16 @@ int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns)
 			 pid_ns->user_ns, pid_ns, NULL, -EPERM);
 	return -EPERM;
 }
+EXPORT_SYMBOL_GPL(tracing_ns_check_pidns_setns_from);
+
+int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns)
+{
+	return tracing_ns_check_pidns_setns_from(pid_ns, current_tracing_ns());
+}
 EXPORT_SYMBOL_GPL(tracing_ns_check_pidns_setns);
 
-int tracing_ns_check_syslogns_setns_from(
-	const struct syslog_namespace *syslog_ns,
-	const struct tracing_namespace *current_ns)
+int tracing_ns_check_syslogns_setns_from(const struct syslog_namespace *syslog_ns,
+					 const struct tracing_namespace *current_ns)
 {
 	struct tracing_namespace *target_ns;
 
@@ -272,8 +287,7 @@ EXPORT_SYMBOL_GPL(tracing_ns_check_syslogns_setns_from);
 
 int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns)
 {
-	return tracing_ns_check_syslogns_setns_from(syslog_ns,
-						    current_tracing_ns());
+	return tracing_ns_check_syslogns_setns_from(syslog_ns, current_tracing_ns());
 }
 EXPORT_SYMBOL_GPL(tracing_ns_check_syslogns_setns);
 

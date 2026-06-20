@@ -23,6 +23,7 @@
 #include <linux/proc_fs.h>
 #include <linux/syslog_namespace.h>
 #include <linux/tracing_namespace.h>
+#include <linux/lsm_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/file.h>
 #include <linux/syscalls.h>
@@ -31,13 +32,91 @@
 
 static struct kmem_cache *nsproxy_cachep;
 
-static void consume_pending_child_ns_request(struct task_struct *task)
+static bool lsm_child_ns_request_consumable(const struct task_struct *task,
+				      const struct user_namespace *user_ns)
+{
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	if (task && task->lsm_ns_for_child && user_ns && user_ns != current_user_ns())
+		return true;
+#endif
+	return false;
+}
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+static void set_child_lsm_owner_creds(struct nsproxy *nsproxy, u64 flags,
+				      bool new_syslog_ns, bool new_tracing_ns,
+				      struct user_namespace *user_ns,
+				      struct lsm_namespace *lsm_ns,
+				      const struct cred *cred)
+{
+	if (!cred)
+		return;
+
+	if (user_ns && user_ns != current_user_ns())
+		ns_common_set_owner_prop(&user_ns->ns, cred);
+	if (lsm_ns && lsm_ns != &init_lsm_ns)
+		ns_common_set_owner_prop(&lsm_ns->ns, cred);
+	if ((flags & CLONE_NEWNS) && nsproxy->mnt_ns)
+		ns_common_set_owner_prop(from_mnt_ns(nsproxy->mnt_ns), cred);
+	if ((flags & CLONE_NEWUTS) && nsproxy->uts_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->uts_ns), cred);
+	if ((flags & CLONE_NEWIPC) && nsproxy->ipc_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->ipc_ns), cred);
+	if ((flags & CLONE_NEWPID) && nsproxy->pid_ns_for_children) {
+		struct ns_common *ns;
+
+		ns = to_ns_common(nsproxy->pid_ns_for_children);
+		ns_common_set_owner_prop(ns, cred);
+	}
+	if ((flags & CLONE_NEWCGROUP) && nsproxy->cgroup_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->cgroup_ns), cred);
+	if ((flags & CLONE_NEWNET) && nsproxy->net_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->net_ns), cred);
+	if ((flags & CLONE_NEWTIME) && nsproxy->time_ns_for_children) {
+		struct ns_common *ns;
+
+		ns = to_ns_common(nsproxy->time_ns_for_children);
+		ns_common_set_owner_prop(ns, cred);
+	}
+	if (new_syslog_ns && nsproxy->syslog_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->syslog_ns), cred);
+#ifdef CONFIG_TRACING_NS
+	if (new_tracing_ns && nsproxy->tracing_ns)
+		ns_common_set_owner_prop(to_ns_common(nsproxy->tracing_ns), cred);
+#else
+	(void)new_tracing_ns;
+#endif
+}
+#endif
+
+static bool has_pending_child_ns_request(const struct task_struct *task,
+				 const struct user_namespace *user_ns)
+{
+	if (!task)
+		return false;
+
+	if (task->syslog_ns_for_child || task->tracing_ns_for_child)
+		return true;
+
+	return lsm_child_ns_request_consumable(task, user_ns);
+}
+
+static void consume_pending_child_ns_request(struct task_struct *task,
+				     bool consume_lsm)
 {
 	if (!task)
 		return;
 
 	task->syslog_ns_for_child = false;
 	task->tracing_ns_for_child = false;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	if (consume_lsm) {
+		task->lsm_ns_for_child = false;
+		task->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
+		kfree(task->lsm_ns_for_child_ctx);
+		task->lsm_ns_for_child_ctx = NULL;
+	}
+#endif
 	kfree(task->syslog_ns_for_child_name);
 	task->syslog_ns_for_child_name = NULL;
 }
@@ -119,10 +198,17 @@ static inline struct nsproxy *create_nsproxy(void)
  */
 static struct nsproxy *create_new_namespaces(u64 flags,
 	struct task_struct *tsk, struct task_struct *syslog_req_task,
-	struct user_namespace *user_ns, struct fs_struct *new_fs)
+	struct user_namespace *user_ns, struct cred *new_cred,
+	struct fs_struct *new_fs)
 {
 	bool new_syslog_ns = false;
 	bool new_tracing_ns = false;
+	bool consume_lsm_req = false;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	bool new_lsm_ns = false;
+	struct lsm_ctx *new_lsm_ctx = NULL;
+	struct lsm_namespace *created_lsm_ns;
+#endif
 	char *syslog_name = NULL;
 	struct nsproxy *new_nsp;
 	int err;
@@ -130,6 +216,7 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 	new_nsp = create_nsproxy();
 	if (!new_nsp)
 		return ERR_PTR(-ENOMEM);
+	new_nsp->tracing_ns = NULL;
 
 	new_nsp->mnt_ns = copy_mnt_ns(flags, tsk->nsproxy->mnt_ns, user_ns, new_fs);
 	if (IS_ERR(new_nsp->mnt_ns)) {
@@ -180,6 +267,12 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 	if (syslog_req_task) {
 		new_syslog_ns = syslog_req_task->syslog_ns_for_child;
 		new_tracing_ns = syslog_req_task->tracing_ns_for_child;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+		consume_lsm_req = lsm_child_ns_request_consumable(syslog_req_task,
+							   user_ns);
+		new_lsm_ns = consume_lsm_req;
+		new_lsm_ctx = syslog_req_task->lsm_ns_for_child_ctx;
+#endif
 		syslog_name = syslog_req_task->syslog_ns_for_child_name;
 	}
 
@@ -200,8 +293,44 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		goto out_tracing;
 	}
 #endif
-	consume_pending_child_ns_request(syslog_req_task);
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	if (new_lsm_ns) {
+		/*
+		 * clone(CLONE_NEWUSER) builds the child task credentials before
+		 * namespace copy and does not pass a separate new_cred pointer.
+		 * Use that not-yet-running child credential for LSM namespace
+		 * backend installation instead of letting backends mutate a
+		 * published task credential.
+		 */
+		if (!new_cred && tsk != current)
+			new_cred = (struct cred *)tsk->cred;
+		created_lsm_ns = copy_lsm_ns(true, user_ns, tsk, new_cred,
+					     new_lsm_ctx, current_lsm_ns());
+		if (IS_ERR(created_lsm_ns)) {
+			err = PTR_ERR(created_lsm_ns);
+			goto out_lsm;
+		}
+		set_child_lsm_owner_creds(new_nsp, flags, new_syslog_ns,
+					  new_tracing_ns, user_ns,
+					  created_lsm_ns, new_cred);
+		put_lsm_ns(created_lsm_ns);
+	}
+#endif
+	consume_pending_child_ns_request(syslog_req_task, consume_lsm_req);
 	return new_nsp;
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+out_lsm:
+#ifdef CONFIG_TRACING_NS
+	restore_child_userns_tracing_default(user_ns, new_nsp->tracing_ns,
+					     tsk->nsproxy->tracing_ns);
+	put_tracing_ns(new_nsp->tracing_ns);
+#else
+	restore_child_userns_syslog_default(user_ns, new_nsp->syslog_ns,
+					    tsk->nsproxy->syslog_ns);
+	put_syslog_ns(new_nsp->syslog_ns);
+#endif
+#endif
 
 #ifdef CONFIG_TRACING_NS
 out_tracing:
@@ -243,8 +372,7 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			      CLONE_NEWPID | CLONE_NEWNET |
 			      CLONE_NEWCGROUP | CLONE_NEWTIME))) &&
-	    likely(!current->syslog_ns_for_child) &&
-	    likely(!current->tracing_ns_for_child)) {
+	    likely(!has_pending_child_ns_request(current, user_ns))) {
 		if ((flags & CLONE_VM) ||
 		    likely(old_ns->time_ns_for_children == old_ns->time_ns)) {
 			get_nsproxy(old_ns);
@@ -264,7 +392,7 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 		(CLONE_NEWIPC | CLONE_SYSVSEM))
 		return -EINVAL;
 
-	new_ns = create_new_namespaces(flags, tsk, current, user_ns,
+	new_ns = create_new_namespaces(flags, tsk, current, user_ns, NULL,
 				       tsk->fs);
 	if (IS_ERR(new_ns))
 		return  PTR_ERR(new_ns);
@@ -303,19 +431,17 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 	struct user_namespace *user_ns;
 	int err = 0;
 
+	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!(unshare_flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			       CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWCGROUP |
-			       CLONE_NEWTIME))
-	    && !current->syslog_ns_for_child
-	    && !current->tracing_ns_for_child)
+			       CLONE_NEWTIME)) &&
+	    !has_pending_child_ns_request(current, user_ns))
 		return 0;
-
-	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
 	*new_nsp = create_new_namespaces(unshare_flags, current, current,
-					 user_ns, new_fs ? new_fs : current->fs);
+					 user_ns, new_cred, new_fs ? new_fs : current->fs);
 	if (IS_ERR(*new_nsp)) {
 		err = PTR_ERR(*new_nsp);
 		goto out;
@@ -358,7 +484,7 @@ int exec_task_namespaces(void)
 	 * It must not consume a pending child-boundary namespace request,
 	 * which is meant for the next real clone/unshare namespace duplication.
 	 */
-	new = create_new_namespaces(0, tsk, NULL, current_user_ns(),
+	new = create_new_namespaces(0, tsk, NULL, current_user_ns(), NULL,
 				    tsk->fs);
 	if (IS_ERR(new))
 		return PTR_ERR(new);
@@ -429,11 +555,11 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 
 	/*
 	 * setns() needs a transient duplicate of the caller's namespaces for
-	 * validation and commit. Do not consume a pending child-syslog request
+	 * validation and commit. Do not consume a pending child-boundary namespace request
 	 * here; it belongs to the next real clone/unshare boundary.
 	 */
 	nsset->nsproxy = create_new_namespaces(0, me, NULL,
-			       current_user_ns(), me->fs);
+			       current_user_ns(), NULL, me->fs);
 	if (IS_ERR(nsset->nsproxy))
 		return PTR_ERR(nsset->nsproxy);
 
@@ -443,6 +569,8 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 		nsset->cred = current_cred();
 	if (!nsset->cred)
 		goto out;
+
+	nsset->lsm_ns = current_lsm_ns();
 
 	/* Only create a temporary copy of fs_struct if we really need to. */
 	if (flags == CLONE_NEWNS) {
@@ -563,6 +691,7 @@ static int pidfd_prepare_vpsadminos_namespaces(struct nsset *nsset,
 {
 	struct user_namespace *hidden_user_ns = user_ns;
 	struct pid_namespace *hidden_pid_ns = pid_ns;
+	bool install_hidden;
 	int ret;
 
 	if (!hidden_user_ns)
@@ -570,8 +699,10 @@ static int pidfd_prepare_vpsadminos_namespaces(struct nsset *nsset,
 	if (!hidden_pid_ns)
 		hidden_pid_ns = nsset->nsproxy->pid_ns_for_children;
 
-	if (!pidfd_vpsadminos_should_install_hidden(target, hidden_user_ns,
-						    hidden_pid_ns))
+	install_hidden = pidfd_vpsadminos_should_install_hidden(target,
+								hidden_user_ns,
+								hidden_pid_ns);
+	if (!(nsset->flags & CLONE_NEWUSER) && !install_hidden)
 		return 0;
 
 	ret = pidfd_install_vpsadminos_tracing_ns(nsset, target->tracing_ns,
@@ -583,6 +714,12 @@ static int pidfd_prepare_vpsadminos_namespaces(struct nsset *nsset,
 						 hidden_user_ns);
 	if (ret)
 		return ret;
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	if (nsset->flags & CLONE_NEWUSER)
+		nsset->lsm_ns = user_ns && user_ns->lsm_ns ?
+			user_ns->lsm_ns : &init_lsm_ns;
+#endif
 
 	return 0;
 }

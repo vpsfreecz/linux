@@ -15,6 +15,7 @@
 #include <linux/bitops.h>
 #include <linux/key.h>
 #include <linux/sched/user.h>
+#include <linux/lsm_namespace.h>
 #include <linux/interrupt.h>
 #include <linux/export.h>
 #include <linux/user_namespace.h>
@@ -72,6 +73,9 @@ struct user_namespace init_user_ns = {
 	.syslog_ns = &init_syslog_ns,
 #ifdef CONFIG_TRACING_NS
 	.tracing_ns = &init_tracing_ns,
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	.lsm_ns = &init_lsm_ns,
 #endif
 	.owner = GLOBAL_ROOT_UID,
 	.group = GLOBAL_ROOT_GID,

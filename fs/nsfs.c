@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
+#include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/proc_fs.h>
@@ -18,8 +19,10 @@
 #include <linux/utsname.h>
 #include <linux/syslog_namespace.h>
 #include <linux/tracing_namespace.h>
+#include <linux/lsm_namespace.h>
 #include <linux/exportfs.h>
 #include <linux/nstree.h>
+#include <linux/security.h>
 #include <net/net_namespace.h>
 
 #include "mount.h"
@@ -420,6 +423,7 @@ static int nsfs_init_inode(struct inode *inode, void *data)
 	inode->i_mode |= S_IRUGO;
 	inode->i_fop = &ns_file_operations;
 	inode->i_ino = ns->inum;
+	ns_common_owner_to_inode(ns, inode);
 	return 0;
 }
 
@@ -561,6 +565,12 @@ static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 	case TRACING_NS_TYPE:
 		if (current_tracing_ns() != to_tracing_ns(ns))
 			owning_ns = to_tracing_ns(ns)->user_ns;
+		break;
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	case LSM_NS_TYPE:
+		if (current_lsm_ns() != to_lsm_ns(ns))
+			owning_ns = to_lsm_ns(ns)->user_ns;
 		break;
 #endif
 	default:

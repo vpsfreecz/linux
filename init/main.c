@@ -1582,15 +1582,23 @@ static noinline void __init kernel_init_freeable(void)
 	do_pre_smp_initcalls();
 	lockup_detector_init();
 
+	pr_info("vpsadminos-selinux-diag: before smp_init\n");
 	smp_init();
+	pr_info("vpsadminos-selinux-diag: after smp_init before sched_init_smp\n");
 	sched_init_smp();
+	pr_info("vpsadminos-selinux-diag: after sched_init_smp before workqueue_init_topology\n");
 
 	workqueue_init_topology();
+	pr_info("vpsadminos-selinux-diag: after workqueue_init_topology before async_init\n");
 	async_init();
+	pr_info("vpsadminos-selinux-diag: after async_init before padata_init\n");
 	padata_init();
+	pr_info("vpsadminos-selinux-diag: after padata_init before page_alloc_init_late\n");
 	page_alloc_init_late();
+	pr_info("vpsadminos-selinux-diag: after page_alloc_init_late before do_basic_setup\n");
 
 	do_basic_setup();
+	pr_info("vpsadminos-selinux-diag: after do_basic_setup\n");
 
 	kunit_run_all_tests();
 

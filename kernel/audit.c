@@ -2275,9 +2275,10 @@ static void audit_buffer_aux_end(struct audit_buffer *ab)
 /**
  * audit_log_subj_ctx - Add LSM subject information
  * @ab: audit_buffer
- * @prop: LSM subject properties.
+ * @prop: pre-captured LSM subject properties
  *
- * Add a subj= field and, if necessary, a AUDIT_MAC_TASK_CONTEXTS record.
+ * Add a subj= field and, if necessary, a AUDIT_MAC_TASK_CONTEXTS record using
+ * the caller-supplied subject snapshot.
  */
 int audit_log_subj_ctx(struct audit_buffer *ab, struct lsm_prop *prop)
 {
@@ -2286,7 +2287,6 @@ int audit_log_subj_ctx(struct audit_buffer *ab, struct lsm_prop *prop)
 	int error;
 	int i;
 
-	security_current_getlsmprop_subj(prop);
 	if (!lsmprop_is_set(prop))
 		return 0;
 
@@ -2594,7 +2594,9 @@ int audit_signal_info(int sig, struct task_struct *t)
 			audit_sig_uid = auid;
 		else
 			audit_sig_uid = uid;
+		security_release_lsmprop(&audit_sig_lsm);
 		security_current_getlsmprop_subj(&audit_sig_lsm);
+		security_lsmprop_hold(&audit_sig_lsm);
 	}
 
 	return audit_signal_info_syscall(t);

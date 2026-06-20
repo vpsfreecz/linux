@@ -73,6 +73,11 @@ __printf(5, 0)
 int vprintk_store_ns(struct syslog_namespace *ns, int facility, int level,
 		     const struct dev_printk_info *dev_info,
 		     const char *fmt, va_list args);
+__printf(6, 0)
+int vprintk_store_ns_tagged(struct syslog_namespace *ns,
+			    struct syslog_namespace *tag, int facility, int level,
+			    const struct dev_printk_info *dev_info,
+			    const char *fmt, va_list args);
 
 __printf(2, 0) int vprintk_ns(struct syslog_namespace *ns,
 		      const char *fmt, va_list args);
