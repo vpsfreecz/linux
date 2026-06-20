@@ -1437,7 +1437,8 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	ret = tracing_ns_check_userns_setns(user_ns);
+	ret = tracing_ns_check_userns_setns_from(user_ns,
+						 nsset->nsproxy->tracing_ns);
 	if (ret)
 		return ret;
 
