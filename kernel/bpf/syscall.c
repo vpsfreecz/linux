@@ -9,6 +9,7 @@
 #include <linux/bpf_verifier.h>
 #include <linux/bsearch.h>
 #include <linux/btf.h>
+#include <linux/cgroup.h>
 #include <linux/syscalls.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
@@ -1016,6 +1017,9 @@ static void bpf_map_show_fdinfo(struct seq_file *m, struct file *filp)
 	struct bpf_map *map = filp->private_data;
 	u32 type = 0, jited = 0;
 
+	if (!bpf_map_current_container_allowed(map))
+		return;
+
 	spin_lock(&map->owner_lock);
 	if (map->owner) {
 		type  = map->owner->type;
@@ -1095,6 +1099,9 @@ static int bpf_map_mmap(struct file *filp, struct vm_area_struct *vma)
 	struct bpf_map *map = filp->private_data;
 	int err = 0;
 
+	if (!bpf_map_current_container_allowed(map))
+		return -EACCES;
+
 	if (!map->ops->map_mmap || !IS_ERR_OR_NULL(map->record))
 		return -ENOTSUPP;
 
@@ -1151,6 +1158,9 @@ static __poll_t bpf_map_poll(struct file *filp, struct poll_table_struct *pts)
 {
 	struct bpf_map *map = filp->private_data;
 
+	if (!bpf_map_current_container_allowed(map))
+		return EPOLLERR;
+
 	if (map->ops->map_poll)
 		return map->ops->map_poll(map, filp, pts);
 
@@ -1162,6 +1172,9 @@ static unsigned long bpf_get_unmapped_area(struct file *filp, unsigned long addr
 					   unsigned long flags)
 {
 	struct bpf_map *map = filp->private_data;
+
+	if (!bpf_map_current_container_allowed(map))
+		return -EACCES;
 
 	if (map->ops->map_get_unmapped_area)
 		return map->ops->map_get_unmapped_area(filp, addr, len, pgoff, flags);
@@ -1187,6 +1200,9 @@ const struct file_operations bpf_map_fops = {
 int bpf_map_new_fd(struct bpf_map *map, int flags)
 {
 	int ret;
+
+	if (!bpf_map_current_container_allowed(map))
+		return -EACCES;
 
 	ret = security_bpf_map(map, OPEN_FMODE(flags));
 	if (ret < 0)
@@ -1374,11 +1390,6 @@ static bool bpf_net_capable(void)
 	return capable(CAP_NET_ADMIN) || capable(CAP_SYS_ADMIN);
 }
 
-static bool bpf_token_is_internal_effective(const struct bpf_token *token)
-{
-	return bpf_token_is_container(token);
-}
-
 static struct bpf_token *bpf_get_effective_container_token(void)
 {
 	if (!sysctl_bpf_container_tracing_enabled)
@@ -1399,6 +1410,7 @@ static bool bpf_container_map_type_allowed(enum bpf_map_type map_type)
 	case BPF_MAP_TYPE_HASH_OF_MAPS:
 	case BPF_MAP_TYPE_PROG_ARRAY:
 	case BPF_MAP_TYPE_PERF_EVENT_ARRAY:
+	case BPF_MAP_TYPE_CGROUP_ARRAY:
 	case BPF_MAP_TYPE_RINGBUF:
 		return true;
 	default:
@@ -1415,7 +1427,7 @@ static bool bpf_container_cgroup_attach_type_allowed(enum bpf_attach_type attach
 	case BPF_CGROUP_INET4_BIND:
 	case BPF_CGROUP_INET6_BIND:
 	case BPF_CGROUP_DEVICE:
-	case BPF_LSM_CGROUP:
+	case BPF_CGROUP_SYSCTL:
 		return true;
 	default:
 		return false;
@@ -1428,7 +1440,6 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 {
 	switch (prog_type) {
 	case BPF_PROG_TYPE_KPROBE:
-	case BPF_PROG_TYPE_TRACEPOINT:
 	case BPF_PROG_TYPE_PERF_EVENT:
 		return true;
 	case BPF_PROG_TYPE_CGROUP_SKB:
@@ -1442,13 +1453,121 @@ static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 		       attach_type == BPF_CGROUP_INET6_BIND;
 	case BPF_PROG_TYPE_CGROUP_DEVICE:
 		return !attach_type || attach_type == BPF_CGROUP_DEVICE;
+	case BPF_PROG_TYPE_CGROUP_SYSCTL:
+		return !attach_type || attach_type == BPF_CGROUP_SYSCTL;
 	case BPF_PROG_TYPE_LSM:
-		return attach_type == BPF_LSM_CGROUP ||
-		       (attach_type == BPF_LSM_MAC &&
-			bpf_lsm_is_file_open_hook(attach_btf_id));
+		return attach_type == BPF_LSM_MAC &&
+		       bpf_lsm_is_container_hook(attach_btf_id);
 	default:
 		return false;
 	}
+}
+
+static bool bpf_container_prog_type_libbpf_probe_candidate(enum bpf_prog_type prog_type)
+{
+	switch (prog_type) {
+	case BPF_PROG_TYPE_SOCKET_FILTER:
+	case BPF_PROG_TYPE_TRACEPOINT:
+	case BPF_PROG_TYPE_CGROUP_SOCK_ADDR:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool bpf_container_prog_load_perfmon_cap_exempt(bool container_prog_allowed,
+						       enum bpf_prog_type prog_type,
+						       enum bpf_attach_type attach_type,
+						       u32 attach_btf_id)
+{
+	return container_prog_allowed &&
+	       prog_type == BPF_PROG_TYPE_LSM &&
+	       attach_type == BPF_LSM_MAC &&
+	       bpf_lsm_is_container_hook(attach_btf_id);
+}
+
+static bool bpf_container_libbpf_zero_return_probe_insns(const struct bpf_prog *prog)
+{
+	const struct bpf_insn *insn;
+
+	if (prog->len != 2)
+		return false;
+
+	insn = prog->insnsi;
+	return insn[0].code == (BPF_ALU64 | BPF_MOV | BPF_K) &&
+	       insn[0].dst_reg == BPF_REG_0 &&
+	       insn[0].src_reg == 0 &&
+	       insn[0].off == 0 &&
+	       insn[0].imm == 0 &&
+	       insn[1].code == (BPF_JMP | BPF_EXIT) &&
+	       insn[1].dst_reg == 0 &&
+	       insn[1].src_reg == 0 &&
+	       insn[1].off == 0 &&
+	       insn[1].imm == 0;
+}
+
+static bool bpf_container_libbpf_global_data_probe_insns(enum bpf_prog_type prog_type,
+							 const struct bpf_prog *prog)
+{
+	const struct bpf_insn *insn;
+
+	if (prog_type != BPF_PROG_TYPE_SOCKET_FILTER || prog->len != 5)
+		return false;
+
+	insn = prog->insnsi;
+	return insn[0].code == (BPF_LD | BPF_DW | BPF_IMM) &&
+	       insn[0].dst_reg == BPF_REG_1 &&
+	       insn[0].src_reg == BPF_PSEUDO_MAP_VALUE &&
+	       insn[0].off == 0 &&
+	       insn[1].code == 0 &&
+	       insn[1].dst_reg == 0 &&
+	       insn[1].src_reg == 0 &&
+	       insn[1].off == 0 &&
+	       insn[1].imm == 16 &&
+	       insn[2].code == (BPF_ST | BPF_DW | BPF_MEM) &&
+	       insn[2].dst_reg == BPF_REG_1 &&
+	       insn[2].src_reg == 0 &&
+	       insn[2].off == 0 &&
+	       insn[2].imm == 42 &&
+	       insn[3].code == (BPF_ALU64 | BPF_MOV | BPF_K) &&
+	       insn[3].dst_reg == BPF_REG_0 &&
+	       insn[3].src_reg == 0 &&
+	       insn[3].off == 0 &&
+	       insn[3].imm == 0 &&
+	       insn[4].code == (BPF_JMP | BPF_EXIT) &&
+	       insn[4].dst_reg == 0 &&
+	       insn[4].src_reg == 0 &&
+	       insn[4].off == 0 &&
+	       insn[4].imm == 0;
+}
+
+static bool bpf_container_libbpf_probe_insns(enum bpf_prog_type prog_type,
+					     const struct bpf_prog *prog)
+{
+	return bpf_container_libbpf_zero_return_probe_insns(prog) ||
+	       bpf_container_libbpf_global_data_probe_insns(prog_type, prog);
+}
+
+static bool bpf_container_libbpf_probe_load_allowed(enum bpf_prog_type prog_type,
+						    enum bpf_attach_type attach_type,
+						    const struct bpf_prog *prog,
+						    const char *license)
+{
+	if (!bpf_container_prog_type_libbpf_probe_candidate(prog_type))
+		return false;
+	if (prog_type == BPF_PROG_TYPE_CGROUP_SOCK_ADDR &&
+	    attach_type != BPF_CGROUP_INET4_CONNECT)
+		return false;
+	if (prog->aux->attach_btf_id || prog->aux->attach_btf ||
+	    prog->aux->dst_prog || prog->aux->dev_bound || prog->sleepable)
+		return false;
+	if (prog->aux->name[0] &&
+	    strcmp(prog->aux->name, "libbpf_nametest"))
+		return false;
+	if (strcmp(license, "GPL"))
+		return false;
+
+	return bpf_container_libbpf_probe_insns(prog_type, prog);
 }
 
 #define BPF_MAP_CREATE_LAST_FIELD excl_prog_hash_size
@@ -1460,6 +1579,7 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	int numa_node = bpf_map_attr_numa_node(attr);
 	u32 map_type = attr->map_type;
 	struct bpf_map *map;
+	bool container_map_allowed = false;
 	bool token_flag;
 	int f_flags;
 	int err;
@@ -1535,9 +1655,12 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 			return PTR_ERR(token);
 	}
 
-	if (bpf_token_is_container(token) && !bpf_container_map_type_allowed(attr->map_type)) {
-		err = -EPERM;
-		goto put_token;
+	if (bpf_token_is_container(token)) {
+		container_map_allowed = bpf_container_map_type_allowed(attr->map_type);
+		if (!container_map_allowed) {
+			err = -EPERM;
+			goto put_token;
+		}
 	}
 
 	err = -EPERM;
@@ -1548,7 +1671,9 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	 * object creation success. Even with unprivileged BPF disabled,
 	 * capability checks are still carried out.
 	 */
-	if (sysctl_unprivileged_bpf_disabled && !bpf_token_capable(token, CAP_BPF))
+	if (sysctl_unprivileged_bpf_disabled &&
+	    !container_map_allowed &&
+	    !bpf_token_capable(token, CAP_BPF))
 		goto put_token;
 
 	/* check privileged map type permissions */
@@ -1751,6 +1876,16 @@ struct bpf_map *bpf_map_get_with_uref(u32 ufd)
 		bpf_map_inc_with_uref(map);
 
 	return map;
+}
+
+bool bpf_map_current_container_allowed(const struct bpf_map *map)
+{
+	if (!bpf_token_current_container_member())
+		return true;
+	if (!bpf_token_is_container(map->token))
+		return false;
+
+	return bpf_token_task_match(map->token, current);
 }
 
 /* map_idr_lock should have been held or the map should have been
@@ -2597,6 +2732,9 @@ static void bpf_prog_show_fdinfo(struct seq_file *m, struct file *filp)
 	char prog_tag[sizeof(prog->tag) * 2 + 1] = { };
 	struct bpf_prog_kstats stats;
 
+	if (!bpf_prog_current_container_allowed(prog))
+		return;
+
 	bpf_prog_get_stats(prog, &stats);
 	bin2hex(prog_tag, prog->tag, sizeof(prog->tag));
 	seq_printf(m,
@@ -2633,6 +2771,9 @@ const struct file_operations bpf_prog_fops = {
 int bpf_prog_new_fd(struct bpf_prog *prog)
 {
 	int ret;
+
+	if (!bpf_prog_current_container_allowed(prog))
+		return -EACCES;
 
 	ret = security_bpf_prog(prog);
 	if (ret < 0)
@@ -2680,8 +2821,11 @@ struct bpf_prog *bpf_prog_inc_not_zero(struct bpf_prog *prog)
 EXPORT_SYMBOL_GPL(bpf_prog_inc_not_zero);
 
 bool bpf_prog_get_ok(struct bpf_prog *prog,
-			    enum bpf_prog_type *attach_type, bool attach_drv)
+				    enum bpf_prog_type *attach_type, bool attach_drv)
 {
+	if (bpf_prog_container_libbpf_probe_only(prog))
+		return false;
+
 	/* not an attachment, just a refcount inc, always allow */
 	if (!attach_type)
 		return true;
@@ -2695,7 +2839,8 @@ bool bpf_prog_get_ok(struct bpf_prog *prog,
 }
 
 static struct bpf_prog *__bpf_prog_get(u32 ufd, enum bpf_prog_type *attach_type,
-				       bool attach_drv)
+				       bool attach_drv,
+				       bool allow_libbpf_probe_only)
 {
 	CLASS(fd, f)(ufd);
 	struct bpf_prog *prog;
@@ -2706,8 +2851,18 @@ static struct bpf_prog *__bpf_prog_get(u32 ufd, enum bpf_prog_type *attach_type,
 		return ERR_PTR(-EINVAL);
 
 	prog = fd_file(f)->private_data;
-	if (!bpf_prog_get_ok(prog, attach_type, attach_drv))
+	if (!bpf_prog_current_container_allowed(prog))
+		return ERR_PTR(-EACCES);
+	if (bpf_prog_container_libbpf_probe_only(prog)) {
+		if (!allow_libbpf_probe_only)
+			return ERR_PTR(-EPERM);
+		if (attach_type && prog->type != *attach_type)
+			return ERR_PTR(-EINVAL);
+		if (bpf_prog_is_offloaded(prog->aux) && !attach_drv)
+			return ERR_PTR(-EINVAL);
+	} else if (!bpf_prog_get_ok(prog, attach_type, attach_drv)) {
 		return ERR_PTR(-EINVAL);
+	}
 
 	bpf_prog_inc(prog);
 	return prog;
@@ -2715,15 +2870,25 @@ static struct bpf_prog *__bpf_prog_get(u32 ufd, enum bpf_prog_type *attach_type,
 
 struct bpf_prog *bpf_prog_get(u32 ufd)
 {
-	return __bpf_prog_get(ufd, NULL, false);
+	return __bpf_prog_get(ufd, NULL, false, false);
 }
 
 struct bpf_prog *bpf_prog_get_type_dev(u32 ufd, enum bpf_prog_type type,
 				       bool attach_drv)
 {
-	return __bpf_prog_get(ufd, &type, attach_drv);
+	return __bpf_prog_get(ufd, &type, attach_drv, false);
 }
 EXPORT_SYMBOL_GPL(bpf_prog_get_type_dev);
+
+bool bpf_prog_current_container_allowed(const struct bpf_prog *prog)
+{
+	if (!bpf_token_current_container_member())
+		return true;
+	if (!bpf_token_is_container(prog->aux->token))
+		return false;
+
+	return bpf_token_task_match(prog->aux->token, current);
+}
 
 /* Initially all BPF programs could be loaded w/o specifying
  * expected_attach_type. Later for some of them specifying expected_attach_type
@@ -2957,6 +3122,8 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	struct bpf_prog *prog, *dst_prog = NULL;
 	struct btf *attach_btf = NULL;
 	struct bpf_token *token = NULL;
+	bool container_libbpf_probe_candidate = false;
+	bool container_prog_allowed = false;
 	bool bpf_cap;
 	int err;
 	char license[128];
@@ -2997,12 +3164,19 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 			return PTR_ERR(token);
 	}
 
-	if (bpf_token_is_container(token) &&
-	    !bpf_container_prog_type_allowed(attr->prog_type,
-					 attr->expected_attach_type,
-					 attr->attach_btf_id)) {
-		err = -EPERM;
-		goto put_token;
+	if (bpf_token_is_container(token)) {
+		container_prog_allowed =
+			bpf_container_prog_type_allowed(attr->prog_type,
+							attr->expected_attach_type,
+							attr->attach_btf_id);
+		container_libbpf_probe_candidate =
+			!container_prog_allowed &&
+			bpf_container_prog_type_libbpf_probe_candidate(attr->prog_type);
+		if (!container_prog_allowed &&
+		    !container_libbpf_probe_candidate) {
+			err = -EPERM;
+			goto put_token;
+		}
 	}
 
 	bpf_cap = bpf_token_capable(token, CAP_BPF);
@@ -3020,7 +3194,10 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	 * capability checks are still carried out for these
 	 * and other operations.
 	 */
-	if (sysctl_unprivileged_bpf_disabled && !bpf_cap)
+	if (sysctl_unprivileged_bpf_disabled &&
+	    !container_prog_allowed &&
+	    !container_libbpf_probe_candidate &&
+	    !bpf_cap)
 		goto put_token;
 
 	if (attr->insn_cnt == 0 ||
@@ -3030,12 +3207,21 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	}
 	if (type != BPF_PROG_TYPE_SOCKET_FILTER &&
 	    type != BPF_PROG_TYPE_CGROUP_SKB &&
+	    !container_prog_allowed &&
+	    !container_libbpf_probe_candidate &&
 	    !bpf_cap)
 		goto put_token;
 
-	if (is_net_admin_prog_type(type) && !bpf_token_capable(token, CAP_NET_ADMIN))
+	if (!container_libbpf_probe_candidate &&
+	    is_net_admin_prog_type(type) && !bpf_token_capable(token, CAP_NET_ADMIN))
 		goto put_token;
-	if (is_perfmon_prog_type(type) && !bpf_token_capable(token, CAP_PERFMON))
+	if (!container_libbpf_probe_candidate &&
+	    is_perfmon_prog_type(type) &&
+	    !bpf_container_prog_load_perfmon_cap_exempt(container_prog_allowed,
+						       type,
+						       attr->expected_attach_type,
+						       attr->attach_btf_id) &&
+	    !bpf_token_capable(token, CAP_PERFMON))
 		goto put_token;
 
 	/* attach_prog_fd/attach_btf_obj_fd can specify fd of either bpf_prog
@@ -3122,6 +3308,24 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		goto free_prog;
 	license[sizeof(license) - 1] = 0;
 
+	err = bpf_obj_name_cpy(prog->aux->name, attr->prog_name,
+			       sizeof(attr->prog_name));
+	if (err < 0)
+		goto free_prog;
+
+	if (bpf_token_is_container(prog->aux->token) &&
+	    !bpf_container_prog_type_allowed(type,
+					     attr->expected_attach_type,
+					     attr->attach_btf_id)) {
+		if (!bpf_container_libbpf_probe_load_allowed(type,
+							     attr->expected_attach_type,
+							     prog, license)) {
+			err = -EPERM;
+			goto free_prog;
+		}
+		prog->aux->container_libbpf_probe_only = true;
+	}
+
 	/* eBPF programs must be GPL compatible to use GPL-ed functions */
 	prog->gpl_compatible = license_is_gpl_compatible(license) ? 1 : 0;
 
@@ -3171,15 +3375,18 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 		goto free_prog;
 
 	prog->aux->load_time = ktime_get_boottime_ns();
-	err = bpf_obj_name_cpy(prog->aux->name, attr->prog_name,
-			       sizeof(attr->prog_name));
-	if (err < 0)
-		goto free_prog;
 
 	err = security_bpf_prog_load(prog, attr, prog->aux->token,
 				      uattr.is_kernel);
 	if (err)
 		goto free_prog_sec;
+
+	if (bpf_prog_container_libbpf_probe_only(prog)) {
+		err = bpf_prog_new_fd(prog);
+		if (err < 0)
+			goto free_prog_sec;
+		return err;
+	}
 
 	/* run eBPF verifier */
 	err = bpf_check(&prog, attr, uattr, uattr_size);
@@ -3423,6 +3630,16 @@ static int bpf_link_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
+bool bpf_link_current_container_allowed(const struct bpf_link *link)
+{
+	if (!bpf_token_current_container_member())
+		return true;
+	if (!link->prog || !bpf_token_is_container(link->prog->aux->token))
+		return false;
+
+	return bpf_token_task_match(link->prog->aux->token, current);
+}
+
 #ifdef CONFIG_PROC_FS
 #define BPF_PROG_TYPE(_id, _name, prog_ctx_type, kern_ctx_type)
 #define BPF_MAP_TYPE(_id, _ops)
@@ -3441,6 +3658,9 @@ static void bpf_link_show_fdinfo(struct seq_file *m, struct file *filp)
 	const struct bpf_prog *prog = link->prog;
 	enum bpf_link_type type = link->type;
 	char prog_tag[sizeof(prog->tag) * 2 + 1] = { };
+
+	if (!bpf_link_current_container_allowed(link))
+		return;
 
 	if (type < ARRAY_SIZE(bpf_link_type_strs) && bpf_link_type_strs[type]) {
 		if (link->type == BPF_LINK_TYPE_KPROBE_MULTI)
@@ -3473,6 +3693,9 @@ static void bpf_link_show_fdinfo(struct seq_file *m, struct file *filp)
 static __poll_t bpf_link_poll(struct file *file, struct poll_table_struct *pts)
 {
 	struct bpf_link *link = file->private_data;
+
+	if (!bpf_link_current_container_allowed(link))
+		return EPOLLERR;
 
 	return link->ops->poll(file, pts);
 }
@@ -3568,6 +3791,9 @@ int bpf_link_settle(struct bpf_link_primer *primer)
 
 int bpf_link_new_fd(struct bpf_link *link)
 {
+	if (!bpf_link_current_container_allowed(link))
+		return -EACCES;
+
 	return anon_inode_getfd("bpf-link",
 				link->ops->poll ? &bpf_link_fops_poll : &bpf_link_fops,
 				link, O_CLOEXEC);
@@ -3584,6 +3810,8 @@ struct bpf_link *bpf_link_get_from_fd(u32 ufd)
 		return ERR_PTR(-EINVAL);
 
 	link = fd_file(f)->private_data;
+	if (!bpf_link_current_container_allowed(link))
+		return ERR_PTR(-EACCES);
 	bpf_link_inc(link);
 	return link;
 }
@@ -3689,7 +3917,7 @@ static int bpf_tracing_prog_attach(struct bpf_prog *prog,
 			goto out_put_prog;
 		}
 		if (bpf_token_is_container(prog->aux->token) &&
-		    !bpf_lsm_is_file_open_hook(prog->aux->attach_btf_id)) {
+		    !bpf_lsm_is_container_hook(prog->aux->attach_btf_id)) {
 			err = -EPERM;
 			goto out_put_prog;
 		}
@@ -4388,6 +4616,10 @@ static int bpf_raw_tracepoint_open(const union bpf_attr *attr)
 	prog = bpf_prog_get(attr->raw_tracepoint.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
+	if (bpf_prog_container_libbpf_probe_only(prog)) {
+		bpf_prog_put(prog);
+		return -EPERM;
+	}
 
 	tp_name = u64_to_user_ptr(attr->raw_tracepoint.name);
 	cookie = attr->raw_tracepoint.cookie;
@@ -4692,7 +4924,8 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
 	case BPF_PROG_TYPE_SOCK_OPS:
 	case BPF_PROG_TYPE_LSM:
-		ret = cgroup_bpf_prog_detach(attr, ptype);
+		ret = cgroup_bpf_prog_detach(attr, ptype,
+					     bpf_token_current_container_member());
 		break;
 	case BPF_PROG_TYPE_SCHED_CLS:
 		if (attr->attach_type == BPF_TCX_INGRESS ||
@@ -4765,7 +4998,8 @@ static int bpf_prog_query(const union bpf_attr *attr,
 	case BPF_CGROUP_GETSOCKOPT:
 	case BPF_CGROUP_SETSOCKOPT:
 	case BPF_LSM_CGROUP:
-		ret = cgroup_bpf_prog_query(attr, uattr);
+		ret = cgroup_bpf_prog_query(attr, uattr,
+					    bpf_token_current_container_member());
 		break;
 	case BPF_LIRC_MODE2:
 		ret = lirc_prog_query(attr, uattr);
@@ -4821,9 +5055,15 @@ static int bpf_prog_test_run(const union bpf_attr *attr,
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
 
+	if (bpf_prog_container_libbpf_probe_only(prog)) {
+		ret = -EPERM;
+		goto out;
+	}
+
 	if (prog->aux->ops->test_run)
 		ret = prog->aux->ops->test_run(prog, attr, uattr);
 
+out:
 	bpf_prog_put(prog);
 	return ret;
 }
@@ -4840,6 +5080,9 @@ static int bpf_obj_get_next_id(const union bpf_attr *attr,
 
 	if (CHECK_ATTR(BPF_OBJ_GET_NEXT_ID) || next_id >= INT_MAX)
 		return -EINVAL;
+
+	if (bpf_token_current_container_member())
+		return -EPERM;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -4860,17 +5103,24 @@ struct bpf_map *bpf_map_get_curr_or_next(u32 *id)
 {
 	struct bpf_map *map;
 
-	spin_lock_bh(&map_idr_lock);
 again:
+	spin_lock_bh(&map_idr_lock);
+map_again:
 	map = idr_get_next(&map_idr, id);
 	if (map) {
 		map = __bpf_map_inc_not_zero(map, false);
 		if (IS_ERR(map)) {
 			(*id)++;
-			goto again;
+			goto map_again;
 		}
 	}
 	spin_unlock_bh(&map_idr_lock);
+
+	if (map && !bpf_map_current_container_allowed(map)) {
+		bpf_map_put(map);
+		(*id)++;
+		goto again;
+	}
 
 	return map;
 }
@@ -4879,17 +5129,24 @@ struct bpf_prog *bpf_prog_get_curr_or_next(u32 *id)
 {
 	struct bpf_prog *prog;
 
-	spin_lock_bh(&prog_idr_lock);
 again:
+	spin_lock_bh(&prog_idr_lock);
+prog_again:
 	prog = idr_get_next(&prog_idr, id);
 	if (prog) {
 		prog = bpf_prog_inc_not_zero(prog);
 		if (IS_ERR(prog)) {
 			(*id)++;
-			goto again;
+			goto prog_again;
 		}
 	}
 	spin_unlock_bh(&prog_idr_lock);
+
+	if (prog && !bpf_prog_current_container_allowed(prog)) {
+		bpf_prog_put(prog);
+		(*id)++;
+		goto again;
+	}
 
 	return prog;
 }
@@ -4910,6 +5167,10 @@ struct bpf_prog *bpf_prog_by_id(u32 id)
 	else
 		prog = ERR_PTR(-ENOENT);
 	spin_unlock_bh(&prog_idr_lock);
+	if (!IS_ERR(prog) && !bpf_prog_current_container_allowed(prog)) {
+		bpf_prog_put(prog);
+		return ERR_PTR(-ENOENT);
+	}
 	return prog;
 }
 
@@ -4921,6 +5182,9 @@ static int bpf_prog_get_fd_by_id(const union bpf_attr *attr)
 
 	if (CHECK_ATTR(BPF_PROG_GET_FD_BY_ID))
 		return -EINVAL;
+
+	if (bpf_token_current_container_member())
+		return -EPERM;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -4949,8 +5213,12 @@ static int bpf_map_get_fd_by_id(const union bpf_attr *attr)
 	    attr->open_flags & ~BPF_OBJ_FLAG_MASK)
 		return -EINVAL;
 
-	if (!capable(CAP_SYS_ADMIN))
+	if (bpf_token_current_container_member()) {
+		if (!bpf_token_current_container_capable(CAP_SYS_ADMIN))
+			return -EPERM;
+	} else if (!capable(CAP_SYS_ADMIN)) {
 		return -EPERM;
+	}
 
 	f_flags = bpf_get_file_flag(attr->open_flags);
 	if (f_flags < 0)
@@ -4966,6 +5234,11 @@ static int bpf_map_get_fd_by_id(const union bpf_attr *attr)
 
 	if (IS_ERR(map))
 		return PTR_ERR(map);
+
+	if (!bpf_map_current_container_allowed(map)) {
+		bpf_map_put_with_uref(map);
+		return -ENOENT;
+	}
 
 	fd = bpf_map_new_fd(map, f_flags);
 	if (fd < 0)
@@ -5108,6 +5381,10 @@ static int bpf_prog_get_info_by_fd(struct file *file,
 	err = bpf_check_uarg_tail_zero(USER_BPFPTR(uinfo), sizeof(info), info_len);
 	if (err)
 		return err;
+	if (!bpf_prog_current_container_allowed(prog))
+		return -EACCES;
+	if (bpf_prog_container_libbpf_probe_only(prog))
+		return -EPERM;
 	info_len = min_t(u32, sizeof(info), info_len);
 
 	memset(&info, 0, sizeof(info));
@@ -5393,6 +5670,8 @@ static int bpf_map_get_info_by_fd(struct file *file,
 	err = bpf_check_uarg_tail_zero(USER_BPFPTR(uinfo), sizeof(info), info_len);
 	if (err)
 		return err;
+	if (!bpf_map_current_container_allowed(map))
+		return -EACCES;
 	info_len = min_t(u32, sizeof(info), info_len);
 
 	memset(&info, 0, sizeof(info));
@@ -5478,6 +5757,8 @@ static int bpf_link_get_info_by_fd(struct file *file,
 	err = bpf_check_uarg_tail_zero(USER_BPFPTR(uinfo), sizeof(info), info_len);
 	if (err)
 		return err;
+	if (!bpf_link_current_container_allowed(link))
+		return -EACCES;
 	info_len = min_t(u32, sizeof(info), info_len);
 
 	memset(&info, 0, sizeof(info));
@@ -5552,6 +5833,7 @@ static int bpf_obj_get_info_by_fd(const union bpf_attr *attr,
 static int bpf_btf_load(const union bpf_attr *attr, bpfptr_t uattr, __u32 uattr_size)
 {
 	struct bpf_token *token = NULL;
+	int ret;
 
 	if (CHECK_ATTR(BPF_BTF_LOAD))
 		return -EINVAL;
@@ -5567,16 +5849,21 @@ static int bpf_btf_load(const union bpf_attr *attr, bpfptr_t uattr, __u32 uattr_
 			bpf_token_put(token);
 			token = NULL;
 		}
+	} else {
+		token = bpf_get_effective_container_token();
+		if (IS_ERR(token))
+			return PTR_ERR(token);
 	}
 
-	if (!bpf_token_capable(token, CAP_BPF)) {
+	if (!bpf_token_is_container(token) &&
+	    !bpf_token_capable(token, CAP_BPF)) {
 		bpf_token_put(token);
 		return -EPERM;
 	}
 
+	ret = btf_new_fd(attr, uattr, uattr_size, token);
 	bpf_token_put(token);
-
-	return btf_new_fd(attr, uattr, uattr_size);
+	return ret;
 }
 
 #define BPF_BTF_GET_FD_BY_ID_LAST_FIELD fd_by_id_token_fd
@@ -5590,6 +5877,9 @@ static int bpf_btf_get_fd_by_id(const union bpf_attr *attr)
 
 	if (attr->open_flags & ~BPF_F_TOKEN_FD)
 		return -EINVAL;
+
+	if (bpf_token_current_container_member())
+		return -EPERM;
 
 	if (attr->open_flags & BPF_F_TOKEN_FD) {
 		token = bpf_token_get_from_fd(attr->fd_by_id_token_fd);
@@ -5654,9 +5944,12 @@ static int bpf_task_fd_query(const union bpf_attr *attr,
 {
 	pid_t pid = attr->task_fd_query.pid;
 	u32 fd = attr->task_fd_query.fd;
+	u64 probe_offset, probe_addr;
 	const struct perf_event *event;
+	u32 prog_id, fd_type;
 	struct task_struct *task;
 	struct file *file;
+	const char *buf;
 	int err;
 
 	if (CHECK_ATTR(BPF_TASK_FD_QUERY))
@@ -5683,6 +5976,11 @@ static int bpf_task_fd_query(const union bpf_attr *attr,
 	if (file->f_op == &bpf_link_fops || file->f_op == &bpf_link_fops_poll) {
 		struct bpf_link *link = file->private_data;
 
+		if (!bpf_link_current_container_allowed(link)) {
+			err = -EACCES;
+			goto put_file;
+		}
+
 		if (link->ops == &bpf_raw_tp_link_lops) {
 			struct bpf_raw_tp_link *raw_tp =
 				container_of(link, struct bpf_raw_tp_link, link);
@@ -5698,21 +5996,22 @@ static int bpf_task_fd_query(const union bpf_attr *attr,
 	}
 
 	event = perf_get_event(file);
-	if (!IS_ERR(event)) {
-		u64 probe_offset, probe_addr;
-		u32 prog_id, fd_type;
-		const char *buf;
-
-		err = bpf_get_perf_event_info(event, &prog_id, &fd_type,
-					      &buf, &probe_offset,
-					      &probe_addr, NULL);
-		if (!err)
-			err = bpf_task_fd_query_copy(attr, uattr, prog_id,
-						     fd_type, buf,
-						     probe_offset,
-						     probe_addr);
-		goto put_file;
+	if (IS_ERR(event)) {
+		err = PTR_ERR(event);
+		if (err != -EINVAL)
+			goto put_file;
+		goto out_not_supp;
 	}
+
+	err = bpf_get_perf_event_info(event, &prog_id, &fd_type,
+				      &buf, &probe_offset,
+				      &probe_addr, NULL);
+	if (!err)
+		err = bpf_task_fd_query_copy(attr, uattr, prog_id,
+					     fd_type, buf,
+					     probe_offset,
+					     probe_addr);
+	goto put_file;
 
 out_not_supp:
 	err = -ENOTSUPP;
@@ -5777,6 +6076,28 @@ err_put:
 	return err;
 }
 
+static int bpf_libbpf_probe_only_link_create(const union bpf_attr *attr,
+					     struct bpf_prog *prog)
+{
+	struct cgroup *cgrp;
+	int ret;
+
+	if (prog->type != BPF_PROG_TYPE_CGROUP_SOCK_ADDR)
+		return -EPERM;
+
+	ret = bpf_prog_attach_check_attach_type(prog,
+						attr->link_create.attach_type);
+	if (ret)
+		return ret;
+
+	cgrp = cgroup_get_from_fd(attr->link_create.target_fd);
+	if (IS_ERR(cgrp))
+		return PTR_ERR(cgrp);
+
+	cgroup_put(cgrp);
+	return -EPERM;
+}
+
 #define BPF_LINK_CREATE_LAST_FIELD link_create.uprobe_multi.pid
 static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 {
@@ -5789,9 +6110,13 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 	if (attr->link_create.attach_type == BPF_STRUCT_OPS)
 		return bpf_struct_ops_link_create(attr);
 
-	prog = bpf_prog_get(attr->link_create.prog_fd);
+	prog = __bpf_prog_get(attr->link_create.prog_fd, NULL, false, true);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
+	if (bpf_prog_container_libbpf_probe_only(prog)) {
+		ret = bpf_libbpf_probe_only_link_create(attr, prog);
+		goto out;
+	}
 
 	ret = bpf_prog_attach_check_attach_type(prog,
 						attr->link_create.attach_type);
@@ -5866,11 +6191,20 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 		if (attr->link_create.attach_type == BPF_PERF_EVENT)
 			ret = bpf_perf_link_attach(attr, prog);
 		else if (attr->link_create.attach_type == BPF_TRACE_KPROBE_MULTI ||
-			 attr->link_create.attach_type == BPF_TRACE_KPROBE_SESSION)
+			 attr->link_create.attach_type == BPF_TRACE_KPROBE_SESSION) {
+			if (bpf_token_is_container(prog->aux->token)) {
+				ret = -EACCES;
+				break;
+			}
 			ret = bpf_kprobe_multi_link_attach(attr, prog);
-		else if (attr->link_create.attach_type == BPF_TRACE_UPROBE_MULTI ||
-			 attr->link_create.attach_type == BPF_TRACE_UPROBE_SESSION)
+		} else if (attr->link_create.attach_type == BPF_TRACE_UPROBE_MULTI ||
+			   attr->link_create.attach_type == BPF_TRACE_UPROBE_SESSION) {
+			if (bpf_token_is_container(prog->aux->token)) {
+				ret = -EACCES;
+				break;
+			}
 			ret = bpf_uprobe_multi_link_attach(attr, prog);
+		}
 		break;
 	default:
 		ret = -EINVAL;
@@ -5930,6 +6264,10 @@ static int link_update(union bpf_attr *attr)
 	link = bpf_link_get_from_fd(attr->link_update.link_fd);
 	if (IS_ERR(link))
 		return PTR_ERR(link);
+	if (!bpf_link_current_container_allowed(link)) {
+		ret = -EACCES;
+		goto out_put_link;
+	}
 
 	if (link->ops->update_map) {
 		ret = link_update_map(link, attr);
@@ -5982,12 +6320,17 @@ static int link_detach(union bpf_attr *attr)
 	link = bpf_link_get_from_fd(attr->link_detach.link_fd);
 	if (IS_ERR(link))
 		return PTR_ERR(link);
+	if (!bpf_link_current_container_allowed(link)) {
+		ret = -EACCES;
+		goto out_put_link;
+	}
 
 	if (link->ops->detach)
 		ret = link->ops->detach(link);
 	else
 		ret = -EOPNOTSUPP;
 
+out_put_link:
 	bpf_link_put_direct(link);
 	return ret;
 }
@@ -6017,6 +6360,10 @@ struct bpf_link *bpf_link_by_id(u32 id)
 		link = ERR_PTR(-ENOENT);
 	}
 	spin_unlock_bh(&link_idr_lock);
+	if (!IS_ERR(link) && !bpf_link_current_container_allowed(link)) {
+		bpf_link_put_direct(link);
+		return ERR_PTR(-ENOENT);
+	}
 	return link;
 }
 
@@ -6024,17 +6371,24 @@ struct bpf_link *bpf_link_get_curr_or_next(u32 *id)
 {
 	struct bpf_link *link;
 
-	spin_lock_bh(&link_idr_lock);
 again:
+	spin_lock_bh(&link_idr_lock);
+link_again:
 	link = idr_get_next(&link_idr, id);
 	if (link) {
 		link = bpf_link_inc_not_zero(link);
 		if (IS_ERR(link)) {
 			(*id)++;
-			goto again;
+			goto link_again;
 		}
 	}
 	spin_unlock_bh(&link_idr_lock);
+
+	if (link && !bpf_link_current_container_allowed(link)) {
+		bpf_link_put(link);
+		(*id)++;
+		goto again;
+	}
 
 	return link;
 }
@@ -6049,6 +6403,9 @@ static int bpf_link_get_fd_by_id(const union bpf_attr *attr)
 
 	if (CHECK_ATTR(BPF_LINK_GET_FD_BY_ID))
 		return -EINVAL;
+
+	if (bpf_token_current_container_member())
+		return -EPERM;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -6106,6 +6463,9 @@ static int bpf_enable_stats(union bpf_attr *attr)
 	if (CHECK_ATTR(BPF_ENABLE_STATS))
 		return -EINVAL;
 
+	if (bpf_token_current_container_member())
+		return -EPERM;
+
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
@@ -6159,6 +6519,10 @@ static int bpf_prog_bind_map(union bpf_attr *attr)
 	prog = bpf_prog_get(attr->prog_bind_map.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
+	if (bpf_prog_container_libbpf_probe_only(prog)) {
+		bpf_prog_put(prog);
+		return -EPERM;
+	}
 
 	map = bpf_map_get(attr->prog_bind_map.map_fd);
 	if (IS_ERR(map)) {
@@ -6237,6 +6601,10 @@ static int prog_stream_read(union bpf_attr *attr)
 	prog = bpf_prog_get(attr->prog_stream_read.prog_fd);
 	if (IS_ERR(prog))
 		return PTR_ERR(prog);
+	if (bpf_prog_container_libbpf_probe_only(prog)) {
+		bpf_prog_put(prog);
+		return -EPERM;
+	}
 
 	ret = bpf_prog_stream_read(prog, attr->prog_stream_read.stream_id, buf, len);
 	bpf_prog_put(prog);

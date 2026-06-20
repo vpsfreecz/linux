@@ -94,6 +94,28 @@ bool bpf_lsm_is_file_open_hook(u32 btf_id)
 	return btf_id_set_contains(&bpf_lsm_file_open_hooks, btf_id);
 }
 
+BTF_SET_START(bpf_lsm_systemd_nsresourced_hooks)
+#ifdef CONFIG_SECURITY_PATH
+BTF_ID(func, bpf_lsm_path_chown)
+BTF_ID(func, bpf_lsm_path_mkdir)
+BTF_ID(func, bpf_lsm_path_mknod)
+BTF_ID(func, bpf_lsm_path_symlink)
+BTF_ID(func, bpf_lsm_path_link)
+#endif
+BTF_ID(func, bpf_lsm_task_fix_setgroups)
+BTF_SET_END(bpf_lsm_systemd_nsresourced_hooks)
+
+bool bpf_lsm_is_systemd_nsresourced_hook(u32 btf_id)
+{
+	return btf_id_set_contains(&bpf_lsm_systemd_nsresourced_hooks, btf_id);
+}
+
+bool bpf_lsm_is_container_hook(u32 btf_id)
+{
+	return bpf_lsm_is_file_open_hook(btf_id) ||
+	       bpf_lsm_is_systemd_nsresourced_hook(btf_id);
+}
+
 #ifdef CONFIG_CGROUP_BPF
 void bpf_lsm_find_cgroup_shim(const struct bpf_prog *prog,
 			     bpf_func_t *bpf_func)

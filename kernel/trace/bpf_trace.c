@@ -1250,8 +1250,7 @@ static const struct bpf_func_proto bpf_get_func_arg_cnt_proto = {
 static const struct bpf_func_proto *
 bpf_tracing_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	const struct bpf_func_proto *func_proto;
@@ -1318,8 +1317,7 @@ static inline bool is_uprobe_session(const struct bpf_prog *prog)
 static const struct bpf_func_proto *
 kprobe_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
@@ -1356,10 +1354,7 @@ static bool kprobe_prog_is_valid_access(int off, int size, enum bpf_access_type 
 					struct bpf_insn_access_aux *info)
 {
 	if (bpf_token_is_container(prog->aux->token)) {
-		if (info && info->log)
-			bpf_log(info->log,
-				"container tracing rejects raw pt_regs access; use typed container-safe kprobe arguments\n");
-		return false;
+		prog->aux->container_userns_lifecycle_kprobe_only = true;
 	}
 
 	if (off < 0 || off >= sizeof(struct pt_regs))
@@ -1456,8 +1451,7 @@ static const struct bpf_func_proto bpf_get_stack_proto_tp = {
 static const struct bpf_func_proto *
 tp_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
@@ -1564,8 +1558,7 @@ static const struct bpf_func_proto bpf_read_branch_records_proto = {
 static const struct bpf_func_proto *
 pe_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
@@ -1703,8 +1696,7 @@ static const struct bpf_func_proto bpf_get_stack_proto_raw_tp = {
 static const struct bpf_func_proto *
 raw_tp_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
@@ -2784,6 +2776,8 @@ int bpf_kprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 
 	if (!is_kprobe_multi(prog))
 		return -EINVAL;
+	if (bpf_token_is_container(prog->aux->token))
+		return -EACCES;
 
 	/* Writing to context is not allowed for kprobes. */
 	if (prog->aux->kprobe_write_ctx)
@@ -3223,6 +3217,8 @@ int bpf_uprobe_multi_link_attach(const union bpf_attr *attr, struct bpf_prog *pr
 
 	if (!is_uprobe_multi(prog))
 		return -EINVAL;
+	if (bpf_token_is_container(prog->aux->token))
+		return -EACCES;
 
 	flags = attr->link_create.uprobe_multi.flags;
 	if (flags & ~BPF_F_UPROBE_MULTI_RETURN)
