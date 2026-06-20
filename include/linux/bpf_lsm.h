@@ -31,6 +31,8 @@ int bpf_lsm_verify_prog(struct bpf_verifier_log *vlog,
 bool bpf_lsm_is_sleepable_hook(u32 btf_id);
 bool bpf_lsm_is_trusted(const struct bpf_prog *prog);
 bool bpf_lsm_is_file_open_hook(u32 btf_id);
+bool bpf_lsm_is_systemd_nsresourced_hook(u32 btf_id);
+bool bpf_lsm_is_container_hook(u32 btf_id);
 
 static inline struct bpf_storage_blob *bpf_inode(
 	const struct inode *inode)
@@ -67,6 +69,16 @@ static inline bool bpf_lsm_is_trusted(const struct bpf_prog *prog)
 }
 
 static inline bool bpf_lsm_is_file_open_hook(u32 btf_id)
+{
+	return false;
+}
+
+static inline bool bpf_lsm_is_systemd_nsresourced_hook(u32 btf_id)
+{
+	return false;
+}
+
+static inline bool bpf_lsm_is_container_hook(u32 btf_id)
 {
 	return false;
 }

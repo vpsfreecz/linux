@@ -71,26 +71,35 @@ static void bpf_any_put(void *raw, enum bpf_type type)
 static void *bpf_fd_probe_obj(u32 ufd, enum bpf_type *type)
 {
 	void *raw;
+	int err = -EINVAL;
 
 	raw = bpf_map_get_with_uref(ufd);
 	if (!IS_ERR(raw)) {
 		*type = BPF_TYPE_MAP;
 		return raw;
 	}
+	if (PTR_ERR(raw) == -EACCES)
+		err = -EACCES;
 
 	raw = bpf_prog_get(ufd);
 	if (!IS_ERR(raw)) {
 		*type = BPF_TYPE_PROG;
 		return raw;
 	}
+	if (PTR_ERR(raw) == -EACCES)
+		err = -EACCES;
+	else if (PTR_ERR(raw) == -EPERM && err != -EACCES)
+		err = -EPERM;
 
 	raw = bpf_link_get_from_fd(ufd);
 	if (!IS_ERR(raw)) {
 		*type = BPF_TYPE_LINK;
 		return raw;
 	}
+	if (PTR_ERR(raw) == -EACCES)
+		err = -EACCES;
 
-	return ERR_PTR(-EINVAL);
+	return ERR_PTR(err);
 }
 
 static const struct inode_operations bpf_dir_iops;
@@ -237,6 +246,10 @@ static void *map_seq_next(struct seq_file *m, void *v, loff_t *pos)
 
 static void *map_seq_start(struct seq_file *m, loff_t *pos)
 {
+	struct bpf_map *map = seq_file_to_map(m);
+
+	if (!bpf_map_current_container_allowed(map))
+		return ERR_PTR(-EACCES);
 	if (map_iter(m)->done)
 		return NULL;
 
@@ -252,6 +265,8 @@ static int map_seq_show(struct seq_file *m, void *v)
 	struct bpf_map *map = seq_file_to_map(m);
 	void *key = map_iter(m)->key;
 
+	if (!bpf_map_current_container_allowed(map))
+		return -EACCES;
 	if (unlikely(v == SEQ_START_TOKEN)) {
 		seq_puts(m, "# WARNING!! The output is for debug purpose only\n");
 		seq_puts(m, "# WARNING!! The output format will change\n");
@@ -275,6 +290,9 @@ static int bpffs_map_open(struct inode *inode, struct file *file)
 	struct map_iter *iter;
 	struct seq_file *m;
 	int err;
+
+	if (!bpf_map_current_container_allowed(map))
+		return -EACCES;
 
 	iter = map_iter_alloc(map);
 	if (!iter)
@@ -484,6 +502,26 @@ int bpf_obj_pin_user(u32 ufd, int path_fd, const char __user *pathname)
 	raw = bpf_fd_probe_obj(ufd, &type);
 	if (IS_ERR(raw))
 		return PTR_ERR(raw);
+	if (type == BPF_TYPE_MAP &&
+	    !bpf_map_current_container_allowed(raw)) {
+		bpf_any_put(raw, type);
+		return -EACCES;
+	}
+	if (type == BPF_TYPE_PROG &&
+	    !bpf_prog_current_container_allowed(raw)) {
+		bpf_any_put(raw, type);
+		return -EACCES;
+	}
+	if (type == BPF_TYPE_PROG &&
+	    bpf_prog_container_libbpf_probe_only(raw)) {
+		bpf_any_put(raw, type);
+		return -EPERM;
+	}
+	if (type == BPF_TYPE_LINK &&
+	    !bpf_link_current_container_allowed(raw)) {
+		bpf_any_put(raw, type);
+		return -EACCES;
+	}
 
 	ret = bpf_obj_do_pin(path_fd, pathname, raw, type);
 	if (ret != 0)
@@ -814,6 +852,89 @@ static const struct fs_parameter_spec bpf_fs_parameters[] = {
 	{}
 };
 
+static u64 bpf_container_delegate_cmd_mask(void)
+{
+	return BIT_ULL(BPF_MAP_CREATE) |
+	       BIT_ULL(BPF_PROG_LOAD) |
+	       BIT_ULL(BPF_BTF_LOAD);
+}
+
+static u64 bpf_container_delegate_map_mask(void)
+{
+	return BIT_ULL(BPF_MAP_TYPE_ARRAY) |
+	       BIT_ULL(BPF_MAP_TYPE_PERCPU_ARRAY) |
+	       BIT_ULL(BPF_MAP_TYPE_HASH) |
+	       BIT_ULL(BPF_MAP_TYPE_PERCPU_HASH) |
+	       BIT_ULL(BPF_MAP_TYPE_LRU_HASH) |
+	       BIT_ULL(BPF_MAP_TYPE_LRU_PERCPU_HASH) |
+	       BIT_ULL(BPF_MAP_TYPE_LPM_TRIE) |
+	       BIT_ULL(BPF_MAP_TYPE_HASH_OF_MAPS) |
+	       BIT_ULL(BPF_MAP_TYPE_PROG_ARRAY) |
+	       BIT_ULL(BPF_MAP_TYPE_PERF_EVENT_ARRAY) |
+	       BIT_ULL(BPF_MAP_TYPE_CGROUP_ARRAY) |
+	       BIT_ULL(BPF_MAP_TYPE_RINGBUF);
+}
+
+static u64 bpf_container_delegate_prog_mask(void)
+{
+	return BIT_ULL(BPF_PROG_TYPE_KPROBE) |
+	       BIT_ULL(BPF_PROG_TYPE_PERF_EVENT) |
+	       BIT_ULL(BPF_PROG_TYPE_CGROUP_SKB) |
+	       BIT_ULL(BPF_PROG_TYPE_CGROUP_SOCK) |
+	       BIT_ULL(BPF_PROG_TYPE_CGROUP_SOCK_ADDR) |
+	       BIT_ULL(BPF_PROG_TYPE_CGROUP_DEVICE) |
+	       BIT_ULL(BPF_PROG_TYPE_CGROUP_SYSCTL) |
+	       BIT_ULL(BPF_PROG_TYPE_LSM);
+}
+
+static u64 bpf_container_delegate_attach_mask(void)
+{
+	return BIT_ULL(BPF_CGROUP_INET_INGRESS) |
+	       BIT_ULL(BPF_CGROUP_INET_EGRESS) |
+	       BIT_ULL(BPF_CGROUP_INET_SOCK_CREATE) |
+	       BIT_ULL(BPF_CGROUP_DEVICE) |
+	       BIT_ULL(BPF_CGROUP_INET4_BIND) |
+	       BIT_ULL(BPF_CGROUP_INET6_BIND) |
+	       BIT_ULL(BPF_CGROUP_SYSCTL) |
+	       BIT_ULL(BPF_LSM_MAC);
+}
+
+static int bpf_check_container_delegate_mask(int opt, u64 msk)
+{
+	u64 allowed;
+
+	if (!msk || !bpf_token_current_container_member())
+		return 0;
+
+	switch (opt) {
+	case OPT_DELEGATE_CMDS:
+		allowed = bpf_container_delegate_cmd_mask();
+		break;
+	case OPT_DELEGATE_MAPS:
+		allowed = bpf_container_delegate_map_mask();
+		break;
+	case OPT_DELEGATE_PROGS:
+		allowed = bpf_container_delegate_prog_mask();
+		break;
+	case OPT_DELEGATE_ATTACHS:
+		allowed = bpf_container_delegate_attach_mask();
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (msk & ~allowed)
+		return -EPERM;
+
+	return 0;
+}
+
+static bool bpf_mount_capable(void)
+{
+	return capable(CAP_SYS_ADMIN) ||
+	       bpf_token_current_container_capable(CAP_SYS_ADMIN);
+}
+
 static int bpf_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
 	struct bpf_mount_opts *opts = fc->s_fs_info;
@@ -924,8 +1045,11 @@ static int bpf_parse_param(struct fs_context *fc, struct fs_parameter *param)
 			}
 		}
 
+		err = bpf_check_container_delegate_mask(opt, msk);
+		if (err)
+			return err;
 		/* Setting delegation mount options requires privileges */
-		if (msk && !capable(CAP_SYS_ADMIN))
+		if (msk && !bpf_mount_capable())
 			return -EPERM;
 
 		*delegate_msk |= msk;
@@ -1015,7 +1139,7 @@ static int bpf_fill_super(struct super_block *sb, struct fs_context *fc)
 	int ret;
 
 	/* Mounting an instance of BPF FS requires privileges */
-	if (fc->user_ns != &init_user_ns && !capable(CAP_SYS_ADMIN))
+	if (fc->user_ns != &init_user_ns && !bpf_mount_capable())
 		return -EPERM;
 
 	ret = simple_fill_super(sb, BPF_FS_MAGIC, bpf_rfiles);

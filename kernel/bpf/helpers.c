@@ -1939,8 +1939,7 @@ const struct bpf_func_proto bpf_get_branch_snapshot_proto __weak;
 const struct bpf_func_proto *
 bpf_base_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	if (bpf_token_is_container(prog->aux->token) &&
-	    !bpf_token_allow_helper(prog->aux->token, func_id))
+	if (!bpf_token_allow_prog_helper(prog, func_id))
 		return NULL;
 
 	switch (func_id) {
@@ -1994,6 +1993,11 @@ bpf_base_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_get_ns_current_pid_tgid_proto;
 	case BPF_FUNC_get_current_uid_gid:
 		return &bpf_get_current_uid_gid_proto;
+	case BPF_FUNC_loop:
+		if (bpf_token_is_container(prog->aux->token) &&
+		    prog->type == BPF_PROG_TYPE_CGROUP_SYSCTL)
+			return &bpf_loop_proto;
+		break;
 	default:
 		break;
 	}

@@ -918,6 +918,20 @@ static int cgroup_bpf_attach(struct cgroup *cgrp,
 	return ret;
 }
 
+static bool cgroup_bpf_prog_container_cgroup_allowed(struct cgroup *cgrp,
+						     const struct bpf_prog *prog)
+{
+	if (!bpf_token_is_container(prog->aux->token) &&
+	    !bpf_token_current_container_member())
+		return true;
+
+	if (bpf_token_is_container(prog->aux->token) &&
+	    !bpf_token_task_match(prog->aux->token, current))
+		return false;
+
+	return cgroup_is_descendant_of_current_cgns(cgrp);
+}
+
 /* Swap updated BPF program for given link in effective program arrays across
  * all descendant cgroups. This function is guaranteed to succeed.
  */
@@ -1207,6 +1221,12 @@ static int cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
 }
 
 /* Must be called with cgroup_mutex held to avoid races. */
+static int cgroup_bpf_prog_array_query_length(struct bpf_prog_array *array);
+static int cgroup_bpf_prog_array_copy_query(struct bpf_prog_array *array,
+					    __u32 __user *prog_ids, u32 cnt);
+static int cgroup_bpf_prog_list_query_length(struct hlist_head *progs);
+static bool cgroup_bpf_prog_query_allowed(const struct bpf_prog *prog);
+
 static int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 			      union bpf_attr __user *uattr)
 {
@@ -1245,9 +1265,9 @@ static int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 		if (effective_query) {
 			effective = rcu_dereference_protected(cgrp->bpf.effective[atype],
 							      lockdep_is_held(&cgroup_mutex));
-			total_cnt += bpf_prog_array_length(effective);
+			total_cnt += cgroup_bpf_prog_array_query_length(effective);
 		} else {
-			total_cnt += prog_list_length(&cgrp->bpf.progs[atype], NULL);
+			total_cnt += cgroup_bpf_prog_list_query_length(&cgrp->bpf.progs[atype]);
 		}
 	}
 
@@ -1274,8 +1294,9 @@ static int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 		if (effective_query) {
 			effective = rcu_dereference_protected(cgrp->bpf.effective[atype],
 							      lockdep_is_held(&cgroup_mutex));
-			cnt = min_t(int, bpf_prog_array_length(effective), total_cnt);
-			ret = bpf_prog_array_copy_to_user(effective, prog_ids, cnt);
+			cnt = min_t(int, cgroup_bpf_prog_array_query_length(effective),
+				    total_cnt);
+			ret = cgroup_bpf_prog_array_copy_query(effective, prog_ids, cnt);
 		} else {
 			struct hlist_head *progs;
 			struct bpf_prog_list *pl;
@@ -1283,10 +1304,13 @@ static int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 			u32 id;
 
 			progs = &cgrp->bpf.progs[atype];
-			cnt = min_t(int, prog_list_length(progs, NULL), total_cnt);
+			cnt = min_t(int, cgroup_bpf_prog_list_query_length(progs),
+				    total_cnt);
 			i = 0;
 			hlist_for_each_entry(pl, progs, node) {
 				prog = prog_list_prog(pl);
+				if (!cgroup_bpf_prog_query_allowed(prog))
+					continue;
 				id = prog->aux->id;
 				if (copy_to_user(prog_ids + i, &id, sizeof(id)))
 					return -EFAULT;
@@ -1322,6 +1346,64 @@ static int cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
 	return ret;
 }
 
+static bool cgroup_bpf_prog_query_allowed(const struct bpf_prog *prog)
+{
+	if (!prog || !prog->aux)
+		return false;
+
+	return bpf_prog_current_container_allowed(prog);
+}
+
+static int cgroup_bpf_prog_array_query_length(struct bpf_prog_array *array)
+{
+	struct bpf_prog_array_item *item;
+	int cnt = 0;
+
+	for (item = array->items; item->prog; item++) {
+		if (!cgroup_bpf_prog_query_allowed(item->prog))
+			continue;
+		cnt++;
+	}
+
+	return cnt;
+}
+
+static int cgroup_bpf_prog_array_copy_query(struct bpf_prog_array *array,
+					    __u32 __user *prog_ids, u32 cnt)
+{
+	struct bpf_prog_array_item *item;
+	u32 i = 0, id;
+
+	for (item = array->items; item->prog; item++) {
+		if (!cgroup_bpf_prog_query_allowed(item->prog))
+			continue;
+
+		id = item->prog->aux->id;
+		if (copy_to_user(prog_ids + i, &id, sizeof(id)))
+			return -EFAULT;
+		if (++i == cnt)
+			break;
+	}
+
+	return 0;
+}
+
+static int cgroup_bpf_prog_list_query_length(struct hlist_head *progs)
+{
+	struct bpf_prog_list *pl;
+	struct bpf_prog *prog;
+	int cnt = 0;
+
+	hlist_for_each_entry(pl, progs, node) {
+		prog = prog_list_prog(pl);
+		if (!cgroup_bpf_prog_query_allowed(prog))
+			continue;
+		cnt++;
+	}
+
+	return cnt;
+}
+
 int cgroup_bpf_prog_attach(const union bpf_attr *attr,
 			   enum bpf_prog_type ptype, struct bpf_prog *prog)
 {
@@ -1332,6 +1414,11 @@ int cgroup_bpf_prog_attach(const union bpf_attr *attr,
 	cgrp = cgroup_get_from_fd(attr->target_fd);
 	if (IS_ERR(cgrp))
 		return PTR_ERR(cgrp);
+
+	if (!cgroup_bpf_prog_container_cgroup_allowed(cgrp, prog)) {
+		cgroup_put(cgrp);
+		return -EACCES;
+	}
 
 	if ((attr->attach_flags & BPF_F_ALLOW_MULTI) &&
 	    (attr->attach_flags & BPF_F_REPLACE)) {
@@ -1352,7 +1439,8 @@ int cgroup_bpf_prog_attach(const union bpf_attr *attr,
 	return ret;
 }
 
-int cgroup_bpf_prog_detach(const union bpf_attr *attr, enum bpf_prog_type ptype)
+int cgroup_bpf_prog_detach(const union bpf_attr *attr, enum bpf_prog_type ptype,
+			   bool restrict_cgroupns)
 {
 	struct bpf_prog *prog;
 	struct cgroup *cgrp;
@@ -1362,9 +1450,20 @@ int cgroup_bpf_prog_detach(const union bpf_attr *attr, enum bpf_prog_type ptype)
 	if (IS_ERR(cgrp))
 		return PTR_ERR(cgrp);
 
+	if (restrict_cgroupns && !cgroup_is_descendant_of_current_cgns(cgrp)) {
+		cgroup_put(cgrp);
+		return -EACCES;
+	}
+
 	prog = bpf_prog_get_type(attr->attach_bpf_fd, ptype);
 	if (IS_ERR(prog))
 		prog = NULL;
+
+	if (prog && !cgroup_bpf_prog_container_cgroup_allowed(cgrp, prog)) {
+		bpf_prog_put(prog);
+		cgroup_put(cgrp);
+		return -EACCES;
+	}
 
 	ret = cgroup_bpf_detach(cgrp, prog, attr->attach_type, attr->expected_revision);
 	if (prog)
@@ -1488,6 +1587,11 @@ int cgroup_bpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 	if (IS_ERR(cgrp))
 		return PTR_ERR(cgrp);
 
+	if (!cgroup_bpf_prog_container_cgroup_allowed(cgrp, prog)) {
+		err = -EACCES;
+		goto out_put_cgroup;
+	}
+
 	link = kzalloc(sizeof(*link), GFP_USER);
 	if (!link) {
 		err = -ENOMEM;
@@ -1520,7 +1624,8 @@ out_put_cgroup:
 }
 
 int cgroup_bpf_prog_query(const union bpf_attr *attr,
-			  union bpf_attr __user *uattr)
+			  union bpf_attr __user *uattr,
+			  bool restrict_cgroupns)
 {
 	struct cgroup *cgrp;
 	int ret;
@@ -1529,8 +1634,14 @@ int cgroup_bpf_prog_query(const union bpf_attr *attr,
 	if (IS_ERR(cgrp))
 		return PTR_ERR(cgrp);
 
+	if (restrict_cgroupns && !cgroup_is_descendant_of_current_cgns(cgrp)) {
+		ret = -EACCES;
+		goto out;
+	}
+
 	ret = cgroup_bpf_query(cgrp, attr, uattr);
 
+out:
 	cgroup_put(cgrp);
 	return ret;
 }
@@ -2252,6 +2363,8 @@ BPF_CALL_4(bpf_sysctl_get_name, struct bpf_sysctl_kern *, ctx, char *, buf,
 	if (!buf)
 		return -EINVAL;
 
+	memset(buf, 0, buf_len);
+
 	if (!(flags & BPF_F_SYSCTL_BASE_NAME)) {
 		if (!ctx->head)
 			return -EINVAL;
@@ -2270,7 +2383,7 @@ static const struct bpf_func_proto bpf_sysctl_get_name_proto = {
 	.gpl_only	= false,
 	.ret_type	= RET_INTEGER,
 	.arg1_type	= ARG_PTR_TO_CTX,
-	.arg2_type	= ARG_PTR_TO_MEM | MEM_WRITE,
+	.arg2_type	= ARG_PTR_TO_UNINIT_MEM,
 	.arg3_type	= ARG_CONST_SIZE,
 	.arg4_type	= ARG_ANYTHING,
 };
@@ -2372,16 +2485,36 @@ sysctl_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 
 	switch (func_id) {
 	case BPF_FUNC_sysctl_get_name:
+		if (!bpf_token_allow_prog_helper(prog, func_id))
+			return NULL;
 		return &bpf_sysctl_get_name_proto;
 	case BPF_FUNC_sysctl_get_current_value:
+		if (!bpf_token_allow_prog_helper(prog, func_id))
+			return NULL;
 		return &bpf_sysctl_get_current_value_proto;
 	case BPF_FUNC_sysctl_get_new_value:
+		if (!bpf_token_allow_prog_helper(prog, func_id))
+			return NULL;
 		return &bpf_sysctl_get_new_value_proto;
 	case BPF_FUNC_sysctl_set_new_value:
+		if (!bpf_token_allow_prog_helper(prog, func_id))
+			return NULL;
 		return &bpf_sysctl_set_new_value_proto;
+	case BPF_FUNC_get_current_comm:
+		if (!bpf_token_allow_prog_helper(prog, func_id))
+			return NULL;
+		return &bpf_get_current_comm_proto;
+	case BPF_FUNC_get_current_cgroup_id:
+		if (!bpf_token_allow_prog_helper(prog, func_id))
+			return NULL;
+		return &bpf_get_current_cgroup_id_proto;
 	case BPF_FUNC_ktime_get_coarse_ns:
+		if (!bpf_token_allow_prog_helper(prog, func_id))
+			return NULL;
 		return &bpf_ktime_get_coarse_ns_proto;
 	case BPF_FUNC_perf_event_output:
+		if (!bpf_token_allow_prog_helper(prog, func_id))
+			return NULL;
 		return &bpf_event_output_data_proto;
 	default:
 		return bpf_base_func_proto(func_id, prog);

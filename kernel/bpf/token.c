@@ -1,4 +1,5 @@
 #include <linux/bpf.h>
+#include <linux/bpf_lsm.h>
 #include <linux/vmalloc.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -8,7 +9,6 @@
 #include <linux/user_namespace.h>
 #include <linux/security.h>
 #include <linux/tracing_namespace.h>
-#include "../trace/trace_btf.h"
 
 static bool bpf_ns_capable(struct user_namespace *ns, int cap)
 {
@@ -45,7 +45,7 @@ bool bpf_token_task_match(const struct bpf_token *token,
 	return tracing_ns_matches_task(token->tracing_ns, task);
 }
 
-static bool bpf_token_current_container_member(void)
+bool bpf_token_current_container_member(void)
 {
 #ifdef CONFIG_TRACING_NS
 	struct tracing_namespace *tns = current_tracing_ns();
@@ -57,6 +57,16 @@ static bool bpf_token_current_container_member(void)
 #else
 	return false;
 #endif
+}
+
+static bool bpf_token_current_container_allowed(const struct bpf_token *token)
+{
+	if (!bpf_token_current_container_member())
+		return true;
+	if (!bpf_token_is_container(token))
+		return false;
+
+	return bpf_token_task_match(token, current);
 }
 
 /*
@@ -146,6 +156,8 @@ static bool bpf_token_allow_container_symbol_access_name(const char *name)
 		"inet_csk_accept",
 		"udp_recvmsg",
 		"udpv6_queue_rcv_one_skb",
+		"free_user_ns",
+		"retire_userns_sysctls",
 	};
 	static const char * const syscall_names[] = {
 		"open",
@@ -198,26 +210,6 @@ static bool bpf_token_allow_container_symbol_access_name(const char *name)
 	return false;
 }
 
-static bool bpf_token_allow_container_symbol_discovery_name(const char *name)
-{
-	const struct btf_type *proto;
-	struct btf *btf;
-	bool ok = false;
-
-	if (!name || !*name)
-		return false;
-
-	proto = btf_find_func_proto(name, &btf);
-	if (!proto)
-		return false;
-
-	if (btf_type_vlen(proto) <= MAX_BPF_FUNC_ARGS)
-		ok = true;
-
-	btf_put(btf);
-	return ok;
-}
-
 static struct bpf_token *bpf_token_alloc_current_container(void)
 {
 	struct bpf_token *token;
@@ -259,7 +251,7 @@ bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *n
 	if (!bpf_token_is_container(token))
 		return true;
 
-	return bpf_token_allow_container_symbol_discovery_name(name);
+	return bpf_token_allow_container_symbol_access_name(name);
 }
 
 bool bpf_token_current_allow_tracing_symbol(const char *name)
@@ -267,13 +259,14 @@ bool bpf_token_current_allow_tracing_symbol(const char *name)
 	if (!bpf_token_current_restrict_tracing_symbols())
 		return true;
 
-	return bpf_token_allow_container_symbol_discovery_name(name);
+	return bpf_token_allow_container_symbol_access_name(name);
 }
 
 /*
- * /proc/kallsyms walks every symbol, so keep bulk discovery on a static,
- * bounded allowlist. Explicit kprobe/ftrace lookups can still use the BTF
- * backed check above for the single symbol the caller requested.
+ * /proc/kallsyms and ftrace discovery walk broad host-global symbol spaces.
+ * Keep both discovery and explicit container tracing attachments on the same
+ * bounded allowlist so bpftrace cannot bypass listing with a manually typed
+ * BTF-shaped host symbol.
  */
 bool bpf_token_current_allow_tracing_symbol_discovery(const char *name)
 {
@@ -292,7 +285,8 @@ bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
 	return bpf_token_allow_container_symbol_access_name(name);
 }
 
-bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id)
+static bool bpf_token_allow_helper(const struct bpf_token *token,
+				   enum bpf_func_id func_id)
 {
 	if (!bpf_token_is_container(token))
 		return true;
@@ -333,22 +327,42 @@ bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func
 	case BPF_FUNC_loop:
 	case BPF_FUNC_get_current_pid_tgid:
 	case BPF_FUNC_get_current_cgroup_id:
+	case BPF_FUNC_current_task_under_cgroup:
 	case BPF_FUNC_get_ns_current_pid_tgid:
 	case BPF_FUNC_get_current_uid_gid:
 	case BPF_FUNC_get_current_comm:
-	case BPF_FUNC_get_current_task:
-	case BPF_FUNC_get_current_task_btf:
-	case BPF_FUNC_probe_read:
-	case BPF_FUNC_probe_read_kernel:
 	case BPF_FUNC_probe_read_user:
 	case BPF_FUNC_probe_read_user_str:
-	case BPF_FUNC_copy_from_user:
+	case BPF_FUNC_sysctl_get_name:
+	case BPF_FUNC_sysctl_get_current_value:
+	case BPF_FUNC_sysctl_get_new_value:
 	case BPF_FUNC_perf_event_output:
 	case BPF_FUNC_get_attach_cookie:
 		return true;
 	default:
 		return false;
 	}
+}
+
+bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
+				 enum bpf_func_id func_id)
+{
+	if (!bpf_token_is_container(prog->aux->token))
+		return true;
+
+	if (bpf_token_allow_helper(prog->aux->token, func_id))
+		return true;
+
+	if (prog->type == BPF_PROG_TYPE_LSM &&
+	    prog->expected_attach_type == BPF_LSM_MAC &&
+	    bpf_lsm_is_systemd_nsresourced_hook(prog->aux->attach_btf_id))
+		return func_id == BPF_FUNC_get_current_task_btf;
+
+	return (func_id == BPF_FUNC_probe_read ||
+		func_id == BPF_FUNC_probe_read_kernel) &&
+	       prog->type == BPF_PROG_TYPE_LSM &&
+	       prog->expected_attach_type == BPF_LSM_MAC &&
+	       bpf_lsm_is_file_open_hook(prog->aux->attach_btf_id);
 }
 
 bool bpf_token_capable(const struct bpf_token *token, int cap)
@@ -410,6 +424,9 @@ static void bpf_token_show_fdinfo(struct seq_file *m, struct file *filp)
 {
 	struct bpf_token *token = filp->private_data;
 	u64 mask;
+
+	if (!bpf_token_current_container_allowed(token))
+		return;
 
 	BUILD_BUG_ON(__MAX_BPF_CMD >= 64);
 	mask = BIT_ULL(__MAX_BPF_CMD) - 1;
@@ -524,6 +541,15 @@ int bpf_token_create(union bpf_attr *attr)
 	/* remember bpffs owning userns for future ns_capable() checks */
 	token->userns = get_user_ns(userns);
 
+	if (bpf_token_current_container_member()) {
+		struct tracing_namespace *tns = current_tracing_ns();
+
+		token->flags = BPF_TOKEN_F_CONTAINER;
+		put_user_ns(token->userns);
+		token->userns = get_user_ns(tns->user_ns);
+		token->tracing_ns = get_tracing_ns(tns);
+	}
+
 	token->allowed_cmds = mnt_opts->delegate_cmds;
 	token->allowed_maps = mnt_opts->delegate_maps;
 	token->allowed_progs = mnt_opts->delegate_progs;
@@ -562,6 +588,9 @@ int bpf_token_get_info_by_fd(struct bpf_token *token,
 	info_len = min_t(u32, info_len, sizeof(info));
 	memset(&info, 0, sizeof(info));
 
+	if (!bpf_token_current_container_allowed(token))
+		return -EACCES;
+
 	info.allowed_cmds = token->allowed_cmds;
 	info.allowed_maps = token->allowed_maps;
 	info.allowed_progs = token->allowed_progs;
@@ -585,6 +614,8 @@ struct bpf_token *bpf_token_get_from_fd(u32 ufd)
 		return ERR_PTR(-EINVAL);
 
 	token = fd_file(f)->private_data;
+	if (!bpf_token_current_container_allowed(token))
+		return ERR_PTR(-EACCES);
 	bpf_token_inc(token);
 
 	return token;

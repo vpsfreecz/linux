@@ -6539,6 +6539,12 @@ struct cgroup *cgroup_get_from_id(u64 id)
 }
 EXPORT_SYMBOL_GPL(cgroup_get_from_id);
 
+bool cgroup_is_descendant_of_current_cgns(struct cgroup *cgrp)
+{
+	return cgroup_is_descendant(cgrp, current_cgns_cgroup_dfl());
+}
+EXPORT_SYMBOL_GPL(cgroup_is_descendant_of_current_cgns);
+
 /*
  * proc_cgroup_show()
  *  - Print task's cgroup paths into seq_file, one line for each hierarchy
