@@ -22,6 +22,7 @@
 #include <linux/sort.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
+#include <linux/bpf.h>
 
 #include <trace/events/sched.h>
 #include <trace/syscall.h>
@@ -1648,6 +1649,9 @@ static int t_show(struct seq_file *m, void *v)
 {
 	struct trace_event_file *file = v;
 	struct trace_event_call *call = file->event_call;
+
+	if (bpf_token_current_restrict_tracing_symbols())
+		return 0;
 
 	if (strcmp(call->class->system, TRACE_SYSTEM) != 0)
 		seq_printf(m, "%s:", call->class->system);
