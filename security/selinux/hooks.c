@@ -1637,6 +1637,36 @@ static int selinux_sb_set_outer_context(struct superblock_security_struct *sbsec
 	return 0;
 }
 
+static bool selinux_lsmns_allows_bootstrap_selinuxfs_mount(
+	const struct cred *cred, const struct super_block *sb)
+{
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	const struct superblock_security_struct *sbsec = selinux_superblock(sb);
+	struct selinux_state *state;
+	struct lsm_namespace *ns;
+
+	if (strcmp(sb->s_type->name, "selinuxfs"))
+		return false;
+
+	ns = current_lsm_ns();
+	if (!ns || ns == &init_lsm_ns || ns->lsmid != LSM_ID_SELINUX)
+		return false;
+
+	state = selinux_superblock_state_from_sec(sbsec);
+	if (state != cred_selinux_state(cred))
+		return false;
+
+	/*
+	 * A child state cannot load its guest policy until it can expose its own
+	 * selinuxfs.  After that first policy load, normal filesystem mount
+	 * permission checks apply in the child state.
+	 */
+	return selinux_state_child_policy_load_pending(state);
+#else
+	return false;
+#endif
+}
+
 /*
  * Allow filesystems with binary mount data to explicitly set mount point
  * labeling information.
@@ -4643,6 +4673,9 @@ static int selinux_sb_kern_mount(const struct super_block *sb)
 {
 	const struct cred *cred = current_cred();
 	struct common_audit_data ad;
+
+	if (selinux_lsmns_allows_bootstrap_selinuxfs_mount(cred, sb))
+		return 0;
 
 	ad.type = LSM_AUDIT_DATA_DENTRY;
 	ad.u.dentry = sb->s_root;
