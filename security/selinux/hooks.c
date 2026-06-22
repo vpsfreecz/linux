@@ -1637,7 +1637,7 @@ static int selinux_sb_set_outer_context(struct superblock_security_struct *sbsec
 	return 0;
 }
 
-static bool selinux_lsmns_allows_bootstrap_selinuxfs_mount(
+static bool selinux_lsmns_allows_bootstrap_selinuxfs_mount_control(
 	const struct cred *cred, const struct super_block *sb)
 {
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
@@ -1657,9 +1657,10 @@ static bool selinux_lsmns_allows_bootstrap_selinuxfs_mount(
 		return false;
 
 	/*
-	 * A child state cannot load its guest policy until it can expose its own
-	 * selinuxfs.  After that first policy load, normal filesystem mount
-	 * permission checks apply in the child state.
+	 * A child state cannot load its guest policy until it can expose and
+	 * clean up its own selinuxfs.  After that first policy load, normal
+	 * filesystem mount and unmount permission checks apply in the child
+	 * state.
 	 */
 	return selinux_state_child_policy_load_pending(state);
 #else
@@ -4674,7 +4675,7 @@ static int selinux_sb_kern_mount(const struct super_block *sb)
 	const struct cred *cred = current_cred();
 	struct common_audit_data ad;
 
-	if (selinux_lsmns_allows_bootstrap_selinuxfs_mount(cred, sb))
+	if (selinux_lsmns_allows_bootstrap_selinuxfs_mount_control(cred, sb))
 		return 0;
 
 	ad.type = LSM_AUDIT_DATA_DENTRY;
@@ -4718,6 +4719,10 @@ static int selinux_move_mount(const struct path *from_path,
 static int selinux_umount(struct vfsmount *mnt, int flags)
 {
 	const struct cred *cred = current_cred();
+
+	if (selinux_lsmns_allows_bootstrap_selinuxfs_mount_control(
+		    cred, mnt->mnt_sb))
+		return 0;
 
 	return superblock_has_perm(cred, mnt->mnt_sb,
 				   FILESYSTEM__UNMOUNT, NULL);
