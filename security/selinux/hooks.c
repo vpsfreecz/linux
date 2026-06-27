@@ -2078,6 +2078,59 @@ static int selinux_sb_set_outer_context(struct superblock_security_struct *sbsec
 	return 0;
 }
 
+static bool selinux_sb_is_userns_fuse(const struct super_block *sb)
+{
+	return sb->s_user_ns != &init_user_ns &&
+	       sb->s_type &&
+	       !strcmp(sb->s_type->name, "fuse");
+}
+
+static int selinux_sb_set_userns_fuse_outer_context(
+	struct super_block *sb, struct superblock_security_struct *sbsec,
+	const struct cred *cred)
+{
+	struct selinux_state *state;
+	u32 actor_sid, fuse_sid, owner_sid;
+	bool require_transition;
+	int rc;
+
+	if (!selinux_sb_is_userns_fuse(sb))
+		return 0;
+	if (sbsec->flags & OUTERCONTEXT_MNT)
+		return 0;
+
+	if (cred_outer_active(cred)) {
+		state = cred_outer_state(cred);
+		actor_sid = cred_outer_sid(cred);
+		require_transition = true;
+	} else if (cred_selinux_state(cred) == &selinux_state) {
+		state = cred_selinux_state(cred);
+		actor_sid = cred_sid(cred);
+		require_transition = false;
+	} else {
+		return 0;
+	}
+
+	rc = security_genfs_sid_state(state, "fuse", "/", SECCLASS_DIR,
+				      &fuse_sid);
+	if (rc)
+		return rc;
+
+	rc = security_transition_sid_state(state, actor_sid, fuse_sid,
+					   SECCLASS_FILESYSTEM, NULL,
+					   &owner_sid);
+	if (rc)
+		return rc;
+
+	if (owner_sid == fuse_sid)
+		return require_transition ? -EACCES : 0;
+
+	sbsec->outer_sid = owner_sid;
+	selinux_sb_bind_outer_state(sbsec, state);
+	sbsec->flags |= OUTERCONTEXT_MNT;
+	return 0;
+}
+
 static bool selinux_lsmns_allows_bootstrap_selinuxfs_mount_control(
 	const struct cred *cred, const struct super_block *sb)
 {
@@ -2272,6 +2325,10 @@ static int selinux_set_mnt_opts(struct super_block *sb,
 			goto out;
 		}
 	}
+
+	rc = selinux_sb_set_userns_fuse_outer_context(sb, sbsec, cred);
+	if (rc)
+		goto out;
 
 	/*
 	 * If this is a user namespace mount and the filesystem type is not
