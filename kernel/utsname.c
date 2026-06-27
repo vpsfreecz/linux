@@ -59,9 +59,17 @@ static struct uts_namespace *clone_uts_ns(struct user_namespace *user_ns,
 	memcpy(&ns->name, &old_ns->name, sizeof(ns->name));
 	ns->user_ns = get_user_ns(user_ns);
 	up_read(&uts_sem);
+
+	err = setup_uts_sysctls(ns);
+	if (err)
+		goto fail_put_user_ns;
+
 	ns_tree_add(ns);
 	return ns;
 
+fail_put_user_ns:
+	put_user_ns(ns->user_ns);
+	ns_common_free(ns);
 fail_free:
 	kmem_cache_free(uts_ns_cache, ns);
 fail_dec:
@@ -96,6 +104,7 @@ struct uts_namespace *copy_utsname(u64 flags,
 void free_uts_ns(struct uts_namespace *ns)
 {
 	ns_tree_remove(ns);
+	retire_uts_sysctls(ns);
 	dec_uts_namespaces(ns->ucounts);
 	put_user_ns(ns->user_ns);
 	ns_common_free(ns);

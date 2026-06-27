@@ -6,10 +6,16 @@
  */
 
 #include <linux/export.h>
+#include <linux/capability.h>
+#include <linux/cred.h>
+#include <linux/ns_common.h>
+#include <linux/nsproxy.h>
+#include <linux/slab.h>
 #include <linux/uts.h>
 #include <linux/utsname.h>
 #include <linux/random.h>
 #include <linux/sysctl.h>
+#include <linux/user_namespace.h>
 #include <linux/wait.h>
 #include <linux/rwsem.h>
 
@@ -17,13 +23,7 @@
 
 static void *get_uts(const struct ctl_table *table)
 {
-	char *which = table->data;
-	struct uts_namespace *uts_ns;
-
-	uts_ns = current->nsproxy->uts_ns;
-	which = (which - (char *)&init_uts_ns) + (char *)uts_ns;
-
-	return which;
+	return table->data;
 }
 
 /*
@@ -122,6 +122,109 @@ static const struct ctl_table uts_kern_table[] = {
 	},
 };
 
+static struct ctl_table_set *uts_table_root_lookup(struct ctl_table_root *root)
+{
+	return &current->nsproxy->uts_ns->set;
+}
+
+static int set_is_seen(struct ctl_table_set *set)
+{
+	return &current->nsproxy->uts_ns->set == set;
+}
+
+static int uts_table_root_permissions(struct ctl_table_header *head,
+				      const struct ctl_table *table)
+{
+	struct uts_namespace *uts_ns =
+		container_of(head->set, struct uts_namespace, set);
+	int mode = table->mode;
+
+	if (ns_capable_noaudit(uts_ns->user_ns, CAP_SYS_ADMIN) ||
+	    uid_eq(current_euid(), make_kuid(uts_ns->user_ns, 0)))
+		mode = (mode & S_IRWXU) >> 6;
+	else if (in_egroup_p(make_kgid(uts_ns->user_ns, 0)))
+		mode = (mode & S_IRWXG) >> 3;
+	else
+		mode = mode & S_IROTH;
+
+	return (mode << 6) | (mode << 3) | mode;
+}
+
+static void uts_table_root_set_ownership(struct ctl_table_header *head,
+					 kuid_t *uid, kgid_t *gid)
+{
+	struct uts_namespace *uts_ns =
+		container_of(head->set, struct uts_namespace, set);
+	kuid_t ns_root_uid;
+	kgid_t ns_root_gid;
+
+	ns_root_uid = make_kuid(uts_ns->user_ns, 0);
+	if (uid_valid(ns_root_uid))
+		*uid = ns_root_uid;
+
+	ns_root_gid = make_kgid(uts_ns->user_ns, 0);
+	if (gid_valid(ns_root_gid))
+		*gid = ns_root_gid;
+}
+
+static void uts_table_root_set_security(struct ctl_table_header *head,
+					struct inode *inode)
+{
+	struct uts_namespace *uts_ns =
+		container_of(head->set, struct uts_namespace, set);
+
+	if (uts_ns != &init_uts_ns)
+		ns_common_owner_to_inode(&uts_ns->ns, inode);
+}
+
+static struct ctl_table_root uts_table_root = {
+	.lookup		= uts_table_root_lookup,
+	.permissions	= uts_table_root_permissions,
+	.set_ownership	= uts_table_root_set_ownership,
+	.set_security	= uts_table_root_set_security,
+};
+
+int setup_uts_sysctls(struct uts_namespace *ns)
+{
+	struct ctl_table *tbl;
+
+	setup_sysctl_set(&ns->set, &uts_table_root, set_is_seen);
+
+	tbl = kmemdup(uts_kern_table, sizeof(uts_kern_table), GFP_KERNEL);
+	if (!tbl)
+		goto fail;
+
+	tbl[UTS_PROC_ARCH].data = ns->name.machine;
+	tbl[UTS_PROC_OSTYPE].data = ns->name.sysname;
+	tbl[UTS_PROC_OSRELEASE].data = ns->name.release;
+	tbl[UTS_PROC_VERSION].data = ns->name.version;
+	tbl[UTS_PROC_HOSTNAME].data = ns->name.nodename;
+	tbl[UTS_PROC_DOMAINNAME].data = ns->name.domainname;
+
+	ns->sysctls = __register_sysctl_table(&ns->set, "kernel", tbl,
+					      ARRAY_SIZE(uts_kern_table));
+	if (!ns->sysctls) {
+		kfree(tbl);
+		goto fail;
+	}
+
+	return 0;
+
+fail:
+	retire_sysctl_set(&ns->set);
+	return -ENOMEM;
+}
+
+void retire_uts_sysctls(struct uts_namespace *ns)
+{
+	const struct ctl_table *tbl;
+
+	tbl = ns->sysctls->ctl_table_arg;
+	unregister_sysctl_table(ns->sysctls);
+	retire_sysctl_set(&ns->set);
+	kfree(tbl);
+}
+
 #ifdef CONFIG_PROC_SYSCTL
 /*
  * Notify userspace about a change in a certain entry of uts_kern_table,
@@ -137,8 +240,7 @@ void uts_proc_notify(enum uts_proc proc)
 
 static int __init utsname_sysctl_init(void)
 {
-	register_sysctl("kernel", uts_kern_table);
-	return 0;
+	return setup_uts_sysctls(&init_uts_ns);
 }
 
 device_initcall(utsname_sysctl_init);

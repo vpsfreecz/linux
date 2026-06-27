@@ -3,6 +3,7 @@
 #define _LINUX_UTS_NAMESPACE_H
 
 #include <linux/ns_common.h>
+#include <linux/sysctl.h>
 #include <uapi/linux/utsname.h>
 
 struct user_namespace;
@@ -13,6 +14,10 @@ struct uts_namespace {
 	struct user_namespace *user_ns;
 	struct ucounts *ucounts;
 	struct ns_common ns;
+#ifdef CONFIG_SYSCTL
+	struct ctl_table_set set;
+	struct ctl_table_header *sysctls;
+#endif
 } __randomize_layout;
 
 extern struct uts_namespace init_uts_ns;
@@ -58,6 +63,20 @@ static inline struct uts_namespace *copy_utsname(u64 flags,
 }
 
 static inline void uts_ns_init(void)
+{
+}
+#endif
+
+#ifdef CONFIG_SYSCTL
+int setup_uts_sysctls(struct uts_namespace *ns);
+void retire_uts_sysctls(struct uts_namespace *ns);
+#else
+static inline int setup_uts_sysctls(struct uts_namespace *ns)
+{
+	return 0;
+}
+
+static inline void retire_uts_sysctls(struct uts_namespace *ns)
 {
 }
 #endif
