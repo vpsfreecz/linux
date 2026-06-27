@@ -13,6 +13,7 @@
 #include <linux/capability.h>
 #include <linux/ipc_namespace.h>
 #include <linux/msg.h>
+#include <linux/ns_common.h>
 #include <linux/slab.h>
 #include <linux/cred.h>
 #include "util.h"
@@ -236,10 +237,20 @@ static int ipc_permissions(struct ctl_table_header *head, const struct ctl_table
 	return (mode << 6) | (mode << 3) | mode;
 }
 
+static void ipc_set_security(struct ctl_table_header *head, struct inode *inode)
+{
+	struct ipc_namespace *ns =
+		container_of(head->set, struct ipc_namespace, ipc_set);
+
+	if (ns != &init_ipc_ns)
+		ns_common_owner_to_inode(&ns->ns, inode);
+}
+
 static struct ctl_table_root set_root = {
 	.lookup = set_lookup,
 	.permissions = ipc_permissions,
 	.set_ownership = ipc_set_ownership,
+	.set_security = ipc_set_security,
 };
 
 bool setup_ipc_sysctls(struct ipc_namespace *ns)

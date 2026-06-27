@@ -16,6 +16,7 @@
 #include <linux/export.h>
 #include <linux/sysctl.h>
 #include <linux/nsproxy.h>
+#include <linux/ns_common.h>
 
 #include <net/sock.h>
 
@@ -69,10 +70,20 @@ static void net_ctl_set_ownership(struct ctl_table_header *head,
 		*gid = ns_root_gid;
 }
 
+static void net_ctl_set_security(struct ctl_table_header *head,
+				 struct inode *inode)
+{
+	struct net *net = container_of(head->set, struct net, sysctls);
+
+	if (!net_eq(net, &init_net))
+		ns_common_owner_to_inode(&net->ns, inode);
+}
+
 static struct ctl_table_root net_sysctl_root = {
 	.lookup = net_ctl_header_lookup,
 	.permissions = net_ctl_permissions,
 	.set_ownership = net_ctl_set_ownership,
+	.set_security = net_ctl_set_security,
 };
 
 static int __net_init sysctl_net_init(struct net *net)

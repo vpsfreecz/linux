@@ -25,6 +25,7 @@
 #include <linux/slab.h>
 #include <linux/mount.h>
 #include <linux/bug.h>
+#include <linux/ns_common.h>
 
 #include "internal.h"
 
@@ -649,6 +650,8 @@ struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
 		inode->i_uid = de->uid;
 		inode->i_gid = de->gid;
 	}
+	if (de->owner_ns)
+		ns_common_owner_to_inode(de->owner_ns, inode);
 	if (de->size)
 		inode->i_size = de->size;
 	if (de->nlink)

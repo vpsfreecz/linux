@@ -17,6 +17,7 @@
 
 struct ctl_table_header;
 struct mempolicy;
+struct ns_common;
 struct vpsa_kernfs_filter_view;
 
 /*
@@ -58,6 +59,7 @@ struct proc_dir_entry {
 	kgid_t gid;
 	loff_t size;
 	struct proc_dir_entry *parent;
+	struct ns_common *owner_ns;
 	struct rb_root subdir;
 	struct rb_node subdir_node;
 	char *name;

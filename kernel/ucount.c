@@ -6,6 +6,7 @@
 #include <linux/cred.h>
 #include <linux/hash.h>
 #include <linux/kmemleak.h>
+#include <linux/ns_common.h>
 #include <linux/user_namespace.h>
 
 struct ucounts init_ucounts = {
@@ -55,9 +56,19 @@ static int set_permissions(struct ctl_table_header *head,
 	return (mode << 6) | (mode << 3) | mode;
 }
 
+static void set_security(struct ctl_table_header *head, struct inode *inode)
+{
+	struct user_namespace *user_ns =
+		container_of(head->set, struct user_namespace, set);
+
+	if (user_ns != &init_user_ns)
+		ns_common_owner_to_inode(&user_ns->ns, inode);
+}
+
 static struct ctl_table_root set_root = {
 	.lookup = set_lookup,
 	.permissions = set_permissions,
+	.set_security = set_security,
 };
 
 static long ue_zero = 0;

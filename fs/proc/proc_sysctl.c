@@ -491,6 +491,8 @@ static struct inode *proc_sys_make_inode(struct super_block *sb,
 	inode->i_gid = GLOBAL_ROOT_GID;
 	if (root->set_ownership)
 		root->set_ownership(head, &inode->i_uid, &inode->i_gid);
+	if (root->set_security)
+		root->set_security(head, inode);
 
 	return inode;
 }

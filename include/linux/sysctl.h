@@ -36,6 +36,7 @@ struct nsproxy;
 struct ctl_table_root;
 struct ctl_table_header;
 struct ctl_dir;
+struct inode;
 
 /* Keep the same order as in fs/proc/proc_sysctl.c */
 #define SYSCTL_ZERO			((void *)&sysctl_vals[0])
@@ -204,6 +205,8 @@ struct ctl_table_root {
 	struct ctl_table_set *(*lookup)(struct ctl_table_root *root);
 	void (*set_ownership)(struct ctl_table_header *head,
 			      kuid_t *uid, kgid_t *gid);
+	void (*set_security)(struct ctl_table_header *head,
+			     struct inode *inode);
 	int (*permissions)(struct ctl_table_header *head, const struct ctl_table *table);
 };
 

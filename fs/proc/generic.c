@@ -629,6 +629,7 @@ static struct proc_dir_entry *__proc_create(struct proc_dir_entry **parent,
 	spin_lock_init(&ent->pde_unload_lock);
 	INIT_LIST_HEAD(&ent->pde_openers);
 	proc_set_user(ent, (*parent)->uid, (*parent)->gid);
+	ent->owner_ns = (*parent)->owner_ns;
 
 	/* Revalidate everything under /proc/${pid}/net */
 	if ((*parent)->flags & PROC_ENTRY_FORCE_LOOKUP)

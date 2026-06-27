@@ -37,6 +37,7 @@
 #include <linux/init_task.h>
 #include <linux/syscalls.h>
 #include <linux/proc_ns.h>
+#include <linux/ns_common.h>
 #include <linux/refcount.h>
 #include <linux/anon_inodes.h>
 #include <linux/sched/signal.h>
@@ -709,10 +710,21 @@ static void pid_table_root_set_ownership(struct ctl_table_header *head,
 		*gid = ns_root_gid;
 }
 
+static void pid_table_root_set_security(struct ctl_table_header *head,
+					struct inode *inode)
+{
+	struct pid_namespace *pidns =
+		container_of(head->set, struct pid_namespace, set);
+
+	if (pidns != &init_pid_ns)
+		ns_common_owner_to_inode(&pidns->ns, inode);
+}
+
 static struct ctl_table_root pid_table_root = {
 	.lookup		= pid_table_root_lookup,
 	.permissions	= pid_table_root_permissions,
 	.set_ownership	= pid_table_root_set_ownership,
+	.set_security	= pid_table_root_set_security,
 };
 
 static int proc_do_cad_pid(const struct ctl_table *table, int write, void *buffer,

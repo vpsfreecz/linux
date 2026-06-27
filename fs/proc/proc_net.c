@@ -368,6 +368,8 @@ static __net_init int proc_net_ns_init(struct net *net)
 	netd->nlink = 2;
 	netd->namelen = 3;
 	netd->parent = &proc_root;
+	if (!net_eq(net, &init_net))
+		netd->owner_ns = &net->ns;
 	netd->name = netd->inline_name;
 	memcpy(netd->name, "net", 4);
 
