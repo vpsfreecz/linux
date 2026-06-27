@@ -131,7 +131,8 @@ static void proc_ns_update_inode_owner(struct task_struct *task,
 	 * Static init namespaces do not carry retained owner state. Keep the
 	 * proc symlink label derived from the task in that case.
 	 */
-	if (!READ_ONCE(ns->owner_prop_set) && !READ_ONCE(ns->owner_cred))
+	if (!READ_ONCE(ns->owner_prop_set) &&
+	    !rcu_access_pointer(ns->owner_cred))
 		goto out;
 
 	ns_common_owner_to_inode(ns, inode);

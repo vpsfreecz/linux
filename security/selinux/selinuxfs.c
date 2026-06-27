@@ -130,6 +130,14 @@ static int selinuxfs_current_sid(struct selinux_fs_info *fsi, u32 *sid)
 		return 0;
 	}
 
+	if (crsec->pending_outer_active &&
+	    crsec->pending_outer_state == state &&
+	    cstate != crsec->pending_outer_state &&
+	    selinux_initialized_state(crsec->pending_outer_state)) {
+		*sid = crsec->pending_outer_sid;
+		return 0;
+	}
+
 	if (cstate == state) {
 		*sid = crsec->sid;
 		return 0;
@@ -138,10 +146,43 @@ static int selinuxfs_current_sid(struct selinux_fs_info *fsi, u32 *sid)
 	return -EACCES;
 }
 
+static bool selinuxfs_allows_child_bootstrap_control(
+	struct selinux_fs_info *fsi, u32 perms)
+{
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	const struct cred *cred = current_cred();
+	struct selinux_state *state = fsi->state ?: &selinux_state;
+	struct lsm_namespace *ns;
+
+	if (perms != SECURITY__LOAD_POLICY && perms != SECURITY__SETENFORCE)
+		return false;
+
+	if (state != cred_selinux_state(cred))
+		return false;
+
+	ns = current_lsm_ns();
+	if (!ns || ns == &init_lsm_ns || ns->lsmid != LSM_ID_SELINUX)
+		return false;
+
+	/*
+	 * A child SELinux state starts with a cloned parent policy only so it can
+	 * expose selinuxfs and load the guest's first real policy.  Do not require
+	 * that temporary clone to authorize the control operation that replaces it.
+	 * Once the first load succeeds, ordinary child-policy checks apply.
+	 */
+	return selinux_state_child_policy_load_pending(state);
+#else
+	return false;
+#endif
+}
+
 static int selinuxfs_has_perm(struct selinux_fs_info *fsi, u32 perms)
 {
 	u32 sid;
 	int rc;
+
+	if (selinuxfs_allows_child_bootstrap_control(fsi, perms))
+		return 0;
 
 	rc = selinuxfs_current_sid(fsi, &sid);
 	if (rc)

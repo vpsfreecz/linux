@@ -62,11 +62,11 @@ int __ns_common_init(struct ns_common *ns, u32 ns_type,
 	refcount_set(&ns->__ns_ref, 1);
 	ns->stashed = NULL;
 	ns->ops = ops;
-	ns->owner_cred = get_current_cred();
+	RCU_INIT_POINTER(ns->owner_cred, get_current_cred());
 	ns->owner_prop = kzalloc(sizeof(*ns->owner_prop), GFP_KERNEL);
 	if (!ns->owner_prop) {
-		put_cred(ns->owner_cred);
-		ns->owner_cred = NULL;
+		put_cred(rcu_access_pointer(ns->owner_cred));
+		RCU_INIT_POINTER(ns->owner_cred, NULL);
 		return -ENOMEM;
 	}
 	ns->owner_prop_set = false;
@@ -85,8 +85,8 @@ int __ns_common_init(struct ns_common *ns, u32 ns_type,
 	}
 	ret = proc_alloc_inum(&ns->inum);
 	if (ret) {
-		put_cred(ns->owner_cred);
-		ns->owner_cred = NULL;
+		put_cred(rcu_access_pointer(ns->owner_cred));
+		RCU_INIT_POINTER(ns->owner_cred, NULL);
 		kfree(ns->owner_prop);
 		ns->owner_prop = NULL;
 	}
@@ -109,15 +109,15 @@ void ns_common_set_owner_prop(struct ns_common *ns, const struct cred *cred)
 	 * superblock. The retained prop below is the host/global snapshot used
 	 * as a fallback for callers that cannot consume creds.
 	 */
-	old_cred = ns->owner_cred;
-	ns->owner_cred = get_cred(cred);
+	old_cred = rcu_replace_pointer(ns->owner_cred, get_cred(cred), true);
 	if (old_cred)
 		put_cred(old_cred);
 
-	security_release_lsmprop(ns->owner_prop);
+	if (READ_ONCE(ns->owner_prop_set))
+		security_release_lsmprop(ns->owner_prop);
 	security_cred_getlsmprop_global(cred, ns->owner_prop);
 	security_lsmprop_hold(ns->owner_prop);
-	ns->owner_prop_set = true;
+	WRITE_ONCE(ns->owner_prop_set, true);
 }
 
 void ns_common_owner_to_inode(struct ns_common *ns, struct inode *inode)
@@ -128,11 +128,17 @@ void ns_common_owner_to_inode(struct ns_common *ns, struct inode *inode)
 	if (!ns || !inode)
 		return;
 
-	owner_cred = READ_ONCE(ns->owner_cred);
 	owner_prop = READ_ONCE(ns->owner_prop);
+	rcu_read_lock();
+	do {
+		owner_cred = rcu_dereference(ns->owner_cred);
+	} while (owner_cred && !get_cred_rcu(owner_cred));
+	rcu_read_unlock();
+
 	if (owner_cred) {
 		/* Selects host/global or child-local identity by inode state. */
 		security_cred_to_inode(owner_cred, inode);
+		put_cred(owner_cred);
 		return;
 	}
 
@@ -146,9 +152,11 @@ void ns_common_owner_to_inode(struct ns_common *ns, struct inode *inode)
 
 void __ns_common_free(struct ns_common *ns)
 {
-	if (ns->owner_cred)
-		put_cred(ns->owner_cred);
-	ns->owner_cred = NULL;
+	const struct cred *owner_cred = rcu_access_pointer(ns->owner_cred);
+
+	if (owner_cred)
+		put_cred(owner_cred);
+	RCU_INIT_POINTER(ns->owner_cred, NULL);
 	if (ns->owner_prop) {
 		if (ns->owner_prop_set)
 			security_release_lsmprop(ns->owner_prop);

@@ -45,6 +45,10 @@ struct cred_security_struct {
 	u32 keycreate_sid; /* keycreate SID */
 	u32 sockcreate_sid; /* fscreate SID */
 	struct selinux_state *state; /* SELinux state carried by these creds */
+	struct selinux_state *exec_sid_state; /* state for exec_sid */
+	struct selinux_state *create_sid_state; /* state for create_sid */
+	struct selinux_state *keycreate_sid_state; /* state for keycreate_sid */
+	struct selinux_state *sockcreate_sid_state; /* state for sockcreate_sid */
 	u32 outer_sid; /* immutable host SID for child LSM namespace payloads */
 	struct selinux_state *outer_state; /* host state for outer_sid */
 	bool outer_active; /* outer_sid/outer_state must be enforced */
@@ -163,6 +167,9 @@ struct sk_security_struct {
 	struct selinux_state *state; /* SELinux state bound to this socket */
 	u32 peer_sid; /* SID of peer */
 	struct selinux_state *peer_sid_state; /* SELinux state bound to peer_sid */
+	u32 outer_sid; /* immutable host SID of creator's outer owner */
+	struct selinux_state *outer_state; /* host state for outer_sid */
+	bool outer_active; /* outer_sid/outer_state must be enforced */
 	u16 sclass; /* sock security class */
 	enum { /* SCTP association state */
 	       SCTP_ASSOC_UNSET = 0,

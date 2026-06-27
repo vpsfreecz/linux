@@ -22,6 +22,7 @@
 
 struct file;
 struct dentry;
+struct inode;
 struct iattr;
 struct seq_file;
 struct vm_area_struct;
@@ -257,6 +258,8 @@ struct kernfs_syscall_ops {
 			 struct kernfs_root *root);
 };
 
+typedef void (*kernfs_inode_fn)(struct inode *inode, void *data);
+
 struct kernfs_node *kernfs_root_to_node(struct kernfs_root *root);
 
 struct kernfs_open_file {
@@ -421,6 +424,8 @@ void kernfs_put(struct kernfs_node *kn);
 struct kernfs_node *kernfs_node_from_dentry(struct dentry *dentry);
 struct kernfs_root *kernfs_root_from_sb(struct super_block *sb);
 struct inode *kernfs_get_inode(struct super_block *sb, struct kernfs_node *kn);
+void kernfs_for_each_super_inode(struct kernfs_node *kn, kernfs_inode_fn fn,
+				 void *data);
 
 struct dentry *kernfs_node_dentry(struct kernfs_node *kn,
 				  struct super_block *sb);
@@ -519,6 +524,10 @@ static inline struct kernfs_root *kernfs_root_from_sb(struct super_block *sb)
 static inline struct inode *
 kernfs_get_inode(struct super_block *sb, struct kernfs_node *kn)
 { return NULL; }
+
+static inline void kernfs_for_each_super_inode(struct kernfs_node *kn,
+					       kernfs_inode_fn fn,
+					       void *data) { }
 
 static inline struct kernfs_root *
 kernfs_create_root(struct kernfs_syscall_ops *scops, unsigned int flags,

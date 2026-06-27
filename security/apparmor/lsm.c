@@ -2408,6 +2408,25 @@ fail_backend:
 	return error;
 }
 
+static int aa_lsmns_backend_install(struct lsm_namespace *ns,
+				    struct task_struct *task,
+				    struct cred *new_cred)
+{
+	struct aa_lsmns_backend_data *backend;
+
+	if (!ns || ns->lsmid != LSM_ID_APPARMOR)
+		return -EINVAL;
+
+	if (!apparmor_enabled || !apparmor_initialized || !root_ns)
+		return -EOPNOTSUPP;
+
+	backend = ns->backend_data;
+	if (!backend || !backend->ns)
+		return -EINVAL;
+
+	return aa_lsmns_install_task_label(task, new_cred, backend->ns);
+}
+
 static void aa_lsmns_backend_destroy(struct lsm_namespace *ns)
 {
 	struct aa_lsmns_backend_data *backend = ns->backend_data;
@@ -2424,6 +2443,7 @@ static const struct lsm_namespace_backend aa_lsmns_backend = {
 	.lsmid = LSM_ID_APPARMOR,
 	.prepare_unshare = aa_lsmns_backend_prepare_unshare,
 	.create = aa_lsmns_backend_create,
+	.install = aa_lsmns_backend_install,
 	.destroy = aa_lsmns_backend_destroy,
 };
 #endif

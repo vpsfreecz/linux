@@ -74,6 +74,9 @@ enum setns_probe_stage {
 	SETNS_PROBE_SETNS,
 	SETNS_PROBE_MKDTEMP,
 	SETNS_PROBE_MOUNT_SELINUXFS,
+	SETNS_PROBE_OPEN_ENFORCE,
+	SETNS_PROBE_READ_ENFORCE,
+	SETNS_PROBE_WRITE_ENFORCE,
 	SETNS_PROBE_OPEN_LOAD,
 	SETNS_PROBE_WRITE_LOAD,
 	SETNS_PROBE_UMOUNT_SELINUXFS,
@@ -96,6 +99,12 @@ static const char *setns_probe_stage_name(enum setns_probe_stage stage)
 		return "mkdtemp";
 	case SETNS_PROBE_MOUNT_SELINUXFS:
 		return "mount_selinuxfs";
+	case SETNS_PROBE_OPEN_ENFORCE:
+		return "open_enforce";
+	case SETNS_PROBE_READ_ENFORCE:
+		return "read_enforce";
+	case SETNS_PROBE_WRITE_ENFORCE:
+		return "write_enforce";
 	case SETNS_PROBE_OPEN_LOAD:
 		return "open_load";
 	case SETNS_PROBE_WRITE_LOAD:
@@ -279,10 +288,14 @@ static int try_mount_selinuxfs(void)
 static int try_invalid_policy_load(enum setns_probe_stage *stage)
 {
 	char path[] = "/tmp/vpsadminos-selinuxfs-load-XXXXXX";
+	char enforce_path[PATH_MAX];
 	char load_path[PATH_MAX];
+	char enforce_buf[16];
+	char new_enforce;
 	int fd = -1;
 	int ret = -1;
 	int saved_errno;
+	ssize_t nread;
 
 	if (!mkdtemp(path)) {
 		*stage = SETNS_PROBE_MKDTEMP;
@@ -295,6 +308,35 @@ static int try_invalid_policy_load(enum setns_probe_stage *stage)
 		goto out_rmdir;
 	}
 
+	snprintf(enforce_path, sizeof(enforce_path), "%s/enforce", path);
+	fd = open(enforce_path, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		saved_errno = errno;
+		*stage = SETNS_PROBE_OPEN_ENFORCE;
+		goto out_umount;
+	}
+
+	nread = read(fd, enforce_buf, sizeof(enforce_buf) - 1);
+	if (nread < 0) {
+		saved_errno = errno;
+		*stage = SETNS_PROBE_READ_ENFORCE;
+		goto out_close_enforce;
+	}
+	enforce_buf[nread] = '\0';
+	new_enforce = enforce_buf[0] == '0' ? '1' : '0';
+	if (lseek(fd, 0, SEEK_SET) < 0) {
+		saved_errno = errno;
+		*stage = SETNS_PROBE_WRITE_ENFORCE;
+		goto out_close_enforce;
+	}
+	if (write(fd, &new_enforce, 1) != 1) {
+		saved_errno = errno;
+		*stage = SETNS_PROBE_WRITE_ENFORCE;
+		goto out_close_enforce;
+	}
+	close(fd);
+	fd = -1;
+
 	snprintf(load_path, sizeof(load_path), "%s/load", path);
 	fd = open(load_path, O_WRONLY | O_CLOEXEC);
 	if (fd < 0) {
@@ -305,7 +347,7 @@ static int try_invalid_policy_load(enum setns_probe_stage *stage)
 
 	if (write(fd, "x", 1) < 0) {
 		saved_errno = errno;
-		ret = (saved_errno == EBUSY || saved_errno == EOPNOTSUPP) ? -1 : 0;
+		ret = saved_errno == EINVAL ? 0 : -1;
 		if (ret)
 			*stage = SETNS_PROBE_WRITE_LOAD;
 	} else {
@@ -314,6 +356,10 @@ static int try_invalid_policy_load(enum setns_probe_stage *stage)
 	}
 
 	close(fd);
+	fd = -1;
+out_close_enforce:
+	if (fd >= 0)
+		close(fd);
 out_umount:
 	if (umount2(path, MNT_DETACH) && ret == 0) {
 		saved_errno = errno;

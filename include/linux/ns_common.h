@@ -51,7 +51,7 @@ struct ns_common {
 	u32 ns_type;
 	struct dentry *stashed;
 	const struct proc_ns_operations *ops;
-	const struct cred *owner_cred;
+	const struct cred __rcu *owner_cred;
 	struct lsm_prop *owner_prop;
 	bool owner_prop_set;
 	unsigned int inum;

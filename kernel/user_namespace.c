@@ -167,13 +167,7 @@ int create_user_ns(struct cred *new)
 #endif
 	ret = -ENOMEM;
 	if (!setup_userns_sysctls(ns))
-#ifdef CONFIG_SECURITY_LSM_NAMESPACE
-		goto fail_put_lsm;
-#elif defined(CONFIG_TRACING_NS)
-		goto fail_put_tracing;
-#else
-		goto fail_put_syslog;
-#endif
+		goto fail_put_namespaces;
 
 	/*
 	 * When a new user namespace inherits a non-init syslog namespace from
@@ -193,17 +187,15 @@ int create_user_ns(struct cred *new)
 	fake_sysctl_bufs_init(ns);
 	ns_tree_add(ns);
 	return 0;
+
+fail_put_namespaces:
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-fail_put_lsm:
 	put_lsm_ns(ns->lsm_ns);
 #endif
 #ifdef CONFIG_TRACING_NS
-fail_put_tracing:
 	put_tracing_ns(ns->tracing_ns);
 #endif
-fail_put_syslog:
 	put_syslog_ns(ns->syslog_ns);
-fail_keyring:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	key_put(ns->persistent_keyring_register);
 #endif

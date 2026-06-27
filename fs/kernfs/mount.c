@@ -187,6 +187,57 @@ struct kernfs_root *kernfs_root_from_sb(struct super_block *sb)
 	return NULL;
 }
 
+/**
+ * kernfs_for_each_super_inode - visit instantiated inode aliases of a node
+ * @kn: kernfs_node whose aliases should be visited
+ * @fn: callback for each instantiated inode
+ * @data: caller data passed to @fn
+ *
+ * kernfs nodes can be visible through multiple superblocks.  Look up only
+ * inodes that already exist so callers can refresh per-inode cached state
+ * without instantiating new aliases.
+ *
+ * @kn must already be linked into a kernfs tree or be the root node.  Fresh
+ * nodes are passed to security hooks before their parent pointer is installed
+ * and cannot have instantiated aliases yet.
+ */
+void kernfs_for_each_super_inode(struct kernfs_node *kn, kernfs_inode_fn fn,
+				 void *data)
+{
+	struct kernfs_root *root;
+	struct kernfs_super_info *info;
+	unsigned long ino;
+
+	if (!kn || !fn)
+		return;
+
+	rcu_read_lock();
+	if (!rcu_dereference(kn->__parent) &&
+	    (kernfs_type(kn) != KERNFS_DIR || !kn->dir.root)) {
+		rcu_read_unlock();
+		return;
+	}
+	rcu_read_unlock();
+
+	root = kernfs_root(kn);
+	if (!root)
+		return;
+	ino = kernfs_ino(kn);
+
+	down_read(&root->kernfs_supers_rwsem);
+	list_for_each_entry(info, &root->supers, node) {
+		struct inode *inode;
+
+		inode = ilookup(info->sb, ino);
+		if (!inode)
+			continue;
+
+		fn(inode, data);
+		iput(inode);
+	}
+	up_read(&root->kernfs_supers_rwsem);
+}
+
 /*
  * find the next ancestor in the path down to @child, where @parent was the
  * ancestor whose descendant we want to find.
