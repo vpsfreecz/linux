@@ -1248,6 +1248,11 @@ static int kcm_attach(struct socket *sock, struct socket *csock,
 		goto out;
 	}
 
+	if (!net_eq(sock_net(csk), sock_net(sock->sk))) {
+		err = -EINVAL;
+		goto out;
+	}
+
 	/* Don't allow listeners or closed sockets */
 	if (csk->sk_state == TCP_LISTEN || csk->sk_state == TCP_CLOSE) {
 		err = -EOPNOTSUPP;
