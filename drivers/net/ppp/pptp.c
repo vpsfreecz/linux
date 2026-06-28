@@ -23,10 +23,12 @@
 #include <linux/file.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/bitmap.h>
 #include <linux/rcupdate.h>
 #include <linux/security.h>
 #include <linux/spinlock.h>
 
+#include <net/netns/generic.h>
 #include <net/sock.h>
 #include <net/protocol.h>
 #include <net/ip.h>
@@ -41,21 +43,77 @@
 
 #define MAX_CALLID 65535
 
-static DECLARE_BITMAP(callid_bitmap, MAX_CALLID + 1);
-static struct pppox_sock __rcu **callid_sock;
+struct pptp_net {
+	unsigned long *callid_bitmap;
+	struct pppox_sock __rcu **callid_sock;
+	spinlock_t chan_lock;
+	int call_id;
+};
 
-static DEFINE_SPINLOCK(chan_lock);
+static unsigned int pptp_net_id;
 
 static struct proto pptp_sk_proto __read_mostly;
 static const struct ppp_channel_ops pptp_chan_ops;
 static const struct proto_ops pptp_ops;
 
-static struct pppox_sock *lookup_chan(u16 call_id, __be32 s_addr)
+static inline struct pptp_net *pptp_pernet(struct net *net)
 {
+	return net_generic(net, pptp_net_id);
+}
+
+static inline struct pppox_sock __rcu **pptp_callid_sock(struct pptp_net *pn)
+{
+	return smp_load_acquire(&pn->callid_sock);
+}
+
+static int pptp_init_callid_table(struct pptp_net *pn)
+{
+	struct pppox_sock __rcu **callid_sock;
+	unsigned long *callid_bitmap;
+
+	if (pptp_callid_sock(pn))
+		return 0;
+
+	callid_bitmap = bitmap_zalloc(MAX_CALLID + 1, GFP_KERNEL);
+	if (!callid_bitmap)
+		return -ENOMEM;
+
+	callid_sock = vzalloc(array_size(sizeof(*callid_sock), MAX_CALLID + 1));
+	if (!callid_sock) {
+		bitmap_free(callid_bitmap);
+		return -ENOMEM;
+	}
+
+	spin_lock(&pn->chan_lock);
+	if (!pn->callid_sock) {
+		WRITE_ONCE(pn->callid_bitmap, callid_bitmap);
+		smp_store_release(&pn->callid_sock, callid_sock);
+		callid_bitmap = NULL;
+		callid_sock = NULL;
+	}
+	spin_unlock(&pn->chan_lock);
+
+	bitmap_free(callid_bitmap);
+	vfree(callid_sock);
+
+	return 0;
+}
+
+static struct pppox_sock *lookup_chan(struct net *net, u16 call_id,
+				      __be32 s_addr)
+{
+	struct pptp_net *pn = pptp_pernet(net);
+	struct pppox_sock __rcu **callid_sock;
 	struct pppox_sock *sock;
 	struct pptp_opt *opt;
 
 	rcu_read_lock();
+	callid_sock = pptp_callid_sock(pn);
+	if (!callid_sock) {
+		rcu_read_unlock();
+		return NULL;
+	}
+
 	sock = rcu_dereference(callid_sock[call_id]);
 	if (sock) {
 		opt = &sock->proto.pptp;
@@ -69,13 +127,23 @@ static struct pppox_sock *lookup_chan(u16 call_id, __be32 s_addr)
 	return sock;
 }
 
-static int lookup_chan_dst(u16 call_id, __be32 d_addr)
+static int lookup_chan_dst(struct net *net, u16 call_id, __be32 d_addr)
 {
+	struct pptp_net *pn = pptp_pernet(net);
+	struct pppox_sock __rcu **callid_sock;
 	struct pppox_sock *sock;
+	unsigned long *callid_bitmap;
 	struct pptp_opt *opt;
 	int i;
 
 	rcu_read_lock();
+	callid_sock = pptp_callid_sock(pn);
+	callid_bitmap = READ_ONCE(pn->callid_bitmap);
+	if (!callid_sock || !callid_bitmap) {
+		rcu_read_unlock();
+		return 0;
+	}
+
 	i = 1;
 	for_each_set_bit_from(i, callid_bitmap, MAX_CALLID) {
 		sock = rcu_dereference(callid_sock[i]);
@@ -94,39 +162,56 @@ static int lookup_chan_dst(u16 call_id, __be32 d_addr)
 static int add_chan(struct pppox_sock *sock,
 		    struct pptp_addr *sa)
 {
-	static int call_id;
+	struct pptp_net *pn = pptp_pernet(sock_net(sk_pppox(sock)));
 
-	spin_lock(&chan_lock);
+	if (pptp_init_callid_table(pn))
+		return -1;
+
+	spin_lock(&pn->chan_lock);
 	if (!sa->call_id)	{
-		call_id = find_next_zero_bit(callid_bitmap, MAX_CALLID, call_id + 1);
-		if (call_id == MAX_CALLID) {
-			call_id = find_next_zero_bit(callid_bitmap, MAX_CALLID, 1);
-			if (call_id == MAX_CALLID)
+		pn->call_id = find_next_zero_bit(pn->callid_bitmap, MAX_CALLID,
+						 pn->call_id + 1);
+		if (pn->call_id == MAX_CALLID) {
+			pn->call_id = find_next_zero_bit(pn->callid_bitmap,
+							 MAX_CALLID, 1);
+			if (pn->call_id == MAX_CALLID)
 				goto out_err;
 		}
-		sa->call_id = call_id;
-	} else if (test_bit(sa->call_id, callid_bitmap)) {
+		sa->call_id = pn->call_id;
+	} else if (test_bit(sa->call_id, pn->callid_bitmap)) {
 		goto out_err;
 	}
 
 	sock->proto.pptp.src_addr = *sa;
-	set_bit(sa->call_id, callid_bitmap);
-	rcu_assign_pointer(callid_sock[sa->call_id], sock);
-	spin_unlock(&chan_lock);
+	set_bit(sa->call_id, pn->callid_bitmap);
+	rcu_assign_pointer(pn->callid_sock[sa->call_id], sock);
+	spin_unlock(&pn->chan_lock);
 
 	return 0;
 
 out_err:
-	spin_unlock(&chan_lock);
+	spin_unlock(&pn->chan_lock);
 	return -1;
 }
 
 static void del_chan(struct pppox_sock *sock)
 {
-	spin_lock(&chan_lock);
-	clear_bit(sock->proto.pptp.src_addr.call_id, callid_bitmap);
-	RCU_INIT_POINTER(callid_sock[sock->proto.pptp.src_addr.call_id], NULL);
-	spin_unlock(&chan_lock);
+	struct pptp_net *pn = pptp_pernet(sock_net(sk_pppox(sock)));
+	u16 call_id = sock->proto.pptp.src_addr.call_id;
+	struct pppox_sock __rcu **callid_sock;
+	unsigned long *callid_bitmap;
+
+	callid_sock = pptp_callid_sock(pn);
+	callid_bitmap = READ_ONCE(pn->callid_bitmap);
+	if (!callid_sock || !callid_bitmap)
+		return;
+
+	spin_lock(&pn->chan_lock);
+	if (call_id) {
+		clear_bit(call_id, callid_bitmap);
+		RCU_INIT_POINTER(callid_sock[call_id], NULL);
+	}
+	spin_unlock(&pn->chan_lock);
 }
 
 static struct rtable *pptp_route_output(const struct pppox_sock *po,
@@ -352,9 +437,14 @@ static int pptp_rcv(struct sk_buff *skb)
 	struct pppox_sock *po;
 	struct pptp_gre_header *header;
 	struct iphdr *iph;
+	struct net *net;
 
 	if (skb->pkt_type != PACKET_HOST)
 		goto drop;
+
+	if (!skb->dev)
+		goto drop;
+	net = dev_net(skb->dev);
 
 	if (!pskb_may_pull(skb, 12))
 		goto drop;
@@ -371,7 +461,7 @@ static int pptp_rcv(struct sk_buff *skb)
 		/* if invalid, discard this packet */
 		goto drop;
 
-	po = lookup_chan(ntohs(header->call_id), iph->saddr);
+	po = lookup_chan(net, ntohs(header->call_id), iph->saddr);
 	if (po) {
 		skb_dst_drop(skb);
 		nf_reset_ct(skb);
@@ -432,7 +522,8 @@ static int pptp_connect(struct socket *sock, struct sockaddr *uservaddr,
 	if (sp->sa_protocol != PX_PROTO_PPTP)
 		return -EINVAL;
 
-	if (lookup_chan_dst(sp->sa_addr.pptp.call_id, sp->sa_addr.pptp.sin_addr.s_addr))
+	if (lookup_chan_dst(sock_net(sk), sp->sa_addr.pptp.call_id,
+			    sp->sa_addr.pptp.sin_addr.s_addr))
 		return -EALREADY;
 
 	lock_sock(sk);
@@ -648,19 +739,43 @@ static const struct gre_protocol gre_pptp_protocol = {
 	.handler = pptp_rcv,
 };
 
+static int __net_init pptp_init_net(struct net *net)
+{
+	struct pptp_net *pn = pptp_pernet(net);
+
+	spin_lock_init(&pn->chan_lock);
+	return 0;
+}
+
+static void __net_exit pptp_exit_net(struct net *net)
+{
+	struct pptp_net *pn = pptp_pernet(net);
+
+	synchronize_rcu();
+	bitmap_free(pn->callid_bitmap);
+	vfree(pn->callid_sock);
+}
+
+static struct pernet_operations pptp_net_ops = {
+	.init = pptp_init_net,
+	.exit = pptp_exit_net,
+	.id = &pptp_net_id,
+	.size = sizeof(struct pptp_net),
+};
+
 static int __init pptp_init_module(void)
 {
 	int err = 0;
 	pr_info("PPTP driver version " PPTP_DRIVER_VERSION "\n");
 
-	callid_sock = vzalloc(array_size(sizeof(void *), (MAX_CALLID + 1)));
-	if (!callid_sock)
-		return -ENOMEM;
+	err = register_pernet_device(&pptp_net_ops);
+	if (err)
+		return err;
 
 	err = gre_add_protocol(&gre_pptp_protocol, GREPROTO_PPTP);
 	if (err) {
 		pr_err("PPTP: can't add gre protocol\n");
-		goto out_mem_free;
+		goto out_unregister_pernet;
 	}
 
 	err = proto_register(&pptp_sk_proto, 0);
@@ -681,8 +796,8 @@ out_unregister_sk_proto:
 	proto_unregister(&pptp_sk_proto);
 out_gre_del_protocol:
 	gre_del_protocol(&gre_pptp_protocol, GREPROTO_PPTP);
-out_mem_free:
-	vfree(callid_sock);
+out_unregister_pernet:
+	unregister_pernet_device(&pptp_net_ops);
 
 	return err;
 }
@@ -692,7 +807,7 @@ static void __exit pptp_exit_module(void)
 	unregister_pppox_proto(PX_PROTO_PPTP);
 	proto_unregister(&pptp_sk_proto);
 	gre_del_protocol(&gre_pptp_protocol, GREPROTO_PPTP);
-	vfree(callid_sock);
+	unregister_pernet_device(&pptp_net_ops);
 }
 
 module_init(pptp_init_module);
