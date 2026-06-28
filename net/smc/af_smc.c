@@ -1046,6 +1046,14 @@ static bool smc_find_ism_v2_is_unique_chid(u16 chid, struct smc_init_info *ini,
 	return true;
 }
 
+static bool smc_ism_netns_eligible(struct net *net, struct smcd_dev *smcd)
+{
+	if (!smc_pnet_is_pnetid_set(smcd->pnetid))
+		return net_eq(net, &init_net);
+
+	return smc_pnet_is_ndev_pnetid(net, smcd->pnetid);
+}
+
 /* determine possible V2 ISM devices (either without PNETID or with PNETID plus
  * PNETID matching net_device)
  */
@@ -1053,6 +1061,7 @@ static int smc_find_ism_v2_device_clnt(struct smc_sock *smc,
 				       struct smc_init_info *ini)
 {
 	int rc = SMC_CLC_DECL_NOSMCDDEV;
+	struct net *net = sock_net(&smc->sk);
 	struct smcd_dev *smcd;
 	int i = 1, entry = 1;
 	bool is_emulated;
@@ -1068,8 +1077,7 @@ static int smc_find_ism_v2_device_clnt(struct smc_sock *smc,
 		if (!smc_find_ism_v2_is_unique_chid(chid, ini, i))
 			continue;
 		is_emulated = __smc_ism_is_emulated(chid);
-		if (!smc_pnet_is_pnetid_set(smcd->pnetid) ||
-		    smc_pnet_is_ndev_pnetid(sock_net(&smc->sk), smcd->pnetid)) {
+		if (smc_ism_netns_eligible(net, smcd)) {
 			if (is_emulated && entry == SMCD_CLC_MAX_V2_GID_ENTRIES)
 				/* It's the last GID-CHID entry left in CLC
 				 * Proposal SMC-Dv2 extension, but an Emulated-
@@ -2115,6 +2123,7 @@ static bool smc_is_already_selected(struct smcd_dev *smcd,
 
 /* check for ISM devices matching proposed ISM devices */
 static void smc_check_ism_v2_match(struct smc_init_info *ini,
+				   struct net *net,
 				   u16 proposed_chid,
 				   struct smcd_gid *proposed_gid,
 				   unsigned int *matches)
@@ -2125,6 +2134,8 @@ static void smc_check_ism_v2_match(struct smc_init_info *ini,
 		if (smcd->going_away)
 			continue;
 		if (smc_is_already_selected(smcd, ini, *matches))
+			continue;
+		if (!smc_ism_netns_eligible(net, smcd))
 			continue;
 		if (smc_ism_get_chid(smcd) == proposed_chid &&
 		    !smc_ism_cantalk(proposed_gid, ISM_RESERVED_VLANID, smcd)) {
@@ -2153,6 +2164,7 @@ static void smc_find_ism_v2_device_serv(struct smc_sock *new_smc,
 	struct smc_clc_smcd_v2_extension *smcd_v2_ext;
 	struct smc_clc_v2_extension *smc_v2_ext;
 	struct smc_clc_msg_smcd *pclc_smcd;
+	struct net *net = sock_net(&new_smc->sk);
 	unsigned int matches = 0;
 	struct smcd_gid smcd_gid;
 	u8 smcd_version;
@@ -2174,7 +2186,7 @@ static void smc_find_ism_v2_device_serv(struct smc_sock *new_smc,
 		/* check for ISM device matching proposed native ISM device */
 		smcd_gid.gid = ntohll(pclc_smcd->ism.gid);
 		smcd_gid.gid_ext = 0;
-		smc_check_ism_v2_match(ini, ntohs(pclc_smcd->ism.chid),
+		smc_check_ism_v2_match(ini, net, ntohs(pclc_smcd->ism.chid),
 				       &smcd_gid, &matches);
 	}
 	for (i = 0; i < smc_v2_ext->hdr.ism_gid_cnt; i++) {
@@ -2198,7 +2210,7 @@ static void smc_find_ism_v2_device_serv(struct smc_sock *new_smc,
 			smcd_gid.gid_ext =
 				ntohll(smcd_v2_ext->gidchid[++i].gid);
 		}
-		smc_check_ism_v2_match(ini, chid, &smcd_gid, &matches);
+		smc_check_ism_v2_match(ini, net, chid, &smcd_gid, &matches);
 	}
 	mutex_unlock(&smcd_dev_list.mutex);
 
