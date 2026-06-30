@@ -23,6 +23,7 @@
 #include "xfs_log.h"
 #include "xfs_rtbitmap.h"
 #include <linux/fsnotify.h>
+#include <linux/security.h>
 
 /* Lock (and optionally join) two inodes for a file range exchange. */
 void
@@ -751,6 +752,12 @@ xfs_exchange_range(
 	    !(fxr->file2->f_mode & FMODE_READ) ||
 	    !(fxr->file2->f_mode & FMODE_WRITE))
 		return -EBADF;
+	ret = security_file_permission(fxr->file1, MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
+	ret = security_file_permission(fxr->file2, MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	/* Neither file can be opened append-only. */
 	if ((fxr->file1->f_flags & O_APPEND) ||

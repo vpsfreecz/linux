@@ -59,6 +59,20 @@ bool bpf_token_current_container_member(void)
 #endif
 }
 
+bool bpf_token_current_container_task_allowed(const struct task_struct *task)
+{
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
+
+	if (!bpf_token_current_container_member())
+		return true;
+
+	return tracing_ns_matches_task(tns, task);
+#else
+	return true;
+#endif
+}
+
 static bool bpf_token_current_container_allowed(const struct bpf_token *token)
 {
 	if (!bpf_token_current_container_member())

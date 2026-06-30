@@ -23,6 +23,7 @@
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -287,12 +288,17 @@ static int do_signalfd4(int ufd, sigset_t *mask, int flags)
 		}
 		fd_install(ufd, file);
 	} else {
+		int ret;
+
 		CLASS(fd, f)(ufd);
 		if (fd_empty(f))
 			return -EBADF;
 		ctx = fd_file(f)->private_data;
 		if (fd_file(f)->f_op != &signalfd_fops)
 			return -EINVAL;
+		ret = security_file_permission(fd_file(f), MAY_WRITE);
+		if (ret)
+			return ret;
 		spin_lock_irq(&current->sighand->siglock);
 		ctx->sigmask = *mask;
 		spin_unlock_irq(&current->sighand->siglock);

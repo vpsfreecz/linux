@@ -11,6 +11,7 @@
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/sched/signal.h>
+#include <linux/security.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/list.h>
@@ -323,6 +324,7 @@ static const struct file_operations eventfd_fops = {
 struct file *eventfd_fget(int fd)
 {
 	struct file *file;
+	int ret;
 
 	file = fget(fd);
 	if (!file)
@@ -330,6 +332,11 @@ struct file *eventfd_fget(int fd)
 	if (file->f_op != &eventfd_fops) {
 		fput(file);
 		return ERR_PTR(-EINVAL);
+	}
+	ret = security_file_permission(file, MAY_READ);
+	if (ret) {
+		fput(file);
+		return ERR_PTR(ret);
 	}
 
 	return file;
@@ -366,9 +373,13 @@ EXPORT_SYMBOL_GPL(eventfd_ctx_fdget);
 struct eventfd_ctx *eventfd_ctx_fileget(struct file *file)
 {
 	struct eventfd_ctx *ctx;
+	int ret;
 
 	if (file->f_op != &eventfd_fops)
 		return ERR_PTR(-EINVAL);
+	ret = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (ret)
+		return ERR_PTR(ret);
 
 	ctx = file->private_data;
 	kref_get(&ctx->kref);
@@ -429,4 +440,3 @@ SYSCALL_DEFINE1(eventfd, unsigned int, count)
 {
 	return do_eventfd(count, 0);
 }
-

@@ -3176,27 +3176,21 @@ int selinux_policy_genfs_sid(struct selinux_policy *policy,
 	return __security_genfs_sid(policy, fstype, path, orig_sclass, sid);
 }
 
-/**
- * security_fs_use_state - Determine how to handle labeling for a filesystem.
- * @state: SELinux state that owns the superblock
- * @sb: superblock in question
- */
-int security_fs_use_state(struct selinux_state *state, struct super_block *sb)
+int security_fs_use_sid_state(struct selinux_state *state, const char *fstype,
+			      int *behavior, u32 *sid)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
 	struct sidtab *sidtab;
 	int rc;
 	struct ocontext *c;
-	struct superblock_security_struct *sbsec = selinux_superblock(sb);
-	const char *fstype = sb->s_type->name;
 
 	if (!state)
 		state = &selinux_state;
 
 	if (!selinux_initialized_state(state)) {
-		sbsec->behavior = SECURITY_FS_USE_NONE;
-		sbsec->sid = SECINITSID_UNLABELED;
+		*behavior = SECURITY_FS_USE_NONE;
+		*sid = SECINITSID_UNLABELED;
 		return 0;
 	}
 
@@ -3214,8 +3208,8 @@ retry:
 	}
 
 	if (c) {
-		sbsec->behavior = c->v.behavior;
-		rc = ocontext_to_sid(sidtab, c, 0, &sbsec->sid);
+		*behavior = c->v.behavior;
+		rc = ocontext_to_sid(sidtab, c, 0, sid);
 		if (rc == -ESTALE) {
 			rcu_read_unlock();
 			goto retry;
@@ -3224,22 +3218,44 @@ retry:
 			goto out;
 	} else {
 		rc = __security_genfs_sid(policy, fstype, "/",
-					SECCLASS_DIR, &sbsec->sid);
+					  SECCLASS_DIR, sid);
 		if (rc == -ESTALE) {
 			rcu_read_unlock();
 			goto retry;
 		}
 		if (rc) {
-			sbsec->behavior = SECURITY_FS_USE_NONE;
+			*behavior = SECURITY_FS_USE_NONE;
+			*sid = SECINITSID_UNLABELED;
 			rc = 0;
 		} else {
-			sbsec->behavior = SECURITY_FS_USE_GENFS;
+			*behavior = SECURITY_FS_USE_GENFS;
 		}
 	}
 
 out:
 	rcu_read_unlock();
 	return rc;
+}
+
+/**
+ * security_fs_use_state - Determine how to handle labeling for a filesystem.
+ * @state: SELinux state that owns the superblock
+ * @sb: superblock in question
+ */
+int security_fs_use_state(struct selinux_state *state, struct super_block *sb)
+{
+	struct superblock_security_struct *sbsec = selinux_superblock(sb);
+	int behavior;
+	u32 sid;
+	int rc;
+
+	rc = security_fs_use_sid_state(state, sb->s_type->name, &behavior, &sid);
+	if (rc)
+		return rc;
+
+	sbsec->behavior = behavior;
+	sbsec->sid = sid;
+	return 0;
 }
 
 int security_get_bools(struct selinux_policy *policy,

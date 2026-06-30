@@ -23,6 +23,7 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/poll.h>
 #include <linux/seq_file.h>
+#include <linux/security.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/timekeeping.h>
@@ -218,6 +219,10 @@ static long linehandle_ioctl(struct file *file, unsigned int cmd,
 
 	switch (cmd) {
 	case GPIOHANDLE_GET_LINE_VALUES_IOCTL:
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
+
 		/* NOTE: It's okay to read values of output lines */
 		ret = gpiod_get_array_value_complex(false, true,
 						    lh->num_descs, lh->descs,
@@ -234,6 +239,10 @@ static long linehandle_ioctl(struct file *file, unsigned int cmd,
 
 		return 0;
 	case GPIOHANDLE_SET_LINE_VALUES_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
+
 		/*
 		 * All line descriptors were created at once with the same
 		 * flags so just check if the first one is really output.
@@ -256,6 +265,10 @@ static long linehandle_ioctl(struct file *file, unsigned int cmd,
 						     NULL,
 						     vals);
 	case GPIOHANDLE_SET_CONFIG_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
+
 		return linehandle_set_config(lh, ip);
 	default:
 		return -EINVAL;
@@ -1456,6 +1469,7 @@ static long linereq_ioctl(struct file *file, unsigned int cmd,
 {
 	struct linereq *lr = file->private_data;
 	void __user *ip = (void __user *)arg;
+	int ret;
 
 	guard(srcu)(&lr->gdev->srcu);
 
@@ -1464,10 +1478,19 @@ static long linereq_ioctl(struct file *file, unsigned int cmd,
 
 	switch (cmd) {
 	case GPIO_V2_LINE_GET_VALUES_IOCTL:
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
 		return linereq_get_values(lr, ip);
 	case GPIO_V2_LINE_SET_VALUES_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return linereq_set_values(lr, ip);
 	case GPIO_V2_LINE_SET_CONFIG_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return linereq_set_config(lr, ip);
 	default:
 		return -EINVAL;
@@ -1925,6 +1948,7 @@ static long lineevent_ioctl(struct file *file, unsigned int cmd,
 	struct lineevent_state *le = file->private_data;
 	void __user *ip = (void __user *)arg;
 	struct gpiohandle_data ghd;
+	int ret;
 
 	guard(srcu)(&le->gdev->srcu);
 
@@ -1937,6 +1961,10 @@ static long lineevent_ioctl(struct file *file, unsigned int cmd,
 	 */
 	if (cmd == GPIOHANDLE_GET_LINE_VALUES_IOCTL) {
 		int val;
+
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
 
 		memset(&ghd, 0, sizeof(ghd));
 
@@ -2458,6 +2486,7 @@ static long gpio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct gpio_chardev_data *cdev = file->private_data;
 	struct gpio_device *gdev = cdev->gdev;
 	void __user *ip = (void __user *)arg;
+	int ret;
 
 	guard(srcu)(&gdev->srcu);
 
@@ -2468,24 +2497,51 @@ static long gpio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	/* Fill in the struct and pass to userspace */
 	switch (cmd) {
 	case GPIO_GET_CHIPINFO_IOCTL:
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
 		return chipinfo_get(cdev, ip);
 #ifdef CONFIG_GPIO_CDEV_V1
 	case GPIO_GET_LINEHANDLE_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return linehandle_create(gdev, ip);
 	case GPIO_GET_LINEEVENT_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return lineevent_create(gdev, ip);
 	case GPIO_GET_LINEINFO_IOCTL:
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
 		return lineinfo_get_v1(cdev, ip, false);
 	case GPIO_GET_LINEINFO_WATCH_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return lineinfo_get_v1(cdev, ip, true);
 #endif /* CONFIG_GPIO_CDEV_V1 */
 	case GPIO_V2_GET_LINEINFO_IOCTL:
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
 		return lineinfo_get(cdev, ip, false);
 	case GPIO_V2_GET_LINEINFO_WATCH_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return lineinfo_get(cdev, ip, true);
 	case GPIO_V2_GET_LINE_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return linereq_create(gdev, ip);
 	case GPIO_GET_LINEINFO_UNWATCH_IOCTL:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return lineinfo_unwatch(cdev, ip);
 	default:
 		return -EINVAL;

@@ -28,6 +28,7 @@
 #include <linux/miscdevice.h>
 #include <linux/falloc.h>
 #include <linux/uio.h>
+#include <linux/security.h>
 #include <linux/ioprio.h>
 #include <linux/blk-cgroup.h>
 #include <linux/sched/mm.h>
@@ -550,6 +551,12 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	if (!file)
 		return -EBADF;
 
+	error = security_file_permission(file, MAY_READ);
+	if (error) {
+		fput(file);
+		return error;
+	}
+
 	error = loop_check_backing_file(file);
 	if (error) {
 		fput(file);
@@ -993,6 +1000,14 @@ static int loop_configure(struct loop_device *lo, blk_mode_t mode,
 
 	if (!file)
 		return -EBADF;
+
+	error = security_file_permission(file, MAY_READ |
+					 ((mode & BLK_OPEN_WRITE) ?
+					  MAY_WRITE : 0));
+	if (error) {
+		fput(file);
+		return error;
+	}
 
 	error = loop_check_backing_file(file);
 	if (error) {

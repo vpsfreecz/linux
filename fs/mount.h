@@ -16,6 +16,9 @@ struct mnt_namespace {
 		struct rb_node	*mnt_first_node; /* first (leftmost) mount in the rbtree */
 	};
 	struct user_namespace	*user_ns;
+	struct syslog_namespace *syslog_ns;
+	struct tracing_namespace *tracing_ns;
+	struct lsm_namespace *lsm_ns;
 	struct ucounts		*ucounts;
 	u64			seq; /* Sequence number to prevent loops */
 	wait_queue_head_t	poll;

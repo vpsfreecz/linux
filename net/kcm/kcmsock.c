@@ -17,6 +17,7 @@
 #include <linux/netdevice.h>
 #include <linux/poll.h>
 #include <linux/rculist.h>
+#include <linux/security.h>
 #include <linux/skbuff.h>
 #include <linux/socket.h>
 #include <linux/splice.h>
@@ -1516,6 +1517,7 @@ static struct file *kcm_clone(struct socket *osock)
 {
 	struct socket *newsock;
 	struct sock *newsk;
+	int err;
 
 	newsock = sock_alloc();
 	if (!newsock)
@@ -1534,6 +1536,12 @@ static struct file *kcm_clone(struct socket *osock)
 	}
 	sock_init_data(newsock, newsk);
 	init_kcm_sock(kcm_sk(newsk), kcm_sk(osock->sk)->mux);
+
+	err = security_socket_accept(osock, newsock);
+	if (err) {
+		sock_release(newsock);
+		return ERR_PTR(err);
+	}
 
 	return sock_alloc_file(newsock, 0, osock->sk->sk_prot_creator->name);
 }

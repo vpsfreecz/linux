@@ -538,7 +538,7 @@ int amdgpu_amdkfd_get_dmabuf_info(struct amdgpu_device *adev, int dma_buf_fd,
 	uint64_t metadata_flags;
 	int r = -EINVAL;
 
-	dma_buf = dma_buf_get(dma_buf_fd);
+	dma_buf = dma_buf_get_with_perm(dma_buf_fd, MAY_READ);
 	if (IS_ERR(dma_buf))
 		return PTR_ERR(dma_buf);
 

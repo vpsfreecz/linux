@@ -8,6 +8,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
 #include <linux/time.h>
@@ -2265,12 +2266,16 @@ static int snd_pcm_link(struct snd_pcm_substream *substream, int fd)
 	struct snd_pcm_group *group __free(kfree) = NULL;
 	struct snd_pcm_group *target_group;
 	bool nonatomic = substream->pcm->nonatomic;
+	int ret;
 	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
 		return -EBADFD;
 	if (!is_pcm_file(fd_file(f)))
 		return -EBADFD;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	pcm_file = fd_file(f)->private_data;
 	substream1 = pcm_file->substream;

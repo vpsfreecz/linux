@@ -115,6 +115,27 @@ static long snd_timer_user_ioctl_compat(struct file *file, unsigned int cmd,
 					unsigned long arg)
 {
 	struct snd_timer_user *tu = file->private_data;
+	int err;
+
+	err = snd_timer_user_ioctl_permission(file, cmd);
+	if (err)
+		return err;
+
+	switch (cmd) {
+	case SNDRV_TIMER_IOCTL_GPARAMS32:
+		err = security_file_permission(file, MAY_WRITE);
+		break;
+	case SNDRV_TIMER_IOCTL_INFO32:
+	case SNDRV_TIMER_IOCTL_STATUS_COMPAT32:
+	case SNDRV_TIMER_IOCTL_STATUS_COMPAT64:
+		err = security_file_permission(file, MAY_READ);
+		break;
+	default:
+		err = 0;
+		break;
+	}
+	if (err)
+		return err;
 
 	guard(mutex)(&tu->ioctl_lock);
 	return __snd_timer_user_ioctl_compat(file, cmd, arg);

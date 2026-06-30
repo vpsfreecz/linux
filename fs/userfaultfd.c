@@ -2020,6 +2020,10 @@ static long userfaultfd_ioctl(struct file *file, unsigned cmd,
 	int ret = -EINVAL;
 	struct userfaultfd_ctx *ctx = file->private_data;
 
+	ret = security_file_permission(file, MAY_WRITE);
+	if (ret)
+		return ret;
+
 	if (cmd != UFFDIO_API && !userfaultfd_is_initialized(ctx))
 		return -EINVAL;
 

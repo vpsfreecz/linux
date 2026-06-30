@@ -553,6 +553,7 @@ struct socket *sockfd_lookup(int fd, int *err)
 {
 	struct file *file;
 	struct socket *sock;
+	int ret;
 
 	file = fget(fd);
 	if (!file) {
@@ -564,10 +565,40 @@ struct socket *sockfd_lookup(int fd, int *err)
 	if (!sock) {
 		*err = -ENOTSOCK;
 		fput(file);
+		return NULL;
+	}
+
+	ret = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (ret) {
+		*err = ret;
+		fput(file);
+		return NULL;
 	}
 	return sock;
 }
 EXPORT_SYMBOL(sockfd_lookup);
+
+static struct socket *sockfd_lookup_file_perm(struct fd f, int mask, int *err)
+{
+	struct socket *sock;
+
+	if (fd_empty(f)) {
+		*err = -EBADF;
+		return NULL;
+	}
+
+	sock = sock_from_file(fd_file(f));
+	if (unlikely(!sock)) {
+		*err = -ENOTSOCK;
+		return NULL;
+	}
+
+	*err = security_file_permission(fd_file(f), mask);
+	if (*err)
+		return NULL;
+
+	return sock;
+}
 
 static ssize_t sockfs_listxattr(struct dentry *dentry, char *buffer,
 				size_t size)
@@ -1892,11 +1923,9 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
 	CLASS(fd, f)(fd);
 	int err;
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_WRITE, &err);
+	if (!sock)
+		return err;
 
 	err = move_addr_to_kernel(umyaddr, addrlen, &address);
 	if (unlikely(err))
@@ -1933,12 +1962,11 @@ int __sys_listen(int fd, int backlog)
 {
 	CLASS(fd, f)(fd);
 	struct socket *sock;
+	int err;
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_WRITE, &err);
+	if (!sock)
+		return err;
 
 	return __sys_listen_socket(sock, backlog);
 }
@@ -2051,9 +2079,11 @@ int __sys_accept4(int fd, struct sockaddr __user *upeer_sockaddr,
 		  int __user *upeer_addrlen, int flags)
 {
 	CLASS(fd, f)(fd);
+	int err;
 
-	if (fd_empty(f))
-		return -EBADF;
+	if (!sockfd_lookup_file_perm(f, MAY_READ, &err))
+		return err;
+
 	return __sys_accept4_file(fd_file(f), upeer_sockaddr,
 					 upeer_addrlen, flags);
 }
@@ -2118,6 +2148,9 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
 	if (ret)
 		return ret;
 
+	if (!sockfd_lookup_file_perm(f, MAY_WRITE, &ret))
+		return ret;
+
 	return __sys_connect_file(fd_file(f), &address, addrlen, 0);
 }
 
@@ -2140,11 +2173,9 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
 	CLASS(fd, f)(fd);
 	int err;
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_READ, &err);
+	if (!sock)
+		return err;
 
 	err = security_socket_getsockname(sock);
 	if (err)
@@ -2177,11 +2208,9 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
 	CLASS(fd, f)(fd);
 	int err;
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_READ, &err);
+	if (!sock)
+		return err;
 
 	err = security_socket_getpeername(sock);
 	if (err)
@@ -2219,11 +2248,9 @@ int __sys_sendto(int fd, void __user *buff, size_t len, unsigned int flags,
 		return err;
 
 	CLASS(fd, f)(fd);
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_WRITE, &err);
+	if (!sock)
+		return err;
 
 	msg.msg_name = NULL;
 	msg.msg_control = NULL;
@@ -2283,11 +2310,9 @@ int __sys_recvfrom(int fd, void __user *ubuf, size_t size, unsigned int flags,
 
 	CLASS(fd, f)(fd);
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_READ, &err);
+	if (!sock)
+		return err;
 
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
@@ -2375,12 +2400,11 @@ int __sys_setsockopt(int fd, int level, int optname, char __user *user_optval,
 	bool compat = in_compat_syscall();
 	struct socket *sock;
 	CLASS(fd, f)(fd);
+	int err;
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_WRITE, &err);
+	if (!sock)
+		return err;
 
 	return do_sock_setsockopt(sock, compat, level, optname, optval, optlen);
 }
@@ -2440,12 +2464,11 @@ int __sys_getsockopt(int fd, int level, int optname, char __user *optval,
 {
 	struct socket *sock;
 	CLASS(fd, f)(fd);
+	int err;
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_READ, &err);
+	if (!sock)
+		return err;
 
 	return do_sock_getsockopt(sock, in_compat_syscall(), level, optname,
 				 USER_SOCKPTR(optval), USER_SOCKPTR(optlen));
@@ -2476,12 +2499,11 @@ int __sys_shutdown(int fd, int how)
 {
 	struct socket *sock;
 	CLASS(fd, f)(fd);
+	int err;
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_WRITE, &err);
+	if (!sock)
+		return err;
 
 	return __sys_shutdown_sock(sock, how);
 }
@@ -2701,17 +2723,16 @@ long __sys_sendmsg(int fd, struct user_msghdr __user *msg, unsigned int flags,
 {
 	struct msghdr msg_sys;
 	struct socket *sock;
+	int ret;
 
 	if (forbid_cmsg_compat && (flags & MSG_CMSG_COMPAT))
 		return -EINVAL;
 
 	CLASS(fd, f)(fd);
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_WRITE, &ret);
+	if (!sock)
+		return ret;
 
 	return ___sys_sendmsg(sock, msg, &msg_sys, flags, NULL, 0);
 }
@@ -2746,11 +2767,9 @@ int __sys_sendmmsg(int fd, struct mmsghdr __user *mmsg, unsigned int vlen,
 
 	CLASS(fd, f)(fd);
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_WRITE, &err);
+	if (!sock)
+		return err;
 
 	used_address.name_len = UINT_MAX;
 	entry = mmsg;
@@ -2910,17 +2929,16 @@ long __sys_recvmsg(int fd, struct user_msghdr __user *msg, unsigned int flags,
 {
 	struct msghdr msg_sys;
 	struct socket *sock;
+	int ret;
 
 	if (forbid_cmsg_compat && (flags & MSG_CMSG_COMPAT))
 		return -EINVAL;
 
 	CLASS(fd, f)(fd);
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_READ, &ret);
+	if (!sock)
+		return ret;
 
 	return ___sys_recvmsg(sock, msg, &msg_sys, flags, 0);
 }
@@ -2956,11 +2974,9 @@ static int do_recvmmsg(int fd, struct mmsghdr __user *mmsg,
 
 	CLASS(fd, f)(fd);
 
-	if (fd_empty(f))
-		return -EBADF;
-	sock = sock_from_file(fd_file(f));
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = sockfd_lookup_file_perm(f, MAY_READ, &err);
+	if (!sock)
+		return err;
 
 	if (likely(!(flags & MSG_ERRQUEUE))) {
 		err = sock_error(sock->sk);

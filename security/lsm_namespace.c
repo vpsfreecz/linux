@@ -441,11 +441,26 @@ static struct user_namespace *lsmns_owner(struct ns_common *ns)
 	return to_lsm_ns(ns)->user_ns;
 }
 
+static bool lsmns_contains(const struct lsm_namespace *ancestor,
+			   const struct lsm_namespace *ns)
+{
+	while (ns) {
+		if (ns == ancestor)
+			return true;
+		ns = ns->parent;
+	}
+
+	return false;
+}
+
 static struct ns_common *lsmns_get_parent(struct ns_common *ns)
 {
 	struct lsm_namespace *parent = to_lsm_ns(ns)->parent;
+	struct lsm_namespace *caller_ns = current_lsm_ns();
 
 	if (!parent)
+		return ERR_PTR(-EPERM);
+	if (!caller_ns || !lsmns_contains(caller_ns, parent))
 		return ERR_PTR(-EPERM);
 
 	return &get_lsm_ns(parent)->ns;

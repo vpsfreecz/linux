@@ -366,7 +366,7 @@ static int fastrpc_map_lookup(struct fastrpc_user *fl, int fd,
 	struct dma_buf *buf;
 	int ret = -ENOENT;
 
-	buf = dma_buf_get(fd);
+	buf = dma_buf_get_with_perm(fd, MAY_READ);
 	if (IS_ERR(buf))
 		return PTR_ERR(buf);
 
@@ -764,7 +764,7 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 
 	map->fl = fl;
 	map->fd = fd;
-	map->buf = dma_buf_get(fd);
+	map->buf = dma_buf_get_with_perm(fd, MAY_READ | MAY_WRITE);
 	if (IS_ERR(map->buf)) {
 		err = PTR_ERR(map->buf);
 		goto get_err;

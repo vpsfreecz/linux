@@ -56,6 +56,7 @@
 #include <linux/module.h>
 #include <linux/reboot.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/compat.h>
 #include <linux/delay.h>
 #include <linux/raid/md_p.h>
@@ -7526,7 +7527,13 @@ static int set_bitmap_file(struct mddev *mddev, int fd)
 			pr_warn("%s: error: bitmap file must open for write\n",
 				mdname(mddev));
 			err = -EBADF;
-		} else if (atomic_read(&inode->i_writecount) != 1) {
+		} else {
+			err = security_file_permission(f, MAY_WRITE);
+			if (err)
+				pr_warn("%s: error: permission denied for bitmap file\n",
+					mdname(mddev));
+		}
+		if (!err && atomic_read(&inode->i_writecount) != 1) {
 			pr_warn("%s: error: bitmap file is already in use\n",
 				mdname(mddev));
 			err = -EBUSY;

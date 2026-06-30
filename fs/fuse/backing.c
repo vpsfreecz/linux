@@ -8,6 +8,7 @@
 #include "fuse_i.h"
 
 #include <linux/file.h>
+#include <linux/security.h>
 
 struct fuse_backing *fuse_backing_get(struct fuse_backing *fb)
 {
@@ -84,6 +85,7 @@ int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 	struct file *file;
 	struct super_block *backing_sb;
 	struct fuse_backing *fb = NULL;
+	int acc_mode = 0;
 	int res;
 
 	pr_debug("%s: fd=%d flags=0x%x\n", __func__, map->fd, map->flags);
@@ -110,6 +112,17 @@ int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 	backing_sb = file_inode(file)->i_sb;
 	res = -ELOOP;
 	if (backing_sb->s_stack_depth >= fc->max_stack_depth)
+		goto out_fput;
+
+	if (file->f_mode & FMODE_READ)
+		acc_mode |= MAY_READ;
+	if (file->f_mode & FMODE_WRITE)
+		acc_mode |= MAY_WRITE;
+	res = -EBADF;
+	if (!acc_mode)
+		goto out_fput;
+	res = security_file_permission(file, acc_mode);
+	if (res)
 		goto out_fput;
 
 	fb = kmalloc(sizeof(struct fuse_backing), GFP_KERNEL);

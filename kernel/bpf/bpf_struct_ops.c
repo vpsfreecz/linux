@@ -13,6 +13,7 @@
 #include <linux/btf_ids.h>
 #include <linux/rcupdate_wait.h>
 #include <linux/poll.h>
+#include <linux/security.h>
 
 struct bpf_struct_ops_value {
 	struct bpf_struct_ops_common_value common;
@@ -1324,6 +1325,9 @@ static __poll_t bpf_struct_ops_map_link_poll(struct file *file,
 					     struct poll_table_struct *pts)
 {
 	struct bpf_struct_ops_link *st_link = file->private_data;
+
+	if (security_file_permission(file, MAY_READ))
+		return EPOLLERR;
 
 	poll_wait(file, &st_link->wait_hup, pts);
 

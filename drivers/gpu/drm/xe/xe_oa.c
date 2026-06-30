@@ -7,6 +7,7 @@
 #include <linux/delay.h>
 #include <linux/nospec.h>
 #include <linux/poll.h>
+#include <linux/security.h>
 
 #include <drm/drm_drv.h>
 #include <drm/drm_managed.h>
@@ -1622,6 +1623,25 @@ static long xe_oa_ioctl(struct file *file,
 {
 	struct xe_oa_stream *stream = file->private_data;
 	long ret;
+	int mask;
+
+	switch (cmd) {
+	case DRM_XE_OBSERVATION_IOCTL_STATUS:
+	case DRM_XE_OBSERVATION_IOCTL_INFO:
+		mask = MAY_READ;
+		break;
+	case DRM_XE_OBSERVATION_IOCTL_ENABLE:
+	case DRM_XE_OBSERVATION_IOCTL_DISABLE:
+	case DRM_XE_OBSERVATION_IOCTL_CONFIG:
+		mask = MAY_WRITE;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = security_file_permission(file, mask);
+	if (ret)
+		return ret;
 
 	mutex_lock(&stream->stream_lock);
 	ret = xe_oa_ioctl_locked(stream, cmd, arg);

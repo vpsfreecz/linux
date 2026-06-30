@@ -396,9 +396,14 @@ static long fcntl_set_rw_hint(struct file *file, unsigned long arg)
 static long f_dupfd_query(int fd, struct file *filp)
 {
 	CLASS(fd_raw, f)(fd);
+	long ret;
 
 	if (fd_empty(f))
 		return -EBADF;
+
+	ret = security_file_use(fd_file(f));
+	if (ret)
+		return ret;
 
 	/*
 	 * We can do the 'fdput()' immediately, as the only thing that

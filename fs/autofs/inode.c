@@ -6,6 +6,7 @@
 
 #include <linux/seq_file.h>
 #include <linux/pagemap.h>
+#include <linux/security.h>
 
 #include "autofs_i.h"
 
@@ -169,6 +170,12 @@ static int autofs_parse_fd(struct fs_context *fc, struct autofs_sb_info *sbi,
 	if (!pipe) {
 		errorf(fc, "could not open pipe file descriptor");
 		return -EBADF;
+	}
+
+	ret = security_file_permission(pipe, MAY_WRITE);
+	if (ret) {
+		fput(pipe);
+		return ret;
 	}
 
 	ret = autofs_check_pipe(pipe);

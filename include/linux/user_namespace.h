@@ -217,6 +217,7 @@ extern bool userns_may_setgroups(const struct user_namespace *ns);
 extern bool in_userns(const struct user_namespace *ancestor,
 		       const struct user_namespace *child);
 extern bool current_in_userns(const struct user_namespace *target_ns);
+extern bool userns_current_boundary_can_see(const struct user_namespace *target_ns);
 struct ns_common *ns_get_owner(struct ns_common *ns);
 #else
 
@@ -254,6 +255,11 @@ static inline bool in_userns(const struct user_namespace *ancestor,
 }
 
 static inline bool current_in_userns(const struct user_namespace *target_ns)
+{
+	return true;
+}
+
+static inline bool userns_current_boundary_can_see(const struct user_namespace *target_ns)
 {
 	return true;
 }

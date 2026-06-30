@@ -1609,7 +1609,12 @@ int amdgpu_cs_fence_to_handle_ioctl(struct drm_device *dev, void *data,
 			return -ENOMEM;
 		}
 
-		fd_install(fd, sync_file->file);
+		r = sync_file_install(sync_file, fd);
+		if (r) {
+			fput(sync_file->file);
+			put_unused_fd(fd);
+			return r;
+		}
 		info->out.handle = fd;
 		return 0;
 

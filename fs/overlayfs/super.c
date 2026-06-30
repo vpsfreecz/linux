@@ -18,6 +18,7 @@
 #include <linux/file.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
+#include <linux/security.h>
 #include "overlayfs.h"
 #include "params.h"
 
@@ -1356,6 +1357,42 @@ static struct dentry *ovl_get_root(struct super_block *sb,
 	return root;
 }
 
+static int ovl_security_set_overlayfs_context(struct super_block *sb,
+					      struct ovl_fs *ofs,
+					      const struct ovl_fs_context *ctx)
+{
+	struct path layer;
+	int err;
+
+	if (ovl_upper_mnt(ofs)) {
+		err = security_sb_set_overlayfs_context(sb, &ctx->upper);
+		if (err)
+			return err;
+
+		if (ctx->work.mnt && ctx->work.dentry) {
+			err = security_sb_set_overlayfs_context(sb, &ctx->work);
+			if (err)
+				return err;
+		}
+
+		if (ofs->workdir) {
+			layer.mnt = ctx->work.mnt;
+			layer.dentry = ofs->workdir;
+			err = security_sb_set_overlayfs_context(sb, &layer);
+			if (err)
+				return err;
+		}
+	}
+
+	for (size_t i = 0; i < ctx->nr; i++) {
+		err = security_sb_set_overlayfs_context(sb, &ctx->lower[i].path);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
 static void ovl_set_d_op(struct super_block *sb)
 {
 #if IS_ENABLED(CONFIG_UNICODE)
@@ -1503,6 +1540,10 @@ int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 	}
 
 	err = ovl_check_overlapping_layers(sb, ofs);
+	if (err)
+		goto out_free_oe;
+
+	err = ovl_security_set_overlayfs_context(sb, ofs, ctx);
 	if (err)
 		goto out_free_oe;
 

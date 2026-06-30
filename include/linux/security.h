@@ -58,6 +58,7 @@ struct fown_struct;
 struct file_operations;
 struct msg_msg;
 struct xattr;
+struct syslog_namespace;
 struct kernfs_node;
 struct xfrm_sec_ctx;
 struct mm_struct;
@@ -353,7 +354,7 @@ int security_capable(const struct cred *cred,
 		       unsigned int opts);
 int security_quotactl(int cmds, int type, int id, const struct super_block *sb);
 int security_quota_on(struct dentry *dentry);
-int security_syslog(int type);
+int security_syslog(int type, const struct syslog_namespace *ns);
 int security_settime64(const struct timespec64 *ts, const struct timezone *tz);
 int security_vm_enough_memory_mm(struct mm_struct *mm, long pages);
 int security_bprm_creds_for_exec(struct linux_binprm *bprm);
@@ -382,6 +383,8 @@ int security_sb_set_mnt_opts(struct super_block *sb,
 				void *mnt_opts,
 				unsigned long kern_flags,
 				unsigned long *set_kern_flags);
+int security_sb_set_overlayfs_context(struct super_block *sb,
+				      const struct path *layer);
 int security_sb_clone_mnt_opts(const struct super_block *oldsb,
 				struct super_block *newsb,
 				unsigned long kern_flags,
@@ -470,6 +473,7 @@ int security_inode_setintegrity(const struct inode *inode,
 int security_kernfs_init_security(struct kernfs_node *kn_dir,
 				  struct kernfs_node *kn);
 int security_file_permission(struct file *file, int mask);
+int security_file_use(struct file *file);
 int security_file_alloc(struct file *file);
 void security_file_release(struct file *file);
 void security_file_free(struct file *file);
@@ -486,6 +490,7 @@ int security_file_fcntl(struct file *file, unsigned int cmd, unsigned long arg);
 void security_file_set_fowner(struct file *file);
 int security_file_send_sigiotask(struct task_struct *tsk,
 				 struct fown_struct *fown, int sig);
+int security_file_receive_cred(const struct cred *cred, struct file *file);
 int security_file_receive(struct file *file);
 int security_file_open(struct file *file);
 int security_file_post_open(struct file *file, int mask);
@@ -716,7 +721,7 @@ static inline int security_quota_on(struct dentry *dentry)
 	return 0;
 }
 
-static inline int security_syslog(int type)
+static inline int security_syslog(int type, const struct syslog_namespace *ns)
 {
 	return 0;
 }
@@ -840,6 +845,12 @@ static inline int security_sb_set_mnt_opts(struct super_block *sb,
 					   void *mnt_opts,
 					   unsigned long kern_flags,
 					   unsigned long *set_kern_flags)
+{
+	return 0;
+}
+
+static inline int security_sb_set_overlayfs_context(struct super_block *sb,
+						    const struct path *layer)
 {
 	return 0;
 }
@@ -1140,6 +1151,11 @@ static inline int security_file_permission(struct file *file, int mask)
 	return 0;
 }
 
+static inline int security_file_use(struct file *file)
+{
+	return 0;
+}
+
 static inline int security_file_alloc(struct file *file)
 {
 	return 0;
@@ -1201,6 +1217,12 @@ static inline void security_file_set_fowner(struct file *file)
 static inline int security_file_send_sigiotask(struct task_struct *tsk,
 					       struct fown_struct *fown,
 					       int sig)
+{
+	return 0;
+}
+
+static inline int security_file_receive_cred(const struct cred *cred,
+					     struct file *file)
 {
 	return 0;
 }

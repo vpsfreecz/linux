@@ -25,6 +25,7 @@
 #include <linux/mm.h>
 #include <linux/poll.h>
 #include <linux/sched/signal.h>
+#include <linux/security.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/iio-opaque.h>
@@ -1683,7 +1684,11 @@ static int iio_buffer_attach_dmabuf(struct iio_dev_buffer_pair *ib,
 	spin_lock_init(&priv->lock);
 	priv->context = dma_fence_context_alloc(1);
 
-	dmabuf = dma_buf_get(fd);
+	priv->dir = buffer->direction == IIO_BUFFER_DIRECTION_IN ?
+		DMA_FROM_DEVICE : DMA_TO_DEVICE;
+
+	dmabuf = dma_buf_get_with_perm(
+		fd, dma_buf_file_perm_from_dma_dir(priv->dir));
 	if (IS_ERR(dmabuf)) {
 		err = PTR_ERR(dmabuf);
 		goto err_free_priv;
@@ -1698,9 +1703,6 @@ static int iio_buffer_attach_dmabuf(struct iio_dev_buffer_pair *ib,
 	err = iio_dma_resv_lock(dmabuf, nonblock);
 	if (err)
 		goto err_dmabuf_detach;
-
-	priv->dir = buffer->direction == IIO_BUFFER_DIRECTION_IN
-		? DMA_FROM_DEVICE : DMA_TO_DEVICE;
 
 	priv->sgt = dma_buf_map_attachment(attach, priv->dir);
 	if (IS_ERR(priv->sgt)) {
@@ -1776,7 +1778,7 @@ static int iio_buffer_detach_dmabuf(struct iio_dev_buffer_pair *ib,
 	if (copy_from_user(&dmabuf_fd, user_req, sizeof(dmabuf_fd)))
 		return -EFAULT;
 
-	dmabuf = dma_buf_get(dmabuf_fd);
+	dmabuf = dma_buf_get_with_perm(dmabuf_fd, MAY_READ);
 	if (IS_ERR(dmabuf))
 		return PTR_ERR(dmabuf);
 
@@ -1847,7 +1849,11 @@ static int iio_buffer_enqueue_dmabuf(struct iio_dev_buffer_pair *ib,
 	if (cyclic && buffer->direction != IIO_BUFFER_DIRECTION_OUT)
 		return -EINVAL;
 
-	dmabuf = dma_buf_get(iio_dmabuf.fd);
+	dmabuf = dma_buf_get_with_perm(
+		iio_dmabuf.fd,
+		dma_buf_file_perm_from_dma_dir(
+			buffer->direction == IIO_BUFFER_DIRECTION_IN ?
+				DMA_FROM_DEVICE : DMA_TO_DEVICE));
 	if (IS_ERR(dmabuf))
 		return PTR_ERR(dmabuf);
 
@@ -1990,6 +1996,20 @@ static long iio_buffer_chrdev_ioctl(struct file *filp,
 	struct iio_dev_buffer_pair *ib = filp->private_data;
 	void __user *_arg = (void __user *)arg;
 	bool nonblock = filp->f_flags & O_NONBLOCK;
+	int ret;
+
+	switch (cmd) {
+	case IIO_BUFFER_DMABUF_ATTACH_IOCTL:
+	case IIO_BUFFER_DMABUF_DETACH_IOCTL:
+	case IIO_BUFFER_DMABUF_ENQUEUE_IOCTL:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = security_file_permission(filp, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case IIO_BUFFER_DMABUF_ATTACH_IOCTL:
@@ -1998,9 +2018,9 @@ static long iio_buffer_chrdev_ioctl(struct file *filp,
 		return iio_buffer_detach_dmabuf(ib, _arg, nonblock);
 	case IIO_BUFFER_DMABUF_ENQUEUE_IOCTL:
 		return iio_buffer_enqueue_dmabuf(ib, _arg, nonblock);
-	default:
-		return -EINVAL;
 	}
+
+	return -EINVAL;
 }
 
 static const struct file_operations iio_buffer_chrdev_fileops = {
@@ -2081,8 +2101,13 @@ error_iio_dev_put:
 static long iio_device_buffer_ioctl(struct iio_dev *indio_dev, struct file *filp,
 				    unsigned int cmd, unsigned long arg)
 {
+	int ret;
+
 	switch (cmd) {
 	case IIO_BUFFER_GET_FD_IOCTL:
+		ret = security_file_permission(filp, MAY_WRITE);
+		if (ret)
+			return ret;
 		return iio_device_buffer_getfd(indio_dev, arg);
 	default:
 		return IIO_IOCTL_UNHANDLED;

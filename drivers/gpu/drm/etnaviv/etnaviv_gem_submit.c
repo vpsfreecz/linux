@@ -608,7 +608,11 @@ int etnaviv_ioctl_gem_submit(struct drm_device *dev, void *data,
 			 */
 			goto err_submit_put;
 		}
-		fd_install(out_fence_fd, sync_file->file);
+		ret = sync_file_install(sync_file, out_fence_fd);
+		if (ret) {
+			fput(sync_file->file);
+			goto err_submit_put;
+		}
 	}
 
 	args->fence_fd = out_fence_fd;

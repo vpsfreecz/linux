@@ -582,6 +582,22 @@ void dma_buf_unpin(struct dma_buf_attachment *attach);
 struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info);
 
 int dma_buf_fd(struct dma_buf *dmabuf, int flags);
+static inline int dma_buf_file_perm_from_dma_dir(enum dma_data_direction dir)
+{
+	switch (dir) {
+	case DMA_TO_DEVICE:
+		return MAY_READ;
+	case DMA_FROM_DEVICE:
+		return MAY_WRITE;
+	case DMA_BIDIRECTIONAL:
+		return MAY_READ | MAY_WRITE;
+	case DMA_NONE:
+	default:
+		return MAY_READ;
+	}
+}
+
+struct dma_buf *dma_buf_get_with_perm(int fd, int mask);
 struct dma_buf *dma_buf_get(int fd);
 void dma_buf_put(struct dma_buf *dmabuf);
 

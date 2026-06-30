@@ -672,8 +672,13 @@ struct watch_queue *get_watch_queue(int fd)
 	struct pipe_inode_info *pipe;
 	struct watch_queue *wqueue = ERR_PTR(-EINVAL);
 	CLASS(fd, f)(fd);
+	int ret;
 
 	if (!fd_empty(f)) {
+		ret = security_file_permission(fd_file(f), MAY_WRITE);
+		if (ret)
+			return ERR_PTR(ret);
+
 		pipe = get_pipe_info(fd_file(f), false);
 		if (pipe && pipe->watch_queue) {
 			wqueue = pipe->watch_queue;

@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 #include <linux/pci.h>
 #include <linux/pm_runtime.h>
+#include <linux/security.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/vfio.h>
@@ -449,6 +450,10 @@ static long virtiovf_precopy_ioctl(struct file *filp, unsigned int cmd,
 
 	if (cmd != VFIO_MIG_GET_PRECOPY_INFO)
 		return -ENOTTY;
+
+	ret = security_file_permission(filp, MAY_READ);
+	if (ret)
+		return ret;
 
 	minsz = offsetofend(struct vfio_precopy_info, dirty_bytes);
 	if (copy_from_user(&info, (void __user *)arg, minsz))

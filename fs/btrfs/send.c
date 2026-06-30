@@ -7,6 +7,7 @@
 #include <linux/falloc.h>
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/sort.h>
 #include <linux/mount.h>
 #include <linux/xattr.h>
@@ -8107,6 +8108,9 @@ long btrfs_ioctl_send(struct btrfs_root *send_root, const struct btrfs_ioctl_sen
 		ret = -EBADF;
 		goto out;
 	}
+	ret = security_file_permission(sctx->send_filp, MAY_WRITE);
+	if (ret)
+		goto out;
 
 	sctx->send_root = send_root;
 	sctx->clone_roots_cnt = arg->clone_sources_count;

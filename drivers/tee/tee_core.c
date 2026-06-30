@@ -11,6 +11,7 @@
 #include <linux/idr.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/tee_core.h>
 #include <linux/uaccess.h>
@@ -972,10 +973,42 @@ out:
 	return rc;
 }
 
+static int tee_ioctl_permission(struct file *filp, unsigned int cmd)
+{
+	int mask;
+
+	switch (cmd) {
+	case TEE_IOC_VERSION:
+		mask = MAY_READ;
+		break;
+	case TEE_IOC_SHM_ALLOC:
+	case TEE_IOC_SHM_REGISTER:
+	case TEE_IOC_SHM_REGISTER_FD:
+	case TEE_IOC_OPEN_SESSION:
+	case TEE_IOC_INVOKE:
+	case TEE_IOC_OBJECT_INVOKE:
+	case TEE_IOC_CANCEL:
+	case TEE_IOC_CLOSE_SESSION:
+	case TEE_IOC_SUPPL_RECV:
+	case TEE_IOC_SUPPL_SEND:
+		mask = MAY_WRITE;
+		break;
+	default:
+		return 0;
+	}
+
+	return security_file_permission(filp, mask);
+}
+
 static long tee_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct tee_context *ctx = filp->private_data;
 	void __user *uarg = (void __user *)arg;
+	int ret;
+
+	ret = tee_ioctl_permission(filp, cmd);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case TEE_IOC_VERSION:

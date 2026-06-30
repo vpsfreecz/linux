@@ -146,6 +146,8 @@ static bool io_uring_try_cancel_requests(struct io_ring_ctx *ctx,
 					 bool is_sqpoll_thread);
 
 static void io_queue_sqe(struct io_kiocb *req, unsigned int extra_flags);
+static int io_uring_enter_file_perm(struct file *file, u32 to_submit,
+				    unsigned int flags);
 static void __io_req_caches_free(struct io_ring_ctx *ctx);
 
 static __read_mostly DEFINE_STATIC_KEY_FALSE(io_key_has_sqarray);
@@ -2924,7 +2926,20 @@ out:
 static __poll_t io_uring_poll(struct file *file, poll_table *wait)
 {
 	struct io_ring_ctx *ctx = file->private_data;
+	__poll_t requested = poll_requested_events(wait);
 	__poll_t mask = 0;
+	int perm = 0;
+
+	if (requested & (EPOLLIN | EPOLLRDNORM | EPOLLRDBAND | EPOLLPRI |
+			 EPOLLRDHUP | EPOLLMSG))
+		perm |= MAY_READ;
+	if (requested & (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND))
+		perm |= MAY_WRITE;
+	if (!perm)
+		perm = MAY_READ | MAY_WRITE;
+
+	if (security_file_permission(file, perm))
+		return EPOLLERR;
 
 	if (unlikely(!ctx->poll_activated))
 		io_activate_pollwq(ctx);
@@ -3486,6 +3501,10 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 	}
 
 	ctx = file->private_data;
+	ret = io_uring_enter_file_perm(file, to_submit, flags);
+	if (ret)
+		goto out;
+
 	ret = -EBADFD;
 	if (unlikely(ctx->flags & IORING_SETUP_R_DISABLED))
 		goto out;
@@ -3588,7 +3607,7 @@ static const struct file_operations io_uring_fops = {
 #endif
 };
 
-bool io_is_uring_fops(struct file *file)
+bool io_is_uring_fops(const struct file *file)
 {
 	return file->f_op == &io_uring_fops;
 }
@@ -3661,6 +3680,21 @@ static int io_uring_install_fd(struct file *file)
 		return fd;
 	fd_install(fd, file);
 	return fd;
+}
+
+static int io_uring_enter_file_perm(struct file *file, u32 to_submit,
+				    unsigned int flags)
+{
+	int mask = 0;
+
+	if (to_submit || (flags & IORING_ENTER_SQ_WAKEUP))
+		mask |= MAY_WRITE;
+	if (flags & (IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAIT))
+		mask |= MAY_READ;
+	if (!mask)
+		return 0;
+
+	return security_file_permission(file, mask);
 }
 
 /*

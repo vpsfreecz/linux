@@ -9,6 +9,7 @@
 #include <linux/file.h>
 #include <linux/iommu.h>
 #include <linux/platform_device.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/xarray.h>
 #include <uapi/linux/iommufd.h>
@@ -1419,6 +1420,7 @@ static const struct file_operations iommfd_test_staccess_fops;
 static struct selftest_access *iommufd_access_get(int fd)
 {
 	struct file *file;
+	int ret;
 
 	file = fget(fd);
 	if (!file)
@@ -1427,6 +1429,11 @@ static struct selftest_access *iommufd_access_get(int fd)
 	if (file->f_op != &iommfd_test_staccess_fops) {
 		fput(file);
 		return ERR_PTR(-EBADFD);
+	}
+	ret = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (ret) {
+		fput(file);
+		return ERR_PTR(ret);
 	}
 	return file->private_data;
 }

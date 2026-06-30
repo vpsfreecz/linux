@@ -206,6 +206,7 @@ static int bpf_iter_attach_task(struct bpf_prog *prog,
 				union bpf_iter_link_info *linfo,
 				struct bpf_iter_aux_info *aux)
 {
+	struct task_struct *task;
 	unsigned int flags;
 	struct pid *pid;
 	pid_t tgid;
@@ -229,7 +230,23 @@ static int bpf_iter_attach_task(struct bpf_prog *prog,
 		if (IS_ERR(pid))
 			return PTR_ERR(pid);
 
+		task = get_pid_task(pid, PIDTYPE_PID);
+		if (!task) {
+			put_pid(pid);
+			return -ESRCH;
+		}
+		if (!bpf_token_current_container_task_allowed(task)) {
+			put_task_struct(task);
+			put_pid(pid);
+			return -EACCES;
+		}
+		put_task_struct(task);
+
 		tgid = pid_nr_ns(pid, task_active_pid_ns(current));
+		if (!tgid) {
+			put_pid(pid);
+			return -ESRCH;
+		}
 		aux->task.pid = tgid;
 		put_pid(pid);
 	}

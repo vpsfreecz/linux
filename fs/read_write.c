@@ -1373,6 +1373,10 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 		if (fd_file(out)->f_flags & O_NONBLOCK)
 			fl |= SPLICE_F_NONBLOCK;
 
+		retval = security_file_permission(fd_file(out), MAY_WRITE);
+		if (retval < 0)
+			return retval;
+
 		retval = splice_file_to_pipe(fd_file(in), opipe, &pos, count, fl);
 	}
 

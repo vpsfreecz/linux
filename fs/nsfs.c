@@ -229,6 +229,8 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
 		if (ns->ns_type != CLONE_NEWUSER)
 			return -EINVAL;
 		user_ns = container_of(ns, struct user_namespace, ns);
+		if (!userns_current_boundary_can_see(user_ns))
+			return -EPERM;
 		argp = (uid_t __user *) arg;
 		uid = from_kuid_munged(current_user_ns(), user_ns->owner);
 		return put_user(uid, argp);
@@ -244,6 +246,8 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
 
 		ret = -ESRCH;
 		pid_ns = container_of(ns, struct pid_namespace, ns);
+		if (!pidns_is_ancestor(pid_ns, task_active_pid_ns(current)))
+			return -EPERM;
 
 		guard(rcu)();
 
@@ -286,6 +290,9 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
 		__u64 id;
 
 		idp = (__u64 __user *)arg;
+		if (ns->ns_type == CLONE_NEWNS &&
+		    !mnt_ns_current_boundary_can_see(to_mnt_ns(ns)))
+			return -EPERM;
 		id = ns->ns_id;
 		return put_user(id, idp);
 	}
@@ -307,6 +314,9 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
 		if (usize < MNT_NS_INFO_SIZE_VER0)
 			return -EINVAL;
 
+		if (!mnt_ns_current_boundary_can_see(to_mnt_ns(ns)))
+			return -EPERM;
+
 		return copy_ns_info_to_user(to_mnt_ns(ns), uinfo, usize, &kinfo);
 	}
 	case _IOC_NR(NS_MNT_GET_PREV):
@@ -324,6 +334,9 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
 
 		if (usize < MNT_NS_INFO_SIZE_VER0)
 			return -EINVAL;
+
+		if (!mnt_ns_current_boundary_can_see(to_mnt_ns(ns)))
+			return -EPERM;
 
 		mnt_ns = get_sequential_mnt_ns(to_mnt_ns(ns), previous);
 		if (IS_ERR(mnt_ns))

@@ -580,14 +580,18 @@ out:
 
 SYSCALL_DEFINE1(fchdir, unsigned int, fd)
 {
-	CLASS(fd_raw, f)(fd);
 	int error;
+	CLASS(fd_raw, f)(fd);
 
 	if (fd_empty(f))
 		return -EBADF;
 
 	if (!d_can_lookup(fd_file(f)->f_path.dentry))
 		return -ENOTDIR;
+
+	error = security_file_use(fd_file(f));
+	if (error)
+		return error;
 
 	error = file_permission(fd_file(f), MAY_EXEC | MAY_CHDIR);
 	if (!error)
@@ -669,10 +673,15 @@ int vfs_fchmod(struct file *file, umode_t mode)
 
 SYSCALL_DEFINE2(fchmod, unsigned int, fd, umode_t, mode)
 {
+	int error;
 	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
 		return -EBADF;
+
+	error = security_file_use(fd_file(f));
+	if (error)
+		return error;
 
 	return vfs_fchmod(fd_file(f), mode);
 }
@@ -863,10 +872,15 @@ int vfs_fchown(struct file *file, uid_t user, gid_t group)
 
 int ksys_fchown(unsigned int fd, uid_t user, gid_t group)
 {
+	int error;
 	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
 		return -EBADF;
+
+	error = security_file_use(fd_file(f));
+	if (error)
+		return error;
 
 	return vfs_fchown(fd_file(f), user, group);
 }

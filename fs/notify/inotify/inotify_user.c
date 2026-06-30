@@ -141,6 +141,9 @@ static __poll_t inotify_poll(struct file *file, poll_table *wait)
 	struct fsnotify_group *group = file->private_data;
 	__poll_t ret = 0;
 
+	if (security_file_permission(file, MAY_READ))
+		return EPOLLERR;
+
 	poll_wait(file, &group->notification_waitq, wait);
 	spin_lock(&group->notification_lock);
 	if (!fsnotify_notify_queue_is_empty(group))
@@ -762,6 +765,9 @@ SYSCALL_DEFINE3(inotify_add_watch, int, fd, const char __user *, pathname,
 	/* verify that this is indeed an inotify instance */
 	if (unlikely(fd_file(f)->f_op != &inotify_fops))
 		return -EINVAL;
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ret;
 
 	if (!(mask & IN_DONT_FOLLOW))
 		flags |= LOOKUP_FOLLOW;
@@ -787,6 +793,7 @@ SYSCALL_DEFINE2(inotify_rm_watch, int, fd, __s32, wd)
 {
 	struct fsnotify_group *group;
 	struct inotify_inode_mark *i_mark;
+	int ret;
 	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
@@ -795,6 +802,9 @@ SYSCALL_DEFINE2(inotify_rm_watch, int, fd, __s32, wd)
 	/* verify that this is indeed an inotify instance */
 	if (unlikely(fd_file(f)->f_op != &inotify_fops))
 		return -EINVAL;
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ret;
 
 	group = fd_file(f)->private_data;
 

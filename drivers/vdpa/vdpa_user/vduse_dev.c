@@ -24,6 +24,7 @@
 #include <linux/nospec.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/mm.h>
+#include <linux/security.h>
 #include <uapi/linux/vduse.h>
 #include <uapi/linux/vdpa.h>
 #include <uapi/linux/virtio_config.h>
@@ -933,6 +934,18 @@ static unsigned int perm_to_file_flags(u8 perm)
 	return flags;
 }
 
+static int perm_to_file_mask(unsigned int perm)
+{
+	int mask = 0;
+
+	if (perm & VDUSE_ACCESS_RO)
+		mask |= MAY_READ;
+	if (perm & VDUSE_ACCESS_WO)
+		mask |= MAY_WRITE;
+
+	return mask;
+}
+
 static int vduse_kickfd_setup(struct vduse_dev *dev,
 			struct vduse_vq_eventfd *eventfd)
 {
@@ -1151,6 +1164,33 @@ static void vduse_vq_update_effective_cpu(struct vduse_virtqueue *vq)
 	vq->irq_effective_cpu = curr_cpu;
 }
 
+static int vduse_dev_ioctl_permission(struct file *file, unsigned int cmd)
+{
+	int mask;
+
+	switch (cmd) {
+	case VDUSE_IOTLB_GET_FD:
+	case VDUSE_DEV_GET_FEATURES:
+	case VDUSE_VQ_GET_INFO:
+	case VDUSE_IOTLB_GET_INFO:
+		mask = MAY_READ;
+		break;
+	case VDUSE_DEV_SET_CONFIG:
+	case VDUSE_DEV_INJECT_CONFIG_IRQ:
+	case VDUSE_VQ_SETUP:
+	case VDUSE_VQ_SETUP_KICKFD:
+	case VDUSE_VQ_INJECT_IRQ:
+	case VDUSE_IOTLB_REG_UMEM:
+	case VDUSE_IOTLB_DEREG_UMEM:
+		mask = MAY_WRITE;
+		break;
+	default:
+		return 0;
+	}
+
+	return security_file_permission(file, mask);
+}
+
 static long vduse_dev_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
@@ -1160,6 +1200,10 @@ static long vduse_dev_ioctl(struct file *file, unsigned int cmd,
 
 	if (unlikely(dev->broken))
 		return -EPERM;
+
+	ret = vduse_dev_ioctl_permission(file, cmd);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case VDUSE_IOTLB_GET_FD: {
@@ -1197,6 +1241,12 @@ static long vduse_dev_ioctl(struct file *file, unsigned int cmd,
 		ret = -EINVAL;
 		if (!f)
 			break;
+
+		ret = security_file_permission(f, perm_to_file_mask(entry.perm));
+		if (ret) {
+			fput(f);
+			break;
+		}
 
 		ret = -EFAULT;
 		if (copy_to_user(argp, &entry, sizeof(entry))) {
@@ -1899,12 +1949,36 @@ err:
 	return ret;
 }
 
+static int vduse_ioctl_permission(struct file *file, unsigned int cmd)
+{
+	int mask;
+
+	switch (cmd) {
+	case VDUSE_GET_API_VERSION:
+		mask = MAY_READ;
+		break;
+	case VDUSE_SET_API_VERSION:
+	case VDUSE_CREATE_DEV:
+	case VDUSE_DESTROY_DEV:
+		mask = MAY_WRITE;
+		break;
+	default:
+		return 0;
+	}
+
+	return security_file_permission(file, mask);
+}
+
 static long vduse_ioctl(struct file *file, unsigned int cmd,
 			unsigned long arg)
 {
 	int ret;
 	void __user *argp = (void __user *)arg;
 	struct vduse_control *control = file->private_data;
+
+	ret = vduse_ioctl_permission(file, cmd);
+	if (ret)
+		return ret;
 
 	mutex_lock(&vduse_lock);
 	switch (cmd) {

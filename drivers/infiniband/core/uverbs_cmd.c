@@ -37,6 +37,7 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 
 #include <linux/uaccess.h>
 
@@ -607,6 +608,9 @@ static int ib_uverbs_open_xrcd(struct uverbs_attr_bundle *attrs)
 			ret = -EBADF;
 			goto err_tree_mutex_unlock;
 		}
+		ret = security_file_permission(fd_file(f), MAY_READ);
+		if (ret)
+			goto err_tree_mutex_unlock;
 
 		inode = file_inode(fd_file(f));
 		xrcd = find_xrcd(ibudev, inode);

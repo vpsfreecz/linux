@@ -35,11 +35,13 @@
 #include <linux/memblock.h>
 #include <linux/pid_namespace.h>
 #include <linux/init_task.h>
+#include <linux/stat.h>
 #include <linux/syscalls.h>
 #include <linux/proc_ns.h>
 #include <linux/ns_common.h>
 #include <linux/refcount.h>
 #include <linux/anon_inodes.h>
+#include <linux/security.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/idr.h>
@@ -544,16 +546,24 @@ EXPORT_SYMBOL_GPL(find_ge_pid);
 struct pid *pidfd_get_pid(unsigned int fd, unsigned int *flags)
 {
 	CLASS(fd, f)(fd);
+	struct file *file;
 	struct pid *pid;
+	int ret;
 
 	if (fd_empty(f))
 		return ERR_PTR(-EBADF);
 
-	pid = pidfd_pid(fd_file(f));
-	if (!IS_ERR(pid)) {
-		get_pid(pid);
-		*flags = fd_file(f)->f_flags;
-	}
+	file = fd_file(f);
+	pid = pidfd_pid(file);
+	if (IS_ERR(pid))
+		return pid;
+
+	ret = security_file_permission(file, MAY_READ);
+	if (ret)
+		return ERR_PTR(ret);
+
+	get_pid(pid);
+	*flags = file->f_flags;
 	return pid;
 }
 
@@ -917,19 +927,20 @@ static int pidfd_getfd(struct pid *pid, int fd)
 SYSCALL_DEFINE3(pidfd_getfd, int, pidfd, int, fd,
 		unsigned int, flags)
 {
+	unsigned int f_flags;
 	struct pid *pid;
+	int ret;
 
 	/* flags is currently unused - make sure it's unset */
 	if (flags)
 		return -EINVAL;
 
-	CLASS(fd, f)(pidfd);
-	if (fd_empty(f))
-		return -EBADF;
-
-	pid = pidfd_pid(fd_file(f));
+	pid = pidfd_get_pid(pidfd, &f_flags);
 	if (IS_ERR(pid))
 		return PTR_ERR(pid);
 
-	return pidfd_getfd(pid, fd);
+	ret = pidfd_getfd(pid, fd);
+	put_pid(pid);
+
+	return ret;
 }

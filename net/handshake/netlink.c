@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/mm.h>
+#include <linux/security.h>
 
 #include <net/sock.h>
 #include <net/genetlink.h>
@@ -110,6 +111,10 @@ int handshake_nl_accept_doit(struct sk_buff *skb, struct genl_info *info)
 		goto out_status;
 
 	sock = req->hr_sk->sk_socket;
+	err = security_file_receive(sock->file);
+	if (err)
+		goto out_complete;
+
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
 		err = fd;
@@ -123,6 +128,7 @@ int handshake_nl_accept_doit(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	fd_install(fd, get_file(sock->file));
+	__receive_sock(sock->file);
 
 	trace_handshake_cmd_accept(net, req, req->hr_sk, fd);
 	return 0;

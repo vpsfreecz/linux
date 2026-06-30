@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
 #include <linux/errno.h>
+#include <linux/cred.h>
+#include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/nospec.h>
 #include <linux/io_uring.h>
@@ -70,6 +73,30 @@ static inline bool io_msg_need_remote(struct io_ring_ctx *target_ctx)
 	return target_ctx->task_complete;
 }
 
+static const struct cred *io_msg_get_target_cred(struct io_ring_ctx *target_ctx,
+						 struct file *target_file)
+{
+	struct task_struct *task = READ_ONCE(target_ctx->submitter_task);
+
+	if (task)
+		return get_task_cred(task);
+
+	return get_cred(target_file->f_cred);
+}
+
+static int io_msg_receive_file(struct io_ring_ctx *target_ctx,
+			       struct file *target_file,
+			       struct file *src_file)
+{
+	const struct cred *target_cred;
+	int ret;
+
+	target_cred = io_msg_get_target_cred(target_ctx, target_file);
+	ret = security_file_receive_cred(target_cred, src_file);
+	put_cred(target_cred);
+	return ret;
+}
+
 static void io_msg_tw_complete(struct io_kiocb *req, io_tw_token_t tw)
 {
 	struct io_ring_ctx *ctx = req->ctx;
@@ -103,7 +130,7 @@ static int io_msg_data_remote(struct io_ring_ctx *target_ctx,
 	struct io_kiocb *target;
 	u32 flags = 0;
 
-	target = kmem_cache_alloc(req_cachep, GFP_KERNEL | __GFP_NOWARN | __GFP_ZERO)  ;
+	target = kmem_cache_alloc(req_cachep, GFP_KERNEL | __GFP_NOWARN | __GFP_ZERO);
 	if (unlikely(!target))
 		return -ENOMEM;
 
@@ -179,6 +206,10 @@ static int io_msg_install_complete(struct io_kiocb *req, unsigned int issue_flag
 	struct io_msg *msg = io_kiocb_to_cmd(req, struct io_msg);
 	struct file *src_file = msg->src_file;
 	int ret;
+
+	ret = io_msg_receive_file(target_ctx, req->file, src_file);
+	if (ret < 0)
+		return ret;
 
 	if (unlikely(io_lock_external_ctx(target_ctx, issue_flags)))
 		return -EAGAIN;
@@ -289,6 +320,10 @@ int io_msg_ring(struct io_kiocb *req, unsigned int issue_flags)
 	if (!io_is_uring_fops(req->file))
 		goto done;
 
+	ret = security_file_permission(req->file, MAY_WRITE);
+	if (ret < 0)
+		goto done;
+
 	switch (msg->cmd) {
 	case IORING_MSG_DATA:
 		ret = io_msg_ring_data(req, issue_flags);
@@ -332,6 +367,11 @@ int io_uring_sync_msg_ring(struct io_uring_sqe *sqe)
 		return -EBADF;
 	if (!io_is_uring_fops(fd_file(f)))
 		return -EBADFD;
-	return  __io_msg_ring_data(fd_file(f)->private_data,
-				   &io_msg, IO_URING_F_UNLOCKED);
+
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ret;
+
+	return __io_msg_ring_data(fd_file(f)->private_data,
+				  &io_msg, IO_URING_F_UNLOCKED);
 }

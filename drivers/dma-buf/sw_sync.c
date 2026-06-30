@@ -377,7 +377,11 @@ static long sw_sync_ioctl_create_fence(struct sync_timeline *obj,
 		goto err;
 	}
 
-	fd_install(fd, sync_file->file);
+	err = sync_file_install(sync_file, fd);
+	if (err) {
+		fput(sync_file->file);
+		goto err;
+	}
 
 	return 0;
 

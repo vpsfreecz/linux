@@ -17,6 +17,7 @@
 #include <linux/overflow.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <uapi/linux/ntsync.h>
@@ -668,6 +669,30 @@ static long ntsync_obj_ioctl(struct file *file, unsigned int cmd,
 {
 	struct ntsync_obj *obj = file->private_data;
 	void __user *argp = (void __user *)parm;
+	int mask;
+	int ret;
+
+	switch (cmd) {
+	case NTSYNC_IOC_SEM_READ:
+	case NTSYNC_IOC_MUTEX_READ:
+	case NTSYNC_IOC_EVENT_READ:
+		mask = MAY_READ;
+		break;
+	case NTSYNC_IOC_SEM_RELEASE:
+	case NTSYNC_IOC_MUTEX_UNLOCK:
+	case NTSYNC_IOC_MUTEX_KILL:
+	case NTSYNC_IOC_EVENT_SET:
+	case NTSYNC_IOC_EVENT_RESET:
+	case NTSYNC_IOC_EVENT_PULSE:
+		mask = MAY_WRITE;
+		break;
+	default:
+		return -ENOIOCTLCMD;
+	}
+
+	ret = security_file_permission(file, mask);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case NTSYNC_IOC_SEM_RELEASE:
@@ -822,6 +847,10 @@ static struct ntsync_obj *get_obj(struct ntsync_device *dev, int fd)
 
 	obj = file->private_data;
 	if (obj->dev != dev) {
+		fput(file);
+		return NULL;
+	}
+	if (security_file_permission(file, MAY_READ | MAY_WRITE)) {
 		fput(file);
 		return NULL;
 	}
@@ -1179,6 +1208,22 @@ static long ntsync_char_ioctl(struct file *file, unsigned int cmd,
 {
 	struct ntsync_device *dev = file->private_data;
 	void __user *argp = (void __user *)parm;
+	int ret;
+
+	switch (cmd) {
+	case NTSYNC_IOC_CREATE_EVENT:
+	case NTSYNC_IOC_CREATE_MUTEX:
+	case NTSYNC_IOC_CREATE_SEM:
+	case NTSYNC_IOC_WAIT_ALL:
+	case NTSYNC_IOC_WAIT_ANY:
+		break;
+	default:
+		return -ENOIOCTLCMD;
+	}
+
+	ret = security_file_permission(file, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case NTSYNC_IOC_CREATE_EVENT:

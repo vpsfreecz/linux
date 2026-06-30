@@ -34,6 +34,9 @@
 #include <linux/mnt_idmapping.h>
 #include <linux/pidfs.h>
 #include <linux/nstree.h>
+#include <linux/syslog_namespace.h>
+#include <linux/tracing_namespace.h>
+#include <linux/lsm_namespace.h>
 
 #include "pnode.h"
 #include "internal.h"
@@ -2090,6 +2093,37 @@ struct ns_common *from_mnt_ns(struct mnt_namespace *mnt)
 	return &mnt->ns;
 }
 
+bool mnt_ns_current_boundary_can_see(const struct mnt_namespace *mntns)
+{
+	struct syslog_namespace *syslog_ns;
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tracing_ns;
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	struct lsm_namespace *lsm_ns;
+#endif
+
+	syslog_ns = current_syslog_ns();
+	if (syslog_ns && syslog_ns != &init_syslog_ns &&
+	    READ_ONCE(mntns->syslog_ns) != syslog_ns)
+		return false;
+
+#ifdef CONFIG_TRACING_NS
+	tracing_ns = current_tracing_ns();
+	if (tracing_ns != &init_tracing_ns &&
+	    READ_ONCE(mntns->tracing_ns) != tracing_ns)
+		return false;
+#endif
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	lsm_ns = current_lsm_ns();
+	if (lsm_ns != &init_lsm_ns && READ_ONCE(mntns->lsm_ns) != lsm_ns)
+		return false;
+#endif
+
+	return true;
+}
+
 struct mnt_namespace *get_sequential_mnt_ns(struct mnt_namespace *mntns, bool previous)
 {
 	struct ns_common *ns;
@@ -2108,6 +2142,9 @@ struct mnt_namespace *get_sequential_mnt_ns(struct mnt_namespace *mntns, bool pr
 		 * delay so accessing the mount namespace is not just
 		 * safe but all relevant members are still valid.
 		 */
+		if (!mnt_ns_current_boundary_can_see(mntns))
+			continue;
+
 		if (!ns_capable_noaudit(mntns->user_ns, CAP_SYS_ADMIN))
 			continue;
 
@@ -3055,6 +3092,35 @@ static struct file *open_detached_copy(struct path *path, bool recursive)
 	return file;
 }
 
+static int user_mount_path_at(int dfd, const char __user *filename,
+			      unsigned int flags, unsigned int lookup_flags,
+			      struct path *path)
+{
+	if ((flags & AT_EMPTY_PATH) && dfd >= 0) {
+		char c;
+
+		if (get_user(c, filename))
+			return -EFAULT;
+		if (!c) {
+			int ret;
+			CLASS(fd_raw, f)(dfd);
+
+			if (fd_empty(f))
+				return -EBADF;
+
+			ret = security_file_use(fd_file(f));
+			if (ret)
+				return ret;
+
+			*path = fd_file(f)->f_path;
+			path_get(path);
+			return 0;
+		}
+	}
+
+	return user_path_at(dfd, filename, lookup_flags, path);
+}
+
 static struct file *vfs_open_tree(int dfd, const char __user *filename, unsigned int flags)
 {
 	int ret;
@@ -3082,7 +3148,7 @@ static struct file *vfs_open_tree(int dfd, const char __user *filename, unsigned
 	if (detached && !may_mount())
 		return ERR_PTR(-EPERM);
 
-	ret = user_path_at(dfd, filename, lookup_flags, &path);
+	ret = user_mount_path_at(dfd, filename, flags, lookup_flags, &path);
 	if (unlikely(ret))
 		return ERR_PTR(ret);
 
@@ -4053,10 +4119,29 @@ static void dec_mnt_namespaces(struct ucounts *ucounts)
 
 static void free_mnt_ns(struct mnt_namespace *ns)
 {
+	mnt_ns_set_boundary_namespaces(ns, NULL, NULL, NULL);
 	if (!is_anon_ns(ns))
 		ns_common_free(ns);
 	dec_mnt_namespaces(ns->ucounts);
 	mnt_ns_tree_remove(ns);
+}
+
+void mnt_ns_set_boundary_namespaces(struct mnt_namespace *ns,
+				    struct syslog_namespace *syslog_ns,
+				    struct tracing_namespace *tracing_ns,
+				    struct lsm_namespace *lsm_ns)
+{
+	if (!ns)
+		return;
+
+	put_syslog_ns(ns->syslog_ns);
+	ns->syslog_ns = get_syslog_ns(syslog_ns);
+
+	put_tracing_ns(ns->tracing_ns);
+	ns->tracing_ns = get_tracing_ns(tracing_ns);
+
+	put_lsm_ns(ns->lsm_ns);
+	ns->lsm_ns = get_lsm_ns(lsm_ns);
 }
 
 /*
@@ -4101,6 +4186,8 @@ static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns, bool a
 	new_ns->mounts = RB_ROOT;
 	init_waitqueue_head(&new_ns->poll);
 	new_ns->user_ns = get_user_ns(user_ns);
+	mnt_ns_set_boundary_namespaces(new_ns, current_syslog_ns(),
+				       current_tracing_ns(), current_lsm_ns());
 	new_ns->ucounts = ucounts;
 	return new_ns;
 }
@@ -4324,6 +4411,10 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 	if (fd_file(f)->f_op != &fscontext_fops)
 		return -EINVAL;
 
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ret;
+
 	fc = fd_file(f)->private_data;
 
 	ret = mutex_lock_interruptible(&fc->uapi_mutex);
@@ -4461,6 +4552,10 @@ SYSCALL_DEFINE5(move_mount,
 		if (fd_empty(f_to))
 			return -EBADF;
 
+		ret = security_file_use(fd_file(f_to));
+		if (ret)
+			return ret;
+
 		to_path = fd_file(f_to)->f_path;
 		path_get(&to_path);
 	} else {
@@ -4486,6 +4581,10 @@ SYSCALL_DEFINE5(move_mount,
 		CLASS(fd_raw, f_from)(from_dfd);
 		if (fd_empty(f_from))
 			return -EBADF;
+
+		ret = security_file_use(fd_file(f_from));
+		if (ret)
+			return ret;
 
 		return vfs_move_mount(&fd_file(f_from)->f_path, &to_path, mflags);
 	}
@@ -4838,6 +4937,7 @@ static int build_mount_idmapped(const struct mount_attr *attr, size_t usize,
 {
 	struct ns_common *ns;
 	struct user_namespace *mnt_userns;
+	int ret;
 
 	if (!((attr->attr_set | attr->attr_clr) & MOUNT_ATTR_IDMAP))
 		return 0;
@@ -4867,6 +4967,10 @@ static int build_mount_idmapped(const struct mount_attr *attr, size_t usize,
 	if (fd_empty(f))
 		return -EBADF;
 
+	ret = security_file_permission(fd_file(f), MAY_READ);
+	if (ret)
+		return ret;
+
 	if (!proc_ns_file(fd_file(f)))
 		return -EINVAL;
 
@@ -4884,6 +4988,9 @@ static int build_mount_idmapped(const struct mount_attr *attr, size_t usize,
 	 */
 	mnt_userns = container_of(ns, struct user_namespace, ns);
 	if (mnt_userns == &init_user_ns)
+		return -EPERM;
+
+	if (!userns_current_boundary_can_see(mnt_userns))
 		return -EPERM;
 
 	/* We're not controlling the target namespace. */
@@ -5024,7 +5131,7 @@ SYSCALL_DEFINE5(mount_setattr, int, dfd, const char __user *, path,
 	if (err <= 0)
 		return err;
 
-	err = user_path_at(dfd, path, kattr.lookup_flags, &target);
+	err = user_mount_path_at(dfd, path, flags, kattr.lookup_flags, &target);
 	if (!err) {
 		err = do_mount_setattr(&target, &kattr);
 		path_put(&target);
@@ -5809,6 +5916,9 @@ SYSCALL_DEFINE4(statmount, const struct mnt_id_req __user *, req,
 	    !ns_capable_noaudit(ns->user_ns, CAP_SYS_ADMIN))
 		return -ENOENT;
 
+	if (!mnt_ns_current_boundary_can_see(ns))
+		return -EPERM;
+
 	ks = kmalloc(sizeof(*ks), GFP_KERNEL_ACCOUNT);
 	if (!ks)
 		return -ENOMEM;
@@ -5971,6 +6081,9 @@ SYSCALL_DEFINE4(listmount, const struct mnt_id_req __user *, req,
 	    !ns_capable_noaudit(kls.ns->user_ns, CAP_SYS_ADMIN))
 		return -ENOENT;
 
+	if (!mnt_ns_current_boundary_can_see(kls.ns))
+		return -EPERM;
+
 	/*
 	 * We only need to guard against mount topology changes as
 	 * listmount() doesn't care about any mount properties.
@@ -5990,6 +6103,13 @@ struct mnt_namespace init_mnt_ns = {
 	.ns.inum	= ns_init_inum(&init_mnt_ns),
 	.ns.ops		= &mntns_operations,
 	.user_ns	= &init_user_ns,
+	.syslog_ns	= &init_syslog_ns,
+#ifdef CONFIG_TRACING_NS
+	.tracing_ns	= &init_tracing_ns,
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	.lsm_ns		= &init_lsm_ns,
+#endif
 	.ns.__ns_ref	= REFCOUNT_INIT(1),
 	.ns.ns_type	= ns_common_type(&init_mnt_ns),
 	.passive	= REFCOUNT_INIT(1),
@@ -6262,6 +6382,9 @@ static int mntns_install(struct nsset *nsset, struct ns_common *ns)
 
 	if (is_anon_ns(mnt_ns))
 		return -EINVAL;
+
+	if (!mnt_ns_current_boundary_can_see(mnt_ns))
+		return -EPERM;
 
 	if (fs->users != 1)
 		return -EINVAL;

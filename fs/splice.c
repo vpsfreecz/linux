@@ -1314,6 +1314,17 @@ ssize_t do_splice(struct file *in, loff_t *off_in, struct file *out,
 	ipipe = get_pipe_info(in, true);
 	opipe = get_pipe_info(out, true);
 
+	if (ipipe) {
+		ret = security_file_permission(in, MAY_READ);
+		if (unlikely(ret < 0))
+			return ret;
+	}
+	if (opipe) {
+		ret = security_file_permission(out, MAY_WRITE);
+		if (unlikely(ret < 0))
+			return ret;
+	}
+
 	if (ipipe && opipe) {
 		if (off_in || off_out)
 			return -ESPIPE;
@@ -1598,6 +1609,11 @@ SYSCALL_DEFINE4(vmsplice, int, fd, const struct iovec __user *, uiov,
 		type = ITER_DEST;
 	else
 		return -EBADF;
+
+	error = security_file_permission(fd_file(f),
+					 type == ITER_SOURCE ? MAY_WRITE : MAY_READ);
+	if (error)
+		return error;
 
 	error = import_iovec(type, uiov, nr_segs,
 			     ARRAY_SIZE(iovstack), &iov, &iter);
@@ -1953,6 +1969,13 @@ ssize_t do_tee(struct file *in, struct file *out, size_t len,
 	 * copying the data.
 	 */
 	if (ipipe && opipe && ipipe != opipe) {
+		ret = security_file_permission(in, MAY_READ);
+		if (unlikely(ret < 0))
+			return ret;
+		ret = security_file_permission(out, MAY_WRITE);
+		if (unlikely(ret < 0))
+			return ret;
+
 		if ((in->f_flags | out->f_flags) & O_NONBLOCK)
 			flags |= SPLICE_F_NONBLOCK;
 

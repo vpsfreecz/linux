@@ -3,6 +3,7 @@
  * Copyright © 2017 Keith Packard <keithp@keithp.com>
  */
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/uaccess.h>
 
 #include <drm/drm_auth.h>
@@ -562,6 +563,10 @@ int drm_mode_create_lease_ioctl(struct drm_device *dev,
 	lessee_priv->is_master = 1;
 	lessee_priv->authenticated = 1;
 
+	ret = security_file_receive(lessee_file);
+	if (ret)
+		goto out_lessee_file;
+
 	/* Pass fd back to userspace */
 	drm_dbg_lease(dev, "Returning fd %d id %d\n", fd, lessee->lessee_id);
 	cl->fd = fd;
@@ -573,6 +578,9 @@ int drm_mode_create_lease_ioctl(struct drm_device *dev,
 	drm_master_put(&lessor);
 	drm_dbg_lease(dev, "drm_mode_create_lease_ioctl succeeded\n");
 	return 0;
+
+out_lessee_file:
+	fput(lessee_file);
 
 out_lessee:
 	drm_master_put(&lessee);

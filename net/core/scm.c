@@ -498,6 +498,14 @@ static void scm_pidfd_recv(struct msghdr *msg, struct scm_cookie *scm)
 		return;
 
 	pidfd = pidfd_prepare(scm->pid, PIDFD_STALE, &pidfd_file);
+	if (pidfd_file) {
+		if (security_file_receive(pidfd_file)) {
+			put_unused_fd(pidfd);
+			fput(pidfd_file);
+			msg->msg_flags |= MSG_CTRUNC;
+			return;
+		}
+	}
 
 	if (put_cmsg(msg, SOL_SOCKET, SCM_PIDFD, sizeof(int), &pidfd)) {
 		if (pidfd_file) {

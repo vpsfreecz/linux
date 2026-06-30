@@ -18,6 +18,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/security.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include <linux/statfs.h>
@@ -2004,8 +2005,15 @@ static int fuse_get_tree(struct fs_context *fsc)
 
 	fsc->s_fs_info = fm;
 
-	if (ctx->fd_present)
+	if (ctx->fd_present) {
 		ctx->file = fget(ctx->fd);
+		if (ctx->file) {
+			err = security_file_permission(ctx->file,
+						       MAY_READ | MAY_WRITE);
+			if (err)
+				goto out;
+		}
+	}
 
 	if (IS_ENABLED(CONFIG_BLOCK) && ctx->is_bdev) {
 		err = get_tree_bdev(fsc, fuse_fill_super);

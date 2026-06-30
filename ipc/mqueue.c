@@ -34,6 +34,7 @@
 #include <linux/nsproxy.h>
 #include <linux/pid.h>
 #include <linux/ipc_namespace.h>
+#include <linux/security.h>
 #include <linux/user_namespace.h>
 #include <linux/slab.h>
 #include <linux/sched/wake_q.h>
@@ -1096,6 +1097,10 @@ static int do_mq_timedsend(mqd_t mqdes, const char __user *u_msg_ptr,
 	if (unlikely(!(fd_file(f)->f_mode & FMODE_WRITE)))
 		return -EBADF;
 
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ret;
+
 	if (unlikely(msg_len > info->attr.mq_msgsize))
 		return -EMSGSIZE;
 
@@ -1195,6 +1200,10 @@ static int do_mq_timedreceive(mqd_t mqdes, char __user *u_msg_ptr,
 
 	if (unlikely(!(fd_file(f)->f_mode & FMODE_READ)))
 		return -EBADF;
+
+	ret = security_file_permission(fd_file(f), MAY_READ);
+	if (ret)
+		return ret;
 
 	/* checks if buffer is big enough */
 	if (unlikely(msg_len < info->attr.mq_msgsize))
@@ -1354,6 +1363,11 @@ retry:
 		ret = -EBADF;
 		goto out;
 	}
+
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		goto out;
+
 	info = MQUEUE_I(inode);
 
 	ret = 0;
@@ -1413,6 +1427,8 @@ static int do_mq_getsetattr(int mqdes, struct mq_attr *new, struct mq_attr *old)
 {
 	struct inode *inode;
 	struct mqueue_inode_info *info;
+	int mask = 0;
+	int ret;
 
 	if (new && (new->mq_flags & (~O_NONBLOCK)))
 		return -EINVAL;
@@ -1423,6 +1439,16 @@ static int do_mq_getsetattr(int mqdes, struct mq_attr *new, struct mq_attr *old)
 
 	if (unlikely(fd_file(f)->f_op != &mqueue_file_operations))
 		return -EBADF;
+
+	if (old)
+		mask |= MAY_READ;
+	if (new)
+		mask |= MAY_WRITE;
+	if (mask) {
+		ret = security_file_permission(fd_file(f), mask);
+		if (ret)
+			return ret;
+	}
 
 	inode = file_inode(fd_file(f));
 	info = MQUEUE_I(inode);

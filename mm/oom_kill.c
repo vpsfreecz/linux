@@ -1250,6 +1250,11 @@ SYSCALL_DEFINE2(process_mrelease, int, pidfd, unsigned int, flags)
 	if (IS_ERR(task))
 		return PTR_ERR(task);
 
+	if (!ptrace_may_access(task, PTRACE_MODE_ATTACH_REALCREDS)) {
+		ret = -EPERM;
+		goto put_task;
+	}
+
 	/*
 	 * Make sure to choose a thread which still has a reference to mm
 	 * during the group exit

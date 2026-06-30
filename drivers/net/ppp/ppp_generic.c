@@ -45,6 +45,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/unaligned.h>
 #include <net/netdev_lock.h>
 #include <net/slhc_vj.h>
@@ -1325,6 +1326,10 @@ static int ppp_nl_newlink(struct net_device *dev,
 	file = fget(nla_get_s32(data[IFLA_PPP_DEV_FD]));
 	if (!file)
 		return -EBADF;
+
+	err = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (err)
+		goto out;
 
 	/* rtnl_lock is already held here, but ppp_create_interface() locks
 	 * ppp_mutex before holding rtnl_lock. Using mutex_trylock() avoids

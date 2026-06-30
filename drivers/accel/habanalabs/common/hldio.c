@@ -10,6 +10,7 @@
 #include <generated/uapi/linux/version.h>
 #include <linux/pci-p2pdma.h>
 #include <linux/blkdev.h>
+#include <linux/security.h>
 #include <linux/vmalloc.h>
 
 /*
@@ -91,6 +92,9 @@ static int hl_dio_fd_register(struct hl_ctx *ctx, int fd, struct hl_dio_fd *f)
 		rc = -EINVAL;
 		goto fput;
 	}
+	rc = security_file_permission(f->filp, MAY_READ);
+	if (rc)
+		goto fput;
 
 	inode = file_inode(f->filp);
 	sb = inode->i_sb;

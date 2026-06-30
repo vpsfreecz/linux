@@ -6,6 +6,7 @@
 #include <linux/interval_tree.h>
 #include <linux/iommu.h>
 #include <linux/iommufd.h>
+#include <linux/security.h>
 #include <uapi/linux/iommufd.h>
 
 #include "io_pagetable.h"
@@ -208,6 +209,7 @@ int iommufd_ioas_map_file(struct iommufd_ucmd *ucmd)
 	struct iommufd_ioas *ioas;
 	unsigned int flags = 0;
 	struct file *file;
+	int mask = 0;
 	int rc;
 
 	if (cmd->flags &
@@ -232,6 +234,14 @@ int iommufd_ioas_map_file(struct iommufd_ucmd *ucmd)
 	file = fget(cmd->fd);
 	if (!file)
 		return -EBADF;
+
+	if (cmd->flags & IOMMU_IOAS_MAP_READABLE)
+		mask |= MAY_READ;
+	if (cmd->flags & IOMMU_IOAS_MAP_WRITEABLE)
+		mask |= MAY_WRITE;
+	rc = security_file_permission(file, mask);
+	if (rc)
+		goto out_put;
 
 	rc = iopt_map_file_pages(ucmd->ictx, &ioas->iopt, &iova, file,
 				 cmd->start, cmd->length,

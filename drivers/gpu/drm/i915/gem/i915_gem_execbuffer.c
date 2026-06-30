@@ -3488,6 +3488,17 @@ i915_gem_do_execbuffer(struct drm_device *dev,
 		else
 			goto err_vma;
 	}
+	if (out_fence) {
+		err = sync_file_prepare_install(out_fence);
+		if (err) {
+			fput(out_fence->file);
+			out_fence = NULL;
+			if (eb.requests[0])
+				goto err_request;
+			else
+				goto err_vma;
+		}
+	}
 
 	err = eb_submit(&eb);
 
@@ -3509,7 +3520,7 @@ err_request:
 
 	if (out_fence) {
 		if (err == 0) {
-			fd_install(out_fence_fd, out_fence->file);
+			sync_file_install_prepared(out_fence, out_fence_fd);
 			args->rsvd2 &= GENMASK_ULL(31, 0); /* keep in-fence */
 			args->rsvd2 |= (u64)out_fence_fd << 32;
 			out_fence_fd = -1;

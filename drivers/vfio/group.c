@@ -13,6 +13,7 @@
 #include <linux/vfio.h>
 #include <linux/iommufd.h>
 #include <linux/anon_inodes.h>
+#include <linux/security.h>
 #include "vfio.h"
 
 static struct vfio {
@@ -113,6 +114,9 @@ static int vfio_group_ioctl_set_container(struct vfio_group *group,
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
 		return -EBADF;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	mutex_lock(&group->group_lock);
 	if (vfio_group_has_iommu(group)) {

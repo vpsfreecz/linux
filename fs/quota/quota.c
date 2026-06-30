@@ -985,6 +985,12 @@ SYSCALL_DEFINE4(quotactl_fd, unsigned int, fd, unsigned int, cmd,
 	if (type >= MAXQUOTAS)
 		return -EINVAL;
 
+	ret = security_file_permission(fd_file(f),
+				       quotactl_cmd_write(cmds) ?
+				       MAY_WRITE : MAY_READ);
+	if (ret)
+		return ret;
+
 	if (quotactl_cmd_write(cmds)) {
 		ret = mnt_want_write(fd_file(f)->f_path.mnt);
 		if (ret)

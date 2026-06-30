@@ -104,6 +104,7 @@
 #include <linux/net.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
+#include <linux/security.h>
 #include <linux/interrupt.h>
 #include <linux/poll.h>
 #include <linux/tcp.h>
@@ -1908,6 +1909,7 @@ int sk_getsockopt(struct sock *sk, int level, int optname,
 		struct file *pidfd_file = NULL;
 		unsigned int flags = 0;
 		int pidfd;
+		int ret;
 
 		if (len > sizeof(pidfd))
 			len = sizeof(pidfd);
@@ -1930,6 +1932,13 @@ int sk_getsockopt(struct sock *sk, int level, int optname,
 		put_pid(peer_pid);
 		if (pidfd < 0)
 			return pidfd;
+
+		ret = security_file_receive(pidfd_file);
+		if (ret) {
+			put_unused_fd(pidfd);
+			fput(pidfd_file);
+			return ret;
+		}
 
 		if (copy_to_sockptr(optval, &pidfd, len) ||
 		    copy_to_sockptr(optlen, &len, sizeof(int))) {

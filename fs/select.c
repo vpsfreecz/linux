@@ -30,11 +30,42 @@
 #include <linux/rcupdate.h>
 #include <linux/hrtimer.h>
 #include <linux/freezer.h>
+#include <linux/security.h>
 #include <net/busy_poll.h>
 #include <linux/vmalloc.h>
 
 #include <linux/uaccess.h>
 
+static int vfs_poll_permission(struct file *file, const poll_table *pt)
+{
+	__poll_t events = poll_requested_events(pt);
+	int mask = 0;
+
+	if (!pt || events == ~(__poll_t)0) {
+		if (file->f_mode & FMODE_READ)
+			mask |= MAY_READ;
+		if (file->f_mode & FMODE_WRITE)
+			mask |= MAY_WRITE;
+	} else {
+		if (events & (EPOLLIN | EPOLLRDNORM | EPOLLRDBAND | EPOLLPRI |
+			      EPOLLRDHUP | EPOLLMSG))
+			mask |= MAY_READ;
+		if (events & (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND))
+			mask |= MAY_WRITE;
+	}
+
+	return security_file_permission(file, mask);
+}
+
+__poll_t vfs_poll(struct file *file, struct poll_table_struct *pt)
+{
+	if (unlikely(vfs_poll_permission(file, pt)))
+		return EPOLLERR;
+	if (unlikely(!file->f_op->poll))
+		return DEFAULT_POLLMASK;
+	return file->f_op->poll(file, pt);
+}
+EXPORT_SYMBOL(vfs_poll);
 
 /*
  * Estimate expected accuracy in ns from a timeval.

@@ -29,6 +29,7 @@
 #include <linux/psp.h>
 #include <linux/amd-iommu.h>
 #include <linux/crash_dump.h>
+#include <linux/security.h>
 
 #include <asm/smp.h>
 #include <asm/cacheflush.h>
@@ -2814,8 +2815,14 @@ static int snp_shutdown_on_panic(struct notifier_block *nb,
 int sev_issue_cmd_external_user(struct file *filep, unsigned int cmd,
 				void *data, int *error)
 {
+	int ret;
+
 	if (!filep || filep->f_op != &sev_fops)
 		return -EBADF;
+
+	ret = security_file_permission(filep, MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	return sev_do_cmd(cmd, data, error);
 }

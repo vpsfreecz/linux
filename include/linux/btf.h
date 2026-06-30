@@ -140,6 +140,7 @@ struct btf_struct_metas {
 };
 
 struct bpf_token;
+struct file;
 
 extern const struct file_operations btf_fops;
 
@@ -151,9 +152,12 @@ int btf_new_fd(const union bpf_attr *attr, bpfptr_t uattr, u32 uattr_sz,
 	       struct bpf_token *token);
 struct btf *btf_get_by_fd(int fd);
 bool btf_current_container_allowed(const struct btf *btf);
+bool btf_file(const struct file *file);
+const struct bpf_token *btf_file_token(const struct file *file);
 int btf_get_info_by_fd(const struct btf *btf,
 		       const union bpf_attr *attr,
 		       union bpf_attr __user *uattr);
+struct btf *btf_get_curr_or_next(u32 *id);
 /* Figure out the size of a type_id.  If type_id is a modifier
  * (e.g. const), it will be resolved to find out the type with size.
  *

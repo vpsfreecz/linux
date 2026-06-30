@@ -118,11 +118,15 @@ static struct io_sq_data *io_attach_sq_data(struct io_uring_params *p)
 	struct io_ring_ctx *ctx_attach;
 	struct io_sq_data *sqd;
 	CLASS(fd, f)(p->wq_fd);
+	int ret;
 
 	if (fd_empty(f))
 		return ERR_PTR(-ENXIO);
 	if (!io_is_uring_fops(fd_file(f)))
 		return ERR_PTR(-EINVAL);
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ERR_PTR(ret);
 
 	ctx_attach = fd_file(f)->private_data;
 	sqd = ctx_attach->sq_data;

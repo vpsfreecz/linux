@@ -39,6 +39,7 @@
 #include <linux/mutex.h>
 #include <linux/rculist.h>
 #include <linux/uaccess.h>
+#include <linux/security.h>
 #include <asm/cacheflush.h>
 #include <linux/set_memory.h>
 #include <asm/mmu_context.h>
@@ -3736,6 +3737,9 @@ SYSCALL_DEFINE3(finit_module, int, fd, const char __user *, uargs, int, flags)
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
 		return -EBADF;
+	err = security_file_permission(fd_file(f), MAY_READ);
+	if (err)
+		return err;
 	return idempotent_init_module(fd_file(f), uargs, flags);
 }
 

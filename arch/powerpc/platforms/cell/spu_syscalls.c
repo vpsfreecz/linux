@@ -13,6 +13,7 @@
 #include <linux/syscalls.h>
 #include <linux/rcupdate.h>
 #include <linux/binfmts.h>
+#include <linux/security.h>
 
 #include <asm/spu.h>
 
@@ -69,6 +70,8 @@ SYSCALL_DEFINE4(spu_create, const char __user *, name, unsigned int, flags,
 		CLASS(fd, neighbor)(neighbor_fd);
 		if (fd_empty(neighbor))
 			return -EBADF;
+		if (security_file_permission(fd_file(neighbor), MAY_READ))
+			return -EACCES;
 		return calls->create_thread(name, flags, mode, fd_file(neighbor));
 	} else {
 		return calls->create_thread(name, flags, mode, NULL);
@@ -84,6 +87,8 @@ SYSCALL_DEFINE3(spu_run,int, fd, __u32 __user *, unpc, __u32 __user *, ustatus)
 	CLASS(fd, arg)(fd);
 	if (fd_empty(arg))
 		return -EBADF;
+	if (security_file_permission(fd_file(arg), MAY_READ | MAY_WRITE))
+		return -EACCES;
 
 	return calls->spu_run(fd_file(arg), unpc, ustatus);
 }

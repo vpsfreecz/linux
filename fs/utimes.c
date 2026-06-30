@@ -6,6 +6,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/compat.h>
+#include <linux/security.h>
 #include <asm/unistd.h>
 #include <linux/filelock.h>
 
@@ -108,12 +109,19 @@ retry:
 
 static int do_utimes_fd(int fd, struct timespec64 *times, int flags)
 {
+	int error;
+	CLASS(fd, f)(fd);
+
 	if (flags)
 		return -EINVAL;
 
-	CLASS(fd, f)(fd);
 	if (fd_empty(f))
 		return -EBADF;
+
+	error = security_file_use(fd_file(f));
+	if (error)
+		return error;
+
 	return vfs_utimes(&fd_file(f)->f_path, times);
 }
 

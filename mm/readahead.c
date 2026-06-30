@@ -128,6 +128,7 @@
 #include <linux/blk-cgroup.h>
 #include <linux/fadvise.h>
 #include <linux/sched/mm.h>
+#include <linux/security.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/readahead.h>
@@ -702,6 +703,7 @@ ssize_t ksys_readahead(int fd, loff_t offset, size_t count)
 {
 	struct file *file;
 	const struct inode *inode;
+	int ret;
 
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
@@ -710,6 +712,9 @@ ssize_t ksys_readahead(int fd, loff_t offset, size_t count)
 	file = fd_file(f);
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
+	ret = security_file_permission(file, MAY_READ);
+	if (ret)
+		return ret;
 
 	/*
 	 * The readahead() syscall is intended to run only on files

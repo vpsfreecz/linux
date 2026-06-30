@@ -3992,17 +3992,6 @@ static int copy_siginfo_from_user_any(kernel_siginfo_t *kinfo,
 	return copy_siginfo_from_user(kinfo, info);
 }
 
-static struct pid *pidfd_to_pid(const struct file *file)
-{
-	struct pid *pid;
-
-	pid = pidfd_pid(file);
-	if (!IS_ERR(pid))
-		return pid;
-
-	return tgid_pidfd_to_pid(file);
-}
-
 #define PIDFD_SEND_SIGNAL_FLAGS                            \
 	(PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP | \
 	 PIDFD_SIGNAL_PROCESS_GROUP)
@@ -4088,11 +4077,21 @@ SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
 		break;
 	default: {
 		CLASS(fd, f)(pidfd);
+		struct file *file;
 		if (fd_empty(f))
 			return -EBADF;
 
+		file = fd_file(f);
+
 		/* Is this a pidfd? */
-		pid = pidfd_to_pid(fd_file(f));
+		pid = pidfd_pid(file);
+		if (!IS_ERR(pid)) {
+			ret = security_file_permission(file, MAY_WRITE);
+			if (ret)
+				return ret;
+		} else {
+			pid = tgid_pidfd_to_pid(file);
+		}
 		if (IS_ERR(pid))
 			return PTR_ERR(pid);
 
@@ -4100,7 +4099,7 @@ SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
 			return -EINVAL;
 
 		/* Infer scope from the type of pidfd. */
-		if (fd_file(f)->f_flags & PIDFD_THREAD)
+		if (file->f_flags & PIDFD_THREAD)
 			type = PIDTYPE_PID;
 		else
 			type = PIDTYPE_TGID;

@@ -7,6 +7,7 @@
 #include <linux/slab.h>
 #include <linux/namei.h>
 #include <linux/nospec.h>
+#include <linux/security.h>
 #include <linux/io_uring.h>
 
 #include <uapi/linux/io_uring.h>
@@ -31,6 +32,20 @@ struct io_cancel {
 #define CANCEL_FLAGS	(IORING_ASYNC_CANCEL_ALL | IORING_ASYNC_CANCEL_FD | \
 			 IORING_ASYNC_CANCEL_ANY | IORING_ASYNC_CANCEL_FD_FIXED | \
 			 IORING_ASYNC_CANCEL_USERDATA | IORING_ASYNC_CANCEL_OP)
+
+static int io_cancel_file_perm(struct file *file)
+{
+	int mask = 0;
+
+	if (file->f_mode & FMODE_READ)
+		mask |= MAY_READ;
+	if (file->f_mode & FMODE_WRITE)
+		mask |= MAY_WRITE;
+	if (!mask)
+		mask = MAY_READ | MAY_WRITE;
+
+	return security_file_permission(file, mask);
+}
 
 /*
  * Returns true if the request matches the criteria outlined by 'cd'.
@@ -222,6 +237,9 @@ int io_async_cancel(struct io_kiocb *req, unsigned int issue_flags)
 			ret = -EBADF;
 			goto done;
 		}
+		ret = io_cancel_file_perm(req->file);
+		if (ret)
+			goto done;
 		cd.file = req->file;
 	}
 
@@ -237,6 +255,7 @@ static int __io_sync_cancel(struct io_uring_task *tctx,
 			    struct io_cancel_data *cd, int fd)
 {
 	struct io_ring_ctx *ctx = cd->ctx;
+	int ret;
 
 	/* fixed must be grabbed every time since we drop the uring_lock */
 	if ((cd->flags & IORING_ASYNC_CANCEL_FD) &&
@@ -249,6 +268,9 @@ static int __io_sync_cancel(struct io_uring_task *tctx,
 		cd->file = io_slot_file(node);
 		if (!cd->file)
 			return -EBADF;
+		ret = io_cancel_file_perm(cd->file);
+		if (ret)
+			return ret;
 	}
 
 	return __io_async_cancel(cd, tctx, 0);
@@ -288,6 +310,11 @@ int io_sync_cancel(struct io_ring_ctx *ctx, void __user *arg)
 		file = fget(sc.fd);
 		if (!file)
 			return -EBADF;
+		ret = io_cancel_file_perm(file);
+		if (ret) {
+			fput(file);
+			return ret;
+		}
 		cd.file = file;
 	}
 

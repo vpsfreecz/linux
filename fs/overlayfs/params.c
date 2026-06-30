@@ -6,6 +6,7 @@
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include <linux/posix_acl_xattr.h>
+#include <linux/security.h>
 #include <linux/seq_file.h>
 #include <linux/xattr.h>
 #include "overlayfs.h"
@@ -450,6 +451,14 @@ static int ovl_parse_layer(struct fs_context *fc, struct fs_parameter *param,
 	case fs_value_is_file: {
 		char *buf __free(kfree);
 		char *layer_name;
+		int mask = MAY_READ;
+
+		if (is_upper_layer(layer))
+			mask |= MAY_WRITE;
+
+		err = security_file_permission(param->file, mask);
+		if (err)
+			return err;
 
 		buf = kmalloc(PATH_MAX, GFP_KERNEL_ACCOUNT);
 		if (!buf)

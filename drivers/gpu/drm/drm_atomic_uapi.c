@@ -1191,7 +1191,7 @@ static int setup_out_fence(struct drm_out_fence_state *fence_state,
 	if (!fence_state->sync_file)
 		return -ENOMEM;
 
-	return 0;
+	return sync_file_prepare_install(fence_state->sync_file);
 }
 
 static int prepare_signaling(struct drm_device *dev,
@@ -1331,8 +1331,8 @@ static void complete_signaling(struct drm_device *dev,
 
 	if (install_fds) {
 		for (i = 0; i < num_fences; i++)
-			fd_install(fence_state[i].fd,
-				   fence_state[i].sync_file->file);
+			sync_file_install_prepared(fence_state[i].sync_file,
+						   fence_state[i].fd);
 
 		kfree(fence_state);
 		return;

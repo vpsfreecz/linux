@@ -1426,6 +1426,48 @@ static void userns_put(struct ns_common *ns)
 	put_user_ns(to_user_ns(ns));
 }
 
+static bool ns_owner_boundary_visible(const struct user_namespace *owner)
+{
+	struct syslog_namespace *syslog_ns;
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tracing_ns;
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	struct lsm_namespace *lsm_ns;
+#endif
+
+	syslog_ns = current_syslog_ns();
+	if (syslog_ns && syslog_ns != &init_syslog_ns &&
+	    READ_ONCE(owner->syslog_ns) != syslog_ns)
+		return false;
+
+#ifdef CONFIG_TRACING_NS
+	tracing_ns = current_tracing_ns();
+	if (tracing_ns != &init_tracing_ns &&
+	    READ_ONCE(owner->tracing_ns) != tracing_ns)
+		return false;
+#endif
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	lsm_ns = current_lsm_ns();
+	if (lsm_ns != &init_lsm_ns &&
+	    READ_ONCE(owner->lsm_ns) != lsm_ns)
+		return false;
+#endif
+
+	return true;
+}
+
+bool userns_current_boundary_can_see(const struct user_namespace *target_ns)
+{
+	if (!target_ns)
+		return false;
+	if (!in_userns(current_user_ns(), target_ns))
+		return false;
+
+	return ns_owner_boundary_visible(target_ns);
+}
+
 static int userns_install(struct nsset *nsset, struct ns_common *ns)
 {
 	struct user_namespace *user_ns = to_user_ns(ns);
@@ -1474,18 +1516,11 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 
 struct ns_common *ns_get_owner(struct ns_common *ns)
 {
-	struct user_namespace *my_user_ns = current_user_ns();
-	struct user_namespace *owner, *p;
+	struct user_namespace *owner;
 
-	/* See if the owner is in the current user namespace */
-	owner = p = ns->ops->owner(ns);
-	for (;;) {
-		if (!p)
-			return ERR_PTR(-EPERM);
-		if (p == my_user_ns)
-			break;
-		p = p->parent;
-	}
+	owner = ns->ops->owner(ns);
+	if (!userns_current_boundary_can_see(owner))
+		return ERR_PTR(-EPERM);
 
 	return &get_user_ns(owner)->ns;
 }

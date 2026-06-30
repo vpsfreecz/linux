@@ -410,6 +410,10 @@ SYSCALL_DEFINE5(file_getattr, int, dfd, const char __user *, filename,
 		if (fd_empty(f))
 			return -EBADF;
 
+		error = security_file_use(fd_file(f));
+		if (error)
+			return error;
+
 		filepath = fd_file(f)->f_path;
 		path_get(&filepath);
 	} else {
@@ -475,6 +479,10 @@ SYSCALL_DEFINE5(file_setattr, int, dfd, const char __user *, filename,
 		CLASS(fd, f)(dfd);
 		if (fd_empty(f))
 			return -EBADF;
+
+		error = security_file_use(fd_file(f));
+		if (error)
+			return error;
 
 		filepath = fd_file(f)->f_path;
 		path_get(&filepath);

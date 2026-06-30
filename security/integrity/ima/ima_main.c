@@ -28,6 +28,7 @@
 #include <linux/iversion.h>
 #include <linux/evm.h>
 #include <linux/crash_dump.h>
+#include <linux/security.h>
 
 #include "ima.h"
 
@@ -1128,6 +1129,8 @@ void ima_kexec_cmdline(int kernel_fd, const void *buf, int size)
 
 	CLASS(fd, f)(kernel_fd);
 	if (fd_empty(f))
+		return;
+	if (security_file_use(fd_file(f)))
 		return;
 
 	process_buffer_measurement(file_mnt_idmap(fd_file(f)), file_inode(fd_file(f)),

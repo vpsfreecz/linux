@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/security.h>
 #include <linux/sizes.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
@@ -126,6 +127,10 @@ static long qat_vf_precopy_ioctl(struct file *filp, unsigned int cmd,
 
 	if (cmd != VFIO_MIG_GET_PRECOPY_INFO)
 		return -ENOTTY;
+
+	ret = security_file_permission(filp, MAY_READ);
+	if (ret)
+		return ret;
 
 	minsz = offsetofend(struct vfio_precopy_info, dirty_bytes);
 

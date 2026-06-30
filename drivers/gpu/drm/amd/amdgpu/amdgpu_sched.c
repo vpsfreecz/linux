@@ -24,6 +24,7 @@
 
 #include <linux/file.h>
 #include <linux/pid.h>
+#include <linux/security.h>
 
 #include <drm/amdgpu_drm.h>
 
@@ -35,15 +36,18 @@ static int amdgpu_sched_process_priority_override(struct amdgpu_device *adev,
 						  int fd,
 						  int32_t priority)
 {
-	CLASS(fd, f)(fd);
 	struct amdgpu_fpriv *fpriv;
 	struct amdgpu_ctx_mgr *mgr;
 	struct amdgpu_ctx *ctx;
 	uint32_t id;
 	int r;
+	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
 		return -EINVAL;
+	r = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (r)
+		return r;
 
 	r = amdgpu_file_to_fpriv(fd_file(f), &fpriv);
 	if (r)
@@ -63,13 +67,16 @@ static int amdgpu_sched_context_priority_override(struct amdgpu_device *adev,
 						  unsigned ctx_id,
 						  int32_t priority)
 {
-	CLASS(fd, f)(fd);
 	struct amdgpu_fpriv *fpriv;
 	struct amdgpu_ctx *ctx;
 	int r;
+	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
 		return -EINVAL;
+	r = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (r)
+		return r;
 
 	r = amdgpu_file_to_fpriv(fd_file(f), &fpriv);
 	if (r)

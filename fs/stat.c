@@ -275,9 +275,16 @@ EXPORT_SYMBOL(vfs_getattr);
  */
 int vfs_fstat(int fd, struct kstat *stat)
 {
+	int error;
 	CLASS(fd_raw, f)(fd);
+
 	if (fd_empty(f))
 		return -EBADF;
+
+	error = security_file_use(fd_file(f));
+	if (error)
+		return error;
+
 	return vfs_getattr(&fd_file(f)->f_path, stat, STATX_BASIC_STATS, 0);
 }
 
@@ -317,9 +324,16 @@ static int vfs_statx_path(const struct path *path, int flags, struct kstat *stat
 static int vfs_statx_fd(int fd, int flags, struct kstat *stat,
 			  u32 request_mask)
 {
+	int error;
 	CLASS(fd_raw, f)(fd);
+
 	if (fd_empty(f))
 		return -EBADF;
+
+	error = security_file_use(fd_file(f));
+	if (error)
+		return error;
+
 	return vfs_statx_path(&fd_file(f)->f_path, flags, stat, request_mask);
 }
 

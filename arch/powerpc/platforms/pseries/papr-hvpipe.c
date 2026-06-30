@@ -11,6 +11,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/poll.h>
+#include <linux/security.h>
 #include <linux/of.h>
 #include <asm/machdep.h>
 #include <asm/rtas.h>
@@ -564,6 +565,10 @@ static long papr_hvpipe_dev_ioctl(struct file *filp, unsigned int ioctl,
 	 */
 	if (!hvpipe_feature)
 		return -ENXIO;
+
+	ret = security_file_permission(filp, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	if (get_user(srcID, argp))
 		return -EFAULT;

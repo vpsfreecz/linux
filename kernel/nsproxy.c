@@ -10,6 +10,7 @@
  */
 
 #include <linux/slab.h>
+#include <linux/cred.h>
 #include <linux/export.h>
 #include <linux/nsproxy.h>
 #include <linux/init_task.h>
@@ -29,6 +30,7 @@
 #include <linux/syscalls.h>
 #include <linux/cgroup.h>
 #include <linux/perf_event.h>
+#include <linux/security.h>
 
 static struct kmem_cache *nsproxy_cachep;
 
@@ -42,20 +44,17 @@ static bool lsm_child_ns_request_consumable(const struct task_struct *task,
 	return false;
 }
 
-#ifdef CONFIG_SECURITY_LSM_NAMESPACE
-static void set_child_lsm_owner_creds(struct nsproxy *nsproxy, u64 flags,
-				      bool new_syslog_ns, bool new_tracing_ns,
-				      struct user_namespace *user_ns,
-				      struct lsm_namespace *lsm_ns,
-				      const struct cred *cred)
+static void set_child_namespace_owner_creds(struct nsproxy *nsproxy, u64 flags,
+					    bool new_syslog_ns,
+					    bool new_tracing_ns,
+					    struct user_namespace *user_ns,
+					    const struct cred *cred)
 {
 	if (!cred)
 		return;
 
 	if (user_ns && user_ns != current_user_ns())
 		ns_common_set_owner_prop(&user_ns->ns, cred);
-	if (lsm_ns && lsm_ns != &init_lsm_ns)
-		ns_common_set_owner_prop(&lsm_ns->ns, cred);
 	if ((flags & CLONE_NEWNS) && nsproxy->mnt_ns)
 		ns_common_set_owner_prop(from_mnt_ns(nsproxy->mnt_ns), cred);
 	if ((flags & CLONE_NEWUTS) && nsproxy->uts_ns)
@@ -86,6 +85,17 @@ static void set_child_lsm_owner_creds(struct nsproxy *nsproxy, u64 flags,
 #else
 	(void)new_tracing_ns;
 #endif
+}
+
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+static void set_child_lsm_namespace_owner_creds(struct lsm_namespace *lsm_ns,
+						const struct cred *cred)
+{
+	if (!cred)
+		return;
+
+	if (lsm_ns && lsm_ns != &init_lsm_ns)
+		ns_common_set_owner_prop(&lsm_ns->ns, cred);
 }
 #endif
 
@@ -204,10 +214,12 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 	bool new_syslog_ns = false;
 	bool new_tracing_ns = false;
 	bool consume_lsm_req = false;
+	const struct cred *owner_cred;
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	bool new_lsm_ns = false;
 	struct lsm_ctx *new_lsm_ctx = NULL;
 	struct lsm_namespace *created_lsm_ns;
+	struct lsm_namespace *mnt_lsm_ns = NULL;
 #endif
 	char *syslog_name = NULL;
 	struct nsproxy *new_nsp;
@@ -293,29 +305,38 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		goto out_tracing;
 	}
 #endif
+	if (!new_cred && tsk != current)
+		new_cred = (struct cred *)tsk->cred;
+	owner_cred = new_cred ?: current_cred();
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	if (new_lsm_ns) {
-		/*
-		 * clone(CLONE_NEWUSER) builds the child task credentials before
-		 * namespace copy and does not pass a separate new_cred pointer.
-		 * Use that not-yet-running child credential for LSM namespace
-		 * backend installation instead of letting backends mutate a
-		 * published task credential.
-		 */
-		if (!new_cred && tsk != current)
-			new_cred = (struct cred *)tsk->cred;
 		created_lsm_ns = copy_lsm_ns(true, user_ns, tsk, new_cred,
 					     new_lsm_ctx, current_lsm_ns());
 		if (IS_ERR(created_lsm_ns)) {
 			err = PTR_ERR(created_lsm_ns);
 			goto out_lsm;
 		}
-		set_child_lsm_owner_creds(new_nsp, flags, new_syslog_ns,
-					  new_tracing_ns, user_ns,
-					  created_lsm_ns, new_cred);
+		set_child_lsm_namespace_owner_creds(created_lsm_ns, owner_cred);
 		put_lsm_ns(created_lsm_ns);
 	}
+	mnt_lsm_ns = user_ns && user_ns->lsm_ns ? user_ns->lsm_ns :
+		current_lsm_ns();
 #endif
+	if (flags & CLONE_NEWNS) {
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+		mnt_ns_set_boundary_namespaces(new_nsp->mnt_ns,
+					       new_nsp->syslog_ns,
+					       new_nsp->tracing_ns,
+					       mnt_lsm_ns);
+#else
+		mnt_ns_set_boundary_namespaces(new_nsp->mnt_ns,
+					       new_nsp->syslog_ns,
+					       new_nsp->tracing_ns,
+					       NULL);
+#endif
+	}
+	set_child_namespace_owner_creds(new_nsp, flags, new_syslog_ns,
+					new_tracing_ns, user_ns, owner_cred);
 	consume_pending_child_ns_request(syslog_req_task, consume_lsm_req);
 	return new_nsp;
 
@@ -930,6 +951,10 @@ SYSCALL_DEFINE2(setns, int, fd, int, flags)
 
 	if (fd_empty(f))
 		return -EBADF;
+
+	err = security_file_permission(fd_file(f), MAY_READ);
+	if (err)
+		goto out;
 
 	if (proc_ns_file(fd_file(f))) {
 		ns = get_proc_ns(file_inode(fd_file(f)));

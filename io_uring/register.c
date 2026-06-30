@@ -15,6 +15,7 @@
 #include <linux/uaccess.h>
 #include <linux/nospec.h>
 #include <linux/compat.h>
+#include <linux/security.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
 
@@ -902,6 +903,18 @@ static int io_uring_register_blind(unsigned int opcode, void __user *arg,
 	return -EINVAL;
 }
 
+static int io_uring_register_file_perm(struct file *file, unsigned int opcode)
+{
+	switch (opcode) {
+	case IORING_REGISTER_PROBE:
+	case IORING_REGISTER_PBUF_STATUS:
+	case IORING_REGISTER_QUERY:
+		return security_file_permission(file, MAY_READ);
+	default:
+		return security_file_permission(file, MAY_WRITE);
+	}
+}
+
 SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
 		void __user *, arg, unsigned int, nr_args)
 {
@@ -924,6 +937,10 @@ SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
 		return PTR_ERR(file);
 	ctx = file->private_data;
 
+	ret = io_uring_register_file_perm(file, opcode);
+	if (ret)
+		goto out;
+
 	mutex_lock(&ctx->uring_lock);
 	ret = __io_uring_register(ctx, opcode, arg, nr_args);
 
@@ -931,6 +948,7 @@ SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
 				ctx->buf_table.nr, ret);
 	mutex_unlock(&ctx->uring_lock);
 
+out:
 	fput(file);
 	return ret;
 }

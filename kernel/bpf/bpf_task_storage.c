@@ -5,6 +5,7 @@
  */
 
 #include <linux/pid.h>
+#include <linux/file.h>
 #include <linux/sched.h>
 #include <linux/rculist.h>
 #include <linux/list.h>
@@ -21,6 +22,16 @@
 DEFINE_BPF_STORAGE_CACHE(task_cache);
 
 static DEFINE_PER_CPU(int, bpf_task_storage_busy);
+
+static struct pid *bpf_pidfd_file_get_pid(struct file *file)
+{
+	struct pid *pid = pidfd_pid(file);
+	if (IS_ERR(pid))
+		return pid;
+
+	get_pid(pid);
+	return pid;
+}
 
 static void bpf_task_storage_lock(void)
 {
@@ -83,16 +94,15 @@ out:
 	rcu_read_unlock_migrate();
 }
 
-static void *bpf_pid_task_storage_lookup_elem(struct bpf_map *map, void *key)
+static void *bpf_pid_task_storage_lookup_fd_key(struct bpf_map *map,
+						struct file *file)
 {
 	struct bpf_local_storage_data *sdata;
 	struct task_struct *task;
-	unsigned int f_flags;
 	struct pid *pid;
-	int fd, err;
+	int err;
 
-	fd = *(int *)key;
-	pid = pidfd_get_pid(fd, &f_flags);
+	pid = bpf_pidfd_file_get_pid(file);
 	if (IS_ERR(pid))
 		return ERR_CAST(pid);
 
@@ -103,6 +113,10 @@ static void *bpf_pid_task_storage_lookup_elem(struct bpf_map *map, void *key)
 	task = pid_task(pid, PIDTYPE_PID);
 	if (!task) {
 		err = -ENOENT;
+		goto out;
+	}
+	if (!bpf_token_current_container_task_allowed(task)) {
+		err = -EACCES;
 		goto out;
 	}
 
@@ -116,20 +130,29 @@ out:
 	return ERR_PTR(err);
 }
 
-static long bpf_pid_task_storage_update_elem(struct bpf_map *map, void *key,
-					     void *value, u64 map_flags)
+static void *bpf_pid_task_storage_lookup_elem(struct bpf_map *map, void *key)
+{
+	CLASS(fd_raw, f)(*(int *)key);
+
+	if (fd_empty(f))
+		return ERR_PTR(-EBADF);
+
+	return bpf_pid_task_storage_lookup_fd_key(map, fd_file(f));
+}
+
+static long bpf_pid_task_storage_update_fd_key(struct bpf_map *map,
+					       struct file *file, void *value,
+					       u64 map_flags)
 {
 	struct bpf_local_storage_data *sdata;
 	struct task_struct *task;
-	unsigned int f_flags;
 	struct pid *pid;
-	int fd, err;
+	int err;
 
 	if ((map_flags & BPF_F_LOCK) && btf_record_has_field(map->record, BPF_UPTR))
 		return -EOPNOTSUPP;
 
-	fd = *(int *)key;
-	pid = pidfd_get_pid(fd, &f_flags);
+	pid = bpf_pidfd_file_get_pid(file);
 	if (IS_ERR(pid))
 		return PTR_ERR(pid);
 
@@ -140,6 +163,10 @@ static long bpf_pid_task_storage_update_elem(struct bpf_map *map, void *key,
 	task = pid_task(pid, PIDTYPE_PID);
 	if (!task) {
 		err = -ENOENT;
+		goto out;
+	}
+	if (!bpf_token_current_container_task_allowed(task)) {
+		err = -EACCES;
 		goto out;
 	}
 
@@ -153,6 +180,18 @@ static long bpf_pid_task_storage_update_elem(struct bpf_map *map, void *key,
 out:
 	put_pid(pid);
 	return err;
+}
+
+static long bpf_pid_task_storage_update_elem(struct bpf_map *map, void *key,
+					     void *value, u64 map_flags)
+{
+	CLASS(fd_raw, f)(*(int *)key);
+
+	if (fd_empty(f))
+		return -EBADF;
+
+	return bpf_pid_task_storage_update_fd_key(map, fd_file(f), value,
+						  map_flags);
 }
 
 static int task_storage_delete(struct task_struct *task, struct bpf_map *map,
@@ -172,15 +211,14 @@ static int task_storage_delete(struct task_struct *task, struct bpf_map *map,
 	return 0;
 }
 
-static long bpf_pid_task_storage_delete_elem(struct bpf_map *map, void *key)
+static long bpf_pid_task_storage_delete_fd_key(struct bpf_map *map,
+					       struct file *file)
 {
 	struct task_struct *task;
-	unsigned int f_flags;
 	struct pid *pid;
-	int fd, err;
+	int err;
 
-	fd = *(int *)key;
-	pid = pidfd_get_pid(fd, &f_flags);
+	pid = bpf_pidfd_file_get_pid(file);
 	if (IS_ERR(pid))
 		return PTR_ERR(pid);
 
@@ -193,6 +231,10 @@ static long bpf_pid_task_storage_delete_elem(struct bpf_map *map, void *key)
 		err = -ENOENT;
 		goto out;
 	}
+	if (!bpf_token_current_container_task_allowed(task)) {
+		err = -EACCES;
+		goto out;
+	}
 
 	bpf_task_storage_lock();
 	err = task_storage_delete(task, map, true);
@@ -200,6 +242,16 @@ static long bpf_pid_task_storage_delete_elem(struct bpf_map *map, void *key)
 out:
 	put_pid(pid);
 	return err;
+}
+
+static long bpf_pid_task_storage_delete_elem(struct bpf_map *map, void *key)
+{
+	CLASS(fd_raw, f)(*(int *)key);
+
+	if (fd_empty(f))
+		return -EBADF;
+
+	return bpf_pid_task_storage_delete_fd_key(map, fd_file(f));
 }
 
 /* Called by bpf_task_storage_get*() helpers */
@@ -323,6 +375,9 @@ const struct bpf_map_ops task_storage_map_ops = {
 	.map_alloc = task_storage_map_alloc,
 	.map_free = task_storage_map_free,
 	.map_get_next_key = notsupp_get_next_key,
+	.map_lookup_fd_key = bpf_pid_task_storage_lookup_fd_key,
+	.map_update_fd_key = bpf_pid_task_storage_update_fd_key,
+	.map_delete_fd_key = bpf_pid_task_storage_delete_fd_key,
 	.map_lookup_elem = bpf_pid_task_storage_lookup_elem,
 	.map_update_elem = bpf_pid_task_storage_update_elem,
 	.map_delete_elem = bpf_pid_task_storage_delete_elem,

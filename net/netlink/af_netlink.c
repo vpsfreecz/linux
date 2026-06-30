@@ -1160,9 +1160,14 @@ struct sock *netlink_getsockbyfd(int fd)
 	CLASS(fd, f)(fd);
 	struct inode *inode;
 	struct sock *sock;
+	int ret;
 
 	if (fd_empty(f))
 		return ERR_PTR(-EBADF);
+
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ERR_PTR(ret);
 
 	inode = file_inode(fd_file(f));
 	if (!S_ISSOCK(inode->i_mode))

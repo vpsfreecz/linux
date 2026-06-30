@@ -427,6 +427,10 @@ static int virtio_gpu_init_submit(struct virtio_gpu_submit *submit,
 		submit->sync_file = sync_file_create(&out_fence->f);
 		if (!submit->sync_file)
 			return -ENOMEM;
+
+		err = sync_file_prepare_install(submit->sync_file);
+		if (err)
+			return err;
 	}
 
 	return 0;
@@ -458,7 +462,8 @@ static void virtio_gpu_install_out_fence_fd(struct virtio_gpu_submit *submit)
 {
 	if (submit->sync_file) {
 		submit->exbuf->fence_fd = submit->out_fence_fd;
-		fd_install(submit->out_fence_fd, submit->sync_file->file);
+		sync_file_install_prepared(submit->sync_file,
+					   submit->out_fence_fd);
 	}
 }
 

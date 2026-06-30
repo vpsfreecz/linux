@@ -98,6 +98,10 @@ static loff_t cachefiles_ondemand_fd_llseek(struct file *filp, loff_t pos,
 	struct file *file;
 	loff_t ret;
 
+	ret = security_file_permission(filp, MAY_WRITE);
+	if (ret)
+		return ret;
+
 	spin_lock(&object->lock);
 	file = object->file;
 	if (!file) {
@@ -119,10 +123,15 @@ static long cachefiles_ondemand_fd_ioctl(struct file *filp, unsigned int ioctl,
 	struct cachefiles_object *object = filp->private_data;
 	struct cachefiles_cache *cache = object->volume->cache;
 	struct cachefiles_req *req;
+	int ret;
 	XA_STATE(xas, &cache->reqs, id);
 
 	if (ioctl != CACHEFILES_IOC_READ_COMPLETE)
 		return -EINVAL;
+
+	ret = security_file_permission(filp, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	if (!test_bit(CACHEFILES_ONDEMAND_MODE, &cache->flags))
 		return -EOPNOTSUPP;

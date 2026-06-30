@@ -21,6 +21,7 @@
 #include <linux/rcupdate.h>
 #include <linux/close_range.h>
 #include <linux/file_ref.h>
+#include <linux/security.h>
 #include <net/sock.h>
 #include <linux/init_task.h>
 
@@ -1398,9 +1399,9 @@ int receive_fd_replace(int new_fd, struct file *file, unsigned int o_flags)
 
 static int ksys_dup3(unsigned int oldfd, unsigned int newfd, int flags)
 {
-	int err = -EBADF;
 	struct file *file;
 	struct files_struct *files = current->files;
+	int err;
 
 	if ((flags & ~O_CLOEXEC) != 0)
 		return -EINVAL;
@@ -1411,22 +1412,28 @@ static int ksys_dup3(unsigned int oldfd, unsigned int newfd, int flags)
 	if (newfd >= rlimit(RLIMIT_NOFILE))
 		return -EBADF;
 
+	file = fget_raw(oldfd);
+	if (!file)
+		return -EBADF;
+
+	err = security_file_use(file);
+	if (err)
+		goto out_fput;
+
 	spin_lock(&files->file_lock);
 	err = expand_files(files, newfd);
-	file = files_lookup_fd_locked(files, oldfd);
-	if (unlikely(!file))
-		goto Ebadf;
 	if (unlikely(err < 0)) {
 		if (err == -EMFILE)
-			goto Ebadf;
+			err = -EBADF;
 		goto out_unlock;
 	}
-	return do_dup2(files, file, newfd, flags);
+	err = do_dup2(files, file, newfd, flags);
+	goto out_fput;
 
-Ebadf:
-	err = -EBADF;
 out_unlock:
 	spin_unlock(&files->file_lock);
+out_fput:
+	fput(file);
 	return err;
 }
 
@@ -1438,17 +1445,16 @@ SYSCALL_DEFINE3(dup3, unsigned int, oldfd, unsigned int, newfd, int, flags)
 SYSCALL_DEFINE2(dup2, unsigned int, oldfd, unsigned int, newfd)
 {
 	if (unlikely(newfd == oldfd)) { /* corner case */
-		struct files_struct *files = current->files;
-		struct file *f;
 		int retval = oldfd;
+		CLASS(fd_raw, f)(oldfd);
 
-		rcu_read_lock();
-		f = __fget_files_rcu(files, oldfd, 0);
-		if (!f)
+		if (fd_empty(f))
 			retval = -EBADF;
-		rcu_read_unlock();
-		if (f)
-			fput(f);
+		else {
+			retval = security_file_use(fd_file(f));
+			if (!retval)
+				retval = oldfd;
+		}
 		return retval;
 	}
 	return ksys_dup3(oldfd, newfd, 0);
@@ -1460,11 +1466,15 @@ SYSCALL_DEFINE1(dup, unsigned int, fildes)
 	struct file *file = fget_raw(fildes);
 
 	if (file) {
-		ret = get_unused_fd_flags(0);
-		if (ret >= 0)
-			fd_install(ret, file);
-		else
-			fput(file);
+		ret = security_file_use(file);
+		if (!ret) {
+			ret = get_unused_fd_flags(0);
+			if (ret >= 0) {
+				fd_install(ret, file);
+				return ret;
+			}
+		}
+		fput(file);
 	}
 	return ret;
 }
@@ -1473,8 +1483,14 @@ int f_dupfd(unsigned int from, struct file *file, unsigned flags)
 {
 	unsigned long nofile = rlimit(RLIMIT_NOFILE);
 	int err;
+
 	if (from >= nofile)
 		return -EINVAL;
+
+	err = security_file_use(file);
+	if (err)
+		return err;
+
 	err = alloc_fd(from, nofile, flags);
 	if (err >= 0) {
 		get_file(file);

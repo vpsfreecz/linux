@@ -15,6 +15,7 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <uapi/linux/iommufd.h>
 
@@ -660,6 +661,7 @@ EXPORT_SYMBOL_NS_GPL(iommufd_ctx_from_file, "IOMMUFD");
 struct iommufd_ctx *iommufd_ctx_from_fd(int fd)
 {
 	struct file *file;
+	int ret;
 
 	file = fget(fd);
 	if (!file)
@@ -668,6 +670,11 @@ struct iommufd_ctx *iommufd_ctx_from_fd(int fd)
 	if (file->f_op != &iommufd_fops) {
 		fput(file);
 		return ERR_PTR(-EBADFD);
+	}
+	ret = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (ret) {
+		fput(file);
+		return ERR_PTR(ret);
 	}
 	/* fget is the same as iommufd_ctx_get() */
 	return file->private_data;

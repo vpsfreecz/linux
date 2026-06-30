@@ -13,6 +13,7 @@
 #include <linux/idr.h>
 #include <linux/ioctl.h>
 #include <linux/media.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/pci.h>
@@ -431,6 +432,28 @@ static const struct media_ioctl_info ioctl_info[] = {
 	MEDIA_IOC(REQUEST_ALLOC, media_device_request_alloc, 0),
 };
 
+static int media_device_ioctl_permission(struct file *filp, unsigned int cmd)
+{
+	int mask;
+
+	switch (cmd) {
+	case MEDIA_IOC_DEVICE_INFO:
+	case MEDIA_IOC_ENUM_ENTITIES:
+	case MEDIA_IOC_ENUM_LINKS:
+	case MEDIA_IOC_G_TOPOLOGY:
+		mask = MAY_READ;
+		break;
+	case MEDIA_IOC_SETUP_LINK:
+	case MEDIA_IOC_REQUEST_ALLOC:
+		mask = MAY_WRITE;
+		break;
+	default:
+		return 0;
+	}
+
+	return security_file_permission(filp, mask);
+}
+
 static long media_device_ioctl(struct file *filp, unsigned int cmd,
 			       unsigned long __arg)
 {
@@ -446,6 +469,10 @@ static long media_device_ioctl(struct file *filp, unsigned int cmd,
 		return -ENOIOCTLCMD;
 
 	info = &ioctl_info[_IOC_NR(cmd)];
+
+	ret = media_device_ioctl_permission(filp, cmd);
+	if (ret)
+		return ret;
 
 	if (_IOC_SIZE(info->cmd) > sizeof(__karg)) {
 		karg = kmalloc(_IOC_SIZE(info->cmd), GFP_KERNEL);
@@ -524,6 +551,10 @@ static long media_device_compat_ioctl(struct file *filp, unsigned int cmd,
 
 	switch (cmd) {
 	case MEDIA_IOC_ENUM_LINKS32:
+		ret = security_file_permission(filp, MAY_READ);
+		if (ret)
+			return ret;
+
 		mutex_lock(&dev->graph_mutex);
 		ret = media_device_enum_links32(dev,
 				(struct media_links_enum32 __user *)arg);

@@ -1651,12 +1651,25 @@ static void aio_fsync_work(struct work_struct *work)
 static int aio_fsync(struct fsync_iocb *req, const struct iocb *iocb,
 		     bool datasync)
 {
+	int mask = 0;
+	int ret;
+
 	if (unlikely(iocb->aio_buf || iocb->aio_offset || iocb->aio_nbytes ||
 			iocb->aio_rw_flags))
 		return -EINVAL;
 
 	if (unlikely(!req->file->f_op->fsync))
 		return -EINVAL;
+
+	if (req->file->f_mode & FMODE_READ)
+		mask |= MAY_READ;
+	if (req->file->f_mode & FMODE_WRITE)
+		mask |= MAY_WRITE;
+	if (!mask)
+		return -EBADF;
+	ret = security_file_permission(req->file, mask);
+	if (ret)
+		return ret;
 
 	req->creds = prepare_creds();
 	if (!req->creds)

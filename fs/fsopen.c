@@ -403,6 +403,10 @@ SYSCALL_DEFINE5(fsconfig,
 	if (fd_file(f)->f_op != &fscontext_fops)
 		return -EINVAL;
 
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ret;
+
 	fc = fd_file(f)->private_data;
 	if (fc->ops == &legacy_fs_context_ops) {
 		switch (cmd) {

@@ -17,10 +17,25 @@
 #include <linux/pagemap.h>
 #include <linux/quotaops.h>
 #include <linux/backing-dev.h>
+#include <linux/security.h>
 #include "internal.h"
 
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
+
+static int file_sync_permission(struct file *file)
+{
+	int mask = 0;
+
+	if (file->f_mode & FMODE_READ)
+		mask |= MAY_READ;
+	if (file->f_mode & FMODE_WRITE)
+		mask |= MAY_WRITE;
+	if (!mask)
+		return -EBADF;
+
+	return security_file_permission(file, mask);
+}
 
 /*
  * Write out and wait upon all dirty data associated with this
@@ -152,18 +167,25 @@ void emergency_sync(void)
 SYSCALL_DEFINE1(syncfs, int, fd)
 {
 	CLASS(fd, f)(fd);
+	struct file *file;
 	struct super_block *sb;
 	int ret, ret2;
 
 	if (fd_empty(f))
 		return -EBADF;
-	sb = fd_file(f)->f_path.dentry->d_sb;
+
+	file = fd_file(f);
+	ret = file_sync_permission(file);
+	if (ret)
+		return ret;
+
+	sb = file->f_path.dentry->d_sb;
 
 	down_read(&sb->s_umount);
 	ret = sync_filesystem(sb);
 	up_read(&sb->s_umount);
 
-	ret2 = errseq_check_and_advance(&sb->s_wb_err, &fd_file(f)->f_sb_err);
+	ret2 = errseq_check_and_advance(&sb->s_wb_err, &file->f_sb_err);
 
 	return ret ? ret : ret2;
 }
@@ -208,11 +230,18 @@ EXPORT_SYMBOL(vfs_fsync);
 static int do_fsync(unsigned int fd, int datasync)
 {
 	CLASS(fd, f)(fd);
+	struct file *file;
+	int ret;
 
 	if (fd_empty(f))
 		return -EBADF;
 
-	return vfs_fsync(fd_file(f), datasync);
+	file = fd_file(f);
+	ret = file_sync_permission(file);
+	if (ret)
+		return ret;
+
+	return vfs_fsync(file, datasync);
 }
 
 SYSCALL_DEFINE1(fsync, unsigned int, fd)
@@ -272,6 +301,10 @@ int sync_file_range(struct file *file, loff_t offset, loff_t nbytes,
 	ret = -ESPIPE;
 	if (!S_ISREG(i_mode) && !S_ISBLK(i_mode) && !S_ISDIR(i_mode) &&
 			!S_ISLNK(i_mode))
+		goto out;
+
+	ret = file_sync_permission(file);
+	if (ret)
 		goto out;
 
 	mapping = file->f_mapping;

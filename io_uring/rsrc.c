@@ -8,6 +8,7 @@
 #include <linux/nospec.h>
 #include <linux/hugetlb.h>
 #include <linux/compat.h>
+#include <linux/security.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring/cmd.h>
 
@@ -270,6 +271,11 @@ static int __io_sqe_files_update(struct io_ring_ctx *ctx,
 				err = -EBADF;
 				break;
 			}
+			err = security_file_receive(file);
+			if (err) {
+				fput(file);
+				break;
+			}
 			node = io_rsrc_node_alloc(ctx, IORING_RSRC_FILE);
 			if (!node) {
 				err = -ENOMEM;
@@ -464,6 +470,16 @@ static int io_files_update_with_index_alloc(struct io_kiocb *req,
 			ret = -EBADF;
 			break;
 		}
+		if (io_is_uring_fops(file)) {
+			fput(file);
+			ret = -EBADF;
+			break;
+		}
+		ret = security_file_receive(file);
+		if (ret) {
+			fput(file);
+			break;
+		}
 		ret = io_fixed_fd_install(req, issue_flags, file,
 					  IORING_FILE_INDEX_ALLOC);
 		if (ret < 0)
@@ -584,6 +600,11 @@ int io_sqe_files_register(struct io_ring_ctx *ctx, void __user *arg,
 		 * Don't allow io_uring instances to be registered.
 		 */
 		if (io_is_uring_fops(file)) {
+			fput(file);
+			goto fail;
+		}
+		ret = security_file_receive(file);
+		if (ret) {
 			fput(file);
 			goto fail;
 		}
@@ -1297,6 +1318,12 @@ int io_register_clone_buffers(struct io_ring_ctx *ctx, void __user *arg)
 	file = io_uring_register_get_file(buf.src_fd, registered_src);
 	if (IS_ERR(file))
 		return PTR_ERR(file);
+
+	ret = security_file_permission(file, MAY_READ);
+	if (ret) {
+		fput(file);
+		return ret;
+	}
 
 	src_ctx = file->private_data;
 	if (src_ctx != ctx) {

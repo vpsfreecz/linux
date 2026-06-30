@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/pci-p2pdma.h>
+#include <linux/security.h>
 
 MODULE_IMPORT_NS("DMA_BUF");
 
@@ -1857,11 +1858,15 @@ static const struct dma_buf_ops habanalabs_dmabuf_ops = {
 
 static int export_dmabuf(struct hl_ctx *ctx,
 				struct hl_dmabuf_priv *hl_dmabuf,
-				u64 total_size, int flags, int *dmabuf_fd)
+				u64 total_size, int flags, int *dmabuf_fd,
+				bool *wrapper_released)
 {
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
 	struct hl_device *hdev = ctx->hdev;
 	CLASS(get_unused_fd, fd)(flags);
+	int rc;
+
+	*wrapper_released = false;
 
 	if (fd < 0) {
 		dev_err(hdev->dev, "failed to get a file descriptor for a dma-buf, %d\n", fd);
@@ -1888,6 +1893,13 @@ static int export_dmabuf(struct hl_ctx *ctx,
 	 * Paired with fput() in hl_release_dmabuf().
 	 */
 	get_file(ctx->hpriv->file_priv->filp);
+
+	rc = security_file_receive(hl_dmabuf->dmabuf->file);
+	if (rc) {
+		dma_buf_put(hl_dmabuf->dmabuf);
+		*wrapper_released = true;
+		return rc;
+	}
 
 	*dmabuf_fd = fd;
 	fd_install(take_fd(fd), hl_dmabuf->dmabuf->file);
@@ -2035,6 +2047,7 @@ static int export_dmabuf_from_addr(struct hl_ctx *ctx, u64 addr, u64 size, u64 o
 	struct asic_fixed_properties *prop;
 	struct hl_dmabuf_priv *hl_dmabuf;
 	struct hl_device *hdev;
+	bool wrapper_released;
 	int rc;
 
 	hdev = ctx->hdev;
@@ -2076,9 +2089,13 @@ static int export_dmabuf_from_addr(struct hl_ctx *ctx, u64 addr, u64 size, u64 o
 		hl_dmabuf->device_phys_addr = addr;
 	}
 
-	rc = export_dmabuf(ctx, hl_dmabuf, size, flags, dmabuf_fd);
-	if (rc)
+	rc = export_dmabuf(ctx, hl_dmabuf, size, flags, dmabuf_fd,
+			   &wrapper_released);
+	if (rc) {
+		if (wrapper_released)
+			return rc;
 		goto dec_memhash_export_cnt;
+	}
 
 	return 0;
 

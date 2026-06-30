@@ -1537,6 +1537,8 @@ msm_ioctl_vm_bind(struct drm_device *dev, void *data, struct drm_file *file)
 		sync_file = sync_file_create(job->fence);
 		if (!sync_file)
 			ret = -ENOMEM;
+		else
+			ret = sync_file_prepare_install(sync_file);
 	}
 
 	if (ret)
@@ -1571,7 +1573,7 @@ out_post_unlock:
 		if (sync_file)
 			fput(sync_file->file);
 	} else if (sync_file) {
-		fd_install(out_fence_fd, sync_file->file);
+		sync_file_install_prepared(sync_file, out_fence_fd);
 		args->fence_fd = out_fence_fd;
 	}
 

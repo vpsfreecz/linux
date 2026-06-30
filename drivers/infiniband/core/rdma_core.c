@@ -33,6 +33,7 @@
 #include <linux/file.h>
 #include <linux/anon_inodes.h>
 #include <linux/sched/mm.h>
+#include <linux/security.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/uverbs_types.h>
 #include <linux/rcupdate.h>
@@ -339,6 +340,7 @@ lookup_get_fd_uobject(const struct uverbs_api_object *obj,
 	struct file *f;
 	struct ib_uobject *uobject;
 	int fdno = id;
+	int ret;
 
 	if (fdno != id)
 		return ERR_PTR(-EINVAL);
@@ -364,6 +366,11 @@ lookup_get_fd_uobject(const struct uverbs_api_object *obj,
 	if (f->f_op != fd_type->fops || uobject->ufile != ufile) {
 		fput(f);
 		return ERR_PTR(-EBADF);
+	}
+	ret = security_file_permission(f, MAY_READ);
+	if (ret) {
+		fput(f);
+		return ERR_PTR(ret);
 	}
 
 	uverbs_uobject_get(uobject);

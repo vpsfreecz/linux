@@ -43,6 +43,7 @@
 #include <linux/sysctl.h>
 #include <linux/module.h>
 #include <linux/nsproxy.h>
+#include <linux/security.h>
 
 #include <linux/nospec.h>
 
@@ -1696,6 +1697,9 @@ static ssize_t ucma_migrate_id(struct ucma_file *new_file,
 		return -ENOENT;
 	if (fd_file(f)->f_op != &ucma_fops)
 		return -EINVAL;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 	cur_file = fd_file(f)->private_data;
 
 	/* Validate current fd and prevent destruction of id. */

@@ -15,6 +15,7 @@
 #include <linux/mutex.h>
 #include <linux/workqueue.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/sched/clock.h>
 #include <linux/sched/signal.h>
@@ -1497,15 +1498,24 @@ static struct socket *get_tap_socket(int fd)
 {
 	struct file *file = fget(fd);
 	struct socket *sock;
+	int ret;
 
 	if (!file)
 		return ERR_PTR(-EBADF);
 	sock = tun_get_socket(file);
 	if (!IS_ERR(sock))
-		return sock;
+		goto out_check;
 	sock = tap_get_socket(file);
-	if (IS_ERR(sock))
+	if (IS_ERR(sock)) {
 		fput(file);
+		return sock;
+	}
+out_check:
+	ret = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (ret) {
+		fput(file);
+		return ERR_PTR(ret);
+	}
 	return sock;
 }
 

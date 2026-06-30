@@ -1233,6 +1233,7 @@ int security_quota_on(struct dentry *dentry)
 /**
  * security_syslog() - Check if accessing the kernel message ring is allowed
  * @type: SYSLOG_ACTION_* type
+ * @ns: syslog namespace backing the operation
  *
  * Check permission before accessing the kernel message ring or changing
  * logging to the console.  See the syslog(2) manual page for an explanation of
@@ -1240,9 +1241,9 @@ int security_quota_on(struct dentry *dentry)
  *
  * Return: Return 0 if permission is granted.
  */
-int security_syslog(int type)
+int security_syslog(int type, const struct syslog_namespace *ns)
 {
-	return call_int_hook(syslog, type);
+	return call_int_hook(syslog, type, ns);
 }
 
 /**
@@ -1686,6 +1687,23 @@ int security_sb_set_mnt_opts(struct super_block *sb,
 	return rc;
 }
 EXPORT_SYMBOL(security_sb_set_mnt_opts);
+
+/**
+ * security_sb_set_overlayfs_context() - Set overlayfs LSM layer context
+ * @sb: overlayfs superblock
+ * @layer: backing layer path
+ *
+ * Let security modules derive or verify security state for an overlayfs
+ * superblock from one backing layer.
+ *
+ * Return: Returns 0 on success, error on failure.
+ */
+int security_sb_set_overlayfs_context(struct super_block *sb,
+				      const struct path *layer)
+{
+	return call_int_hook(sb_set_overlayfs_context, sb, layer);
+}
+EXPORT_SYMBOL(security_sb_set_overlayfs_context);
 
 /**
  * security_sb_clone_mnt_opts() - Duplicate superblock mount options
@@ -2936,6 +2954,23 @@ int security_file_permission(struct file *file, int mask)
 {
 	return call_int_hook(file_permission, file, mask);
 }
+EXPORT_SYMBOL_GPL(security_file_permission);
+
+/**
+ * security_file_use() - Check descriptor-use permission
+ * @file: file being used through an already-open descriptor
+ *
+ * Check whether the current task may use @file as descriptor authority without
+ * requesting a synthetic read, write, search, or metadata permission on the
+ * underlying object.
+ *
+ * Return: Returns 0 if descriptor use is granted.
+ */
+int security_file_use(struct file *file)
+{
+	return call_int_hook(file_use, file);
+}
+EXPORT_SYMBOL_GPL(security_file_use);
 
 /**
  * security_file_alloc() - Allocate and init a file's LSM blob
@@ -3176,18 +3211,33 @@ int security_file_send_sigiotask(struct task_struct *tsk,
 }
 
 /**
- * security_file_receive() - Check if receiving a file via IPC is allowed
+ * security_file_receive_cred() - Check if receiving a file via IPC is allowed
+ * @cred: receiver credentials
  * @file: file being received
  *
- * This hook allows security modules to control the ability of a process to
- * receive an open file descriptor via socket IPC.
+ * This hook allows security modules to control the ability of @cred to receive
+ * an open file descriptor via socket IPC or an equivalent descriptor-transfer
+ * mechanism.
+ *
+ * Return: Returns 0 if permission is granted.
+ */
+int security_file_receive_cred(const struct cred *cred, struct file *file)
+{
+	return call_int_hook(file_receive, cred, file);
+}
+EXPORT_SYMBOL_GPL(security_file_receive_cred);
+
+/**
+ * security_file_receive() - Check if current may receive a file via IPC
+ * @file: file being received
  *
  * Return: Returns 0 if permission is granted.
  */
 int security_file_receive(struct file *file)
 {
-	return call_int_hook(file_receive, file);
+	return security_file_receive_cred(current_cred(), file);
 }
+EXPORT_SYMBOL_GPL(security_file_receive);
 
 /**
  * security_file_open() - Save open() time state for late use by the LSM

@@ -8,6 +8,7 @@
 #include <linux/mutex.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/security.h>
 #include <rdma/ib_ucaps.h>
 
 #define RDMA_UCAP_FIRST RDMA_UCAP_MLX5_CTRL_LOCAL
@@ -83,10 +84,17 @@ static int get_ucap_from_devt(dev_t devt, u64 *idx_mask)
 static int get_devt_from_fd(unsigned int fd, dev_t *ret_dev)
 {
 	struct file *file;
+	int ret;
 
 	file = fget(fd);
 	if (!file)
 		return -EBADF;
+
+	ret = security_file_permission(file, MAY_READ);
+	if (ret) {
+		fput(file);
+		return ret;
+	}
 
 	*ret_dev = file_inode(file)->i_rdev;
 	fput(file);

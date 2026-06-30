@@ -1395,7 +1395,9 @@ static int __prepare_dmabuf(struct vb2_buffer *vb)
 		return ret;
 
 	for (plane = 0; plane < vb->num_planes; ++plane) {
-		struct dma_buf *dbuf = dma_buf_get(planes[plane].m.fd);
+		struct dma_buf *dbuf = dma_buf_get_with_perm(
+			planes[plane].m.fd,
+			dma_buf_file_perm_from_dma_dir(q->dma_dir));
 
 		planes[plane].dbuf = dbuf;
 

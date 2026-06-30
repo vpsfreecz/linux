@@ -525,8 +525,8 @@ static void apparmor_file_free_security(struct file *file)
 		aa_put_label(rcu_access_pointer(ctx->label));
 }
 
-static int common_file_perm(const char *op, struct file *file, u32 mask,
-			    bool in_atomic)
+static int common_file_perm_cred(const char *op, const struct cred *cred,
+				 struct file *file, u32 mask, bool in_atomic)
 {
 	struct aa_label *label;
 	int error = 0;
@@ -536,17 +536,24 @@ static int common_file_perm(const char *op, struct file *file, u32 mask,
 	if (unlikely(file->f_path.dentry == aa_null.dentry))
 		return -EACCES;
 
-	label = __begin_current_label_crit_section(&needput);
-	error = aa_file_perm(op, current_cred(), label, file, mask, in_atomic);
-	__end_current_label_crit_section(label, needput);
+	label = aa_get_newest_cred_label_condref(cred, &needput);
+	error = aa_file_perm(op, cred, label, file, mask, in_atomic);
+	aa_put_label_condref(label, needput);
 
 	return error;
 }
 
-static int apparmor_file_receive(struct file *file)
+static int common_file_perm(const char *op, struct file *file, u32 mask,
+			    bool in_atomic)
 {
-	return common_file_perm(OP_FRECEIVE, file, aa_map_file_to_perms(file),
-				false);
+	return common_file_perm_cred(op, current_cred(), file, mask,
+				     in_atomic);
+}
+
+static int apparmor_file_receive(const struct cred *cred, struct file *file)
+{
+	return common_file_perm_cred(OP_FRECEIVE, cred, file,
+				     aa_map_file_to_perms(file), false);
 }
 
 static int apparmor_file_permission(struct file *file, int mask)

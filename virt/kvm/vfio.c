@@ -12,6 +12,7 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/vfio.h>
@@ -156,6 +157,9 @@ static int kvm_vfio_file_add(struct kvm_device *dev, unsigned int fd)
 		ret = -EINVAL;
 		goto out_fput;
 	}
+	ret = security_file_permission(filp, MAY_READ | MAY_WRITE);
+	if (ret)
+		goto out_fput;
 
 	mutex_lock(&kv->lock);
 
@@ -194,6 +198,9 @@ static int kvm_vfio_file_del(struct kvm_device *dev, unsigned int fd)
 
 	if (fd_empty(f))
 		return -EBADF;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	ret = -ENOENT;
 
@@ -235,6 +242,9 @@ static int kvm_vfio_file_set_spapr_tce(struct kvm_device *dev,
 	CLASS(fd, f)(param.groupfd);
 	if (fd_empty(f))
 		return -EBADF;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	ret = -ENOENT;
 

@@ -48,17 +48,59 @@ pub fn binder_transfer_file(from: &Credential, to: &Credential, file: &File) -> 
     })
 }
 
+/// Calls the security modules to determine if task `to` may receive the given open file
+/// descriptor through an IPC or equivalent descriptor-transfer mechanism.
+#[inline]
+pub fn file_receive_cred(to: &Credential, file: &File) -> Result {
+    // SAFETY: `to` and `file` are valid because the shared references guarantee nonzero refcounts.
+    to_result(unsafe { bindings::security_file_receive_cred(to.as_ptr(), file.as_ptr()) })
+}
+
 /// A security context string.
 ///
 /// # Invariants
 ///
 /// The `ctx` field corresponds to a valid security context as returned by a successful call to
-/// `security_secid_to_secctx`, that has not yet been released by `security_release_secctx`.
+/// `security_secid_to_secctx` or `security_lsmprop_to_secctx`, that has not yet been released by
+/// `security_release_secctx`.
 pub struct SecurityCtx {
     ctx: bindings::lsm_context,
 }
 
 impl SecurityCtx {
+    /// Get the security context for a credential.
+    #[cfg(CONFIG_SECURITY_SELINUX)]
+    #[inline]
+    pub fn from_cred(cred: &Credential) -> Result<Self> {
+        // SAFETY: `struct lsm_prop` and `struct lsm_context` can be initialized to all zeros.
+        let mut prop: bindings::lsm_prop = unsafe { core::mem::zeroed() };
+        let mut ctx: bindings::lsm_context = unsafe { core::mem::zeroed() };
+
+        // SAFETY: `cred.as_ptr()` is valid because the shared reference guarantees a nonzero
+        // refcount, and `prop` is valid for writes for the immediate conversion below.
+        unsafe { bindings::security_cred_getlsmprop(cred.as_ptr(), &mut prop) };
+
+        // SAFETY: The pointers are valid for the duration of the call. `prop` is a transient
+        // snapshot and is not retained after this conversion.
+        to_result(unsafe {
+            bindings::security_lsmprop_to_secctx(
+                &mut prop,
+                &mut ctx,
+                bindings::LSM_ID_SELINUX as i32,
+            )
+        })?;
+
+        // INVARIANT: If the above call did not fail, then we have a valid security context.
+        Ok(Self { ctx })
+    }
+
+    /// Get the security context for a credential.
+    #[cfg(not(CONFIG_SECURITY_SELINUX))]
+    #[inline]
+    pub fn from_cred(cred: &Credential) -> Result<Self> {
+        Self::from_secid(cred.get_secid())
+    }
+
     /// Get the security context given its id.
     #[inline]
     pub fn from_secid(secid: u32) -> Result<Self> {

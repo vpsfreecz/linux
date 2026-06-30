@@ -715,11 +715,16 @@ static int path_setxattrat(int dfd, const char __user *pathname,
 		CLASS(fd, f)(dfd);
 		if (fd_empty(f))
 			error = -EBADF;
-		else
+		else {
+			error = security_file_use(fd_file(f));
+			if (error)
+				goto out;
 			error = file_setxattr(fd_file(f), &ctx);
+		}
 	} else {
 		error = filename_setxattr(dfd, filename, lookup_flags, &ctx);
 	}
+out:
 	kvfree(ctx.kvalue);
 	return error;
 }
@@ -859,6 +864,9 @@ static ssize_t path_getxattrat(int dfd, const char __user *pathname,
 		CLASS(fd, f)(dfd);
 		if (fd_empty(f))
 			return -EBADF;
+		error = security_file_use(fd_file(f));
+		if (error)
+			return error;
 		return file_getxattr(fd_file(f), &ctx);
 	} else {
 		int lookup_flags = 0;
@@ -979,6 +987,7 @@ static ssize_t path_listxattrat(int dfd, const char __user *pathname,
 				size_t size)
 {
 	struct filename *filename;
+	ssize_t error;
 	int lookup_flags;
 
 	if ((at_flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0)
@@ -989,6 +998,9 @@ static ssize_t path_listxattrat(int dfd, const char __user *pathname,
 		CLASS(fd, f)(dfd);
 		if (fd_empty(f))
 			return -EBADF;
+		error = security_file_use(fd_file(f));
+		if (error)
+			return error;
 		return file_listxattr(fd_file(f), list, size);
 	}
 
@@ -1090,6 +1102,9 @@ static int path_removexattrat(int dfd, const char __user *pathname,
 		CLASS(fd, f)(dfd);
 		if (fd_empty(f))
 			return -EBADF;
+		error = security_file_use(fd_file(f));
+		if (error)
+			return error;
 		return file_removexattr(fd_file(f), &kname);
 	}
 	lookup_flags = (at_flags & AT_SYMLINK_NOFOLLOW) ? 0 : LOOKUP_FOLLOW;

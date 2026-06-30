@@ -7,6 +7,7 @@
 #include <linux/slab.h>
 #include <linux/namei.h>
 #include <linux/io_uring.h>
+#include <linux/security.h>
 
 #include <uapi/linux/fadvise.h>
 #include <uapi/linux/io_uring.h>
@@ -96,11 +97,21 @@ int io_fadvise_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 int io_fadvise(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_fadvise *fa = io_kiocb_to_cmd(req, struct io_fadvise);
+	int mask = 0;
 	int ret;
 
 	WARN_ON_ONCE(issue_flags & IO_URING_F_NONBLOCK && io_fadvise_force_async(fa));
 
-	ret = vfs_fadvise(req->file, fa->offset, fa->len, fa->advice);
+	if (req->file->f_mode & FMODE_READ)
+		mask |= MAY_READ;
+	if (req->file->f_mode & FMODE_WRITE)
+		mask |= MAY_WRITE;
+	if (!mask)
+		ret = -EBADF;
+	else
+		ret = security_file_permission(req->file, mask);
+	if (!ret)
+		ret = vfs_fadvise(req->file, fa->offset, fa->len, fa->advice);
 	if (ret < 0)
 		req_set_fail(req);
 	io_req_set_res(req, ret, 0);

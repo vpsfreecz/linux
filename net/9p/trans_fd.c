@@ -23,6 +23,7 @@
 #include <linux/inet.h>
 #include <linux/file.h>
 #include <linux/parser.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <net/9p/9p.h>
@@ -824,6 +825,7 @@ static int p9_fd_open(struct p9_client *client, int rfd, int wfd)
 {
 	struct p9_trans_fd *ts = kzalloc(sizeof(struct p9_trans_fd),
 					   GFP_KERNEL);
+	int err = -EIO;
 	if (!ts)
 		return -ENOMEM;
 
@@ -831,6 +833,9 @@ static int p9_fd_open(struct p9_client *client, int rfd, int wfd)
 	if (!ts->rd)
 		goto out_free_ts;
 	if (!(ts->rd->f_mode & FMODE_READ))
+		goto out_put_rd;
+	err = security_file_permission(ts->rd, MAY_READ);
+	if (err)
 		goto out_put_rd;
 	/* Prevent workers from hanging on IO when fd is a pipe.
 	 * It's technically possible for userspace or concurrent mounts to
@@ -841,10 +846,14 @@ static int p9_fd_open(struct p9_client *client, int rfd, int wfd)
 	 * can allow it and detect further problems.
 	 */
 	data_race(ts->rd->f_flags |= O_NONBLOCK);
+	err = -EIO;
 	ts->wr = fget(wfd);
 	if (!ts->wr)
 		goto out_put_rd;
 	if (!(ts->wr->f_mode & FMODE_WRITE))
+		goto out_put_wr;
+	err = security_file_permission(ts->wr, MAY_WRITE);
+	if (err)
 		goto out_put_wr;
 	data_race(ts->wr->f_flags |= O_NONBLOCK);
 
@@ -859,7 +868,7 @@ out_put_rd:
 	fput(ts->rd);
 out_free_ts:
 	kfree(ts);
-	return -EIO;
+	return err;
 }
 
 static int p9_socket_open(struct p9_client *client, struct socket *csocket)

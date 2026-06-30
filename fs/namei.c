@@ -2603,9 +2603,18 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 			nd->inode = nd->path.dentry->d_inode;
 		}
 	} else {
-		/* Caller must check execute permissions on the starting path component */
-		CLASS(fd_raw, f)(nd->dfd);
 		struct dentry *dentry;
+		int error;
+
+		/*
+		 * A non-AT_FDCWD dirfd is itself descriptor authority for the
+		 * lookup root.  Revalidate it outside RCU mode before copying
+		 * its path into nameidata.
+		 */
+		if (flags & LOOKUP_RCU)
+			return ERR_PTR(-ECHILD);
+
+		CLASS(fd_raw, f)(nd->dfd);
 
 		if (fd_empty(f))
 			return ERR_PTR(-EBADF);
@@ -2621,14 +2630,19 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 		if (*s && unlikely(!d_can_lookup(dentry)))
 			return ERR_PTR(-ENOTDIR);
 
-		nd->path = fd_file(f)->f_path;
-		if (flags & LOOKUP_RCU) {
-			nd->inode = nd->path.dentry->d_inode;
-			nd->seq = read_seqcount_begin(&nd->path.dentry->d_seq);
-		} else {
-			path_get(&nd->path);
-			nd->inode = nd->path.dentry->d_inode;
+		if (*s) {
+			error = security_file_permission(fd_file(f), MAY_EXEC);
+			if (error)
+				return ERR_PTR(error);
+		} else if (flags & LOOKUP_EMPTY) {
+			error = security_file_use(fd_file(f));
+			if (error)
+				return ERR_PTR(error);
 		}
+
+		nd->path = fd_file(f)->f_path;
+		path_get(&nd->path);
+		nd->inode = nd->path.dentry->d_inode;
 	}
 
 	/* For scoped-lookups we need to set the root to the dirfd as well. */

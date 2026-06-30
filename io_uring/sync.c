@@ -8,6 +8,7 @@
 #include <linux/namei.h>
 #include <linux/io_uring.h>
 #include <linux/fsnotify.h>
+#include <linux/security.h>
 
 #include <uapi/linux/io_uring.h>
 
@@ -71,13 +72,27 @@ int io_fsync(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_sync *sync = io_kiocb_to_cmd(req, struct io_sync);
 	loff_t end = sync->off + sync->len;
+	int mask = 0;
 	int ret;
 
 	/* fsync always requires a blocking context */
 	WARN_ON_ONCE(issue_flags & IO_URING_F_NONBLOCK);
 
+	if (req->file->f_mode & FMODE_READ)
+		mask |= MAY_READ;
+	if (req->file->f_mode & FMODE_WRITE)
+		mask |= MAY_WRITE;
+	if (!mask) {
+		ret = -EBADF;
+		goto out;
+	}
+	ret = security_file_permission(req->file, mask);
+	if (ret)
+		goto out;
+
 	ret = vfs_fsync_range(req->file, sync->off, end > 0 ? end : LLONG_MAX,
 				sync->flags & IORING_FSYNC_DATASYNC);
+out:
 	io_req_set_res(req, ret, 0);
 	return IOU_COMPLETE;
 }

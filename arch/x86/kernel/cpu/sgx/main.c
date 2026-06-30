@@ -11,6 +11,7 @@
 #include <linux/ratelimit.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/vmalloc.h>
@@ -905,12 +906,17 @@ int sgx_set_attribute(unsigned long *allowed_attributes,
 		      unsigned int attribute_fd)
 {
 	CLASS(fd, f)(attribute_fd);
+	int ret;
 
 	if (fd_empty(f))
 		return -EINVAL;
 
 	if (fd_file(f)->f_op != &sgx_provision_fops)
 		return -EINVAL;
+
+	ret = security_file_permission(fd_file(f), MAY_READ);
+	if (ret)
+		return ret;
 
 	*allowed_attributes |= SGX_ATTR_PROVISIONKEY;
 	return 0;

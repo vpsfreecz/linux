@@ -122,7 +122,8 @@ static int io_import_dmabuf(struct io_zcrx_ifq *ifq,
 		return -EINVAL;
 
 	mem->is_dmabuf = true;
-	mem->dmabuf = dma_buf_get(dmabuf_fd);
+	mem->dmabuf = dma_buf_get_with_perm(
+		dmabuf_fd, dma_buf_file_perm_from_dma_dir(DMA_FROM_DEVICE));
 	if (IS_ERR(mem->dmabuf)) {
 		ret = PTR_ERR(mem->dmabuf);
 		mem->dmabuf = NULL;

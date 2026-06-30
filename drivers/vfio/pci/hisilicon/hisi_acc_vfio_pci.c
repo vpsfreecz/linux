@@ -10,6 +10,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/security.h>
 #include <linux/vfio.h>
 #include <linux/vfio_pci_core.h>
 #include <linux/anon_inodes.h>
@@ -843,6 +844,10 @@ static long hisi_acc_vf_precopy_ioctl(struct file *filp,
 
 	if (cmd != VFIO_MIG_GET_PRECOPY_INFO)
 		return -ENOTTY;
+
+	ret = security_file_permission(filp, MAY_READ);
+	if (ret)
+		return ret;
 
 	minsz = offsetofend(struct vfio_precopy_info, dirty_bytes);
 

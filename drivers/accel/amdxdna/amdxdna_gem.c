@@ -565,7 +565,8 @@ amdxdna_gem_create_ubuf_object(struct drm_device *dev, struct amdxdna_drm_create
 		dma_buf = amdxdna_get_ubuf(dev, flags, va_tbl.num_entries,
 					   u64_to_user_ptr(args->vaddr + sizeof(va_tbl)));
 	} else {
-		dma_buf = dma_buf_get(va_tbl.dmabuf_fd);
+		dma_buf = dma_buf_get_with_perm(va_tbl.dmabuf_fd,
+						 MAY_READ | MAY_WRITE);
 	}
 
 	if (IS_ERR(dma_buf))

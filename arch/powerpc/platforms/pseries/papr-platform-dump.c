@@ -8,6 +8,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
+#include <linux/security.h>
 #include <asm/machdep.h>
 #include <asm/rtas-work-area.h>
 #include <asm/rtas.h>
@@ -237,9 +238,14 @@ static long papr_platform_dump_invalidate_ioctl(struct file *file,
 	struct ibm_platform_dump_params *params;
 	u64 __user *argp = (void __user *)arg;
 	u64 param_dump_tag, dump_tag;
+	int ret;
 
 	if (ioctl != PAPR_PLATFORM_DUMP_IOC_INVALIDATE)
 		return -ENOIOCTLCMD;
+
+	ret = security_file_permission(file, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	if (get_user(dump_tag, argp))
 		return -EFAULT;
@@ -374,6 +380,10 @@ static long papr_platform_dump_dev_ioctl(struct file *filp,
 	u64 __user *argp = (void __user *)arg;
 	u64 dump_tag;
 	long ret;
+
+	ret = security_file_permission(filp, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	if (get_user(dump_tag, argp))
 		return -EFAULT;

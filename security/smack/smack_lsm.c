@@ -501,10 +501,11 @@ static int smack_ptrace_traceme(struct task_struct *ptp)
 /**
  * smack_syslog - Smack approval on syslog
  * @typefrom_file: unused
+ * @ns: unused
  *
  * Returns 0 on success, error code otherwise.
  */
-static int smack_syslog(int typefrom_file)
+static int smack_syslog(int typefrom_file, const struct syslog_namespace *ns)
 {
 	int rc = 0;
 	struct smack_known *skp = smk_of_current();
@@ -1955,9 +1956,9 @@ static int smack_file_send_sigiotask(struct task_struct *tsk,
  * smack_file_receive - Smack file receive check
  * @file: the object
  *
- * Returns 0 if current has access, error code otherwise
+ * Returns 0 if @cred has access, error code otherwise
  */
-static int smack_file_receive(struct file *file)
+static int smack_file_receive(const struct cred *cred, struct file *file)
 {
 	int rc;
 	int may = 0;
@@ -1976,7 +1977,7 @@ static int smack_file_receive(struct file *file)
 	if (inode->i_sb->s_magic == SOCKFS_MAGIC) {
 		sock = SOCKET_I(inode);
 		ssp = smack_sock(sock->sk);
-		tsp = smack_cred(current_cred());
+		tsp = smack_cred(cred);
 		/*
 		 * If the receiving process can't write to the
 		 * passed socket or if the passed socket can't
@@ -1999,7 +2000,8 @@ static int smack_file_receive(struct file *file)
 	if (file->f_mode & FMODE_WRITE)
 		may |= MAY_WRITE;
 
-	rc = smk_curacc(smk_of_inode(inode), may, &ad);
+	tsp = smack_cred(cred);
+	rc = smk_tskacc(tsp, smk_of_inode(inode), may, &ad);
 	rc = smk_bu_file(file, may, rc);
 	return rc;
 }

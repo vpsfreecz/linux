@@ -1473,7 +1473,9 @@ static int ffs_dmabuf_attach(struct file *file, int fd)
 	if (!gadget || !gadget->sg_supported)
 		return -EPERM;
 
-	dmabuf = dma_buf_get(fd);
+	dir = epfile->in ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
+	dmabuf = dma_buf_get_with_perm(
+		fd, dma_buf_file_perm_from_dma_dir(dir));
 	if (IS_ERR(dmabuf))
 		return PTR_ERR(dmabuf);
 
@@ -1488,8 +1490,6 @@ static int ffs_dmabuf_attach(struct file *file, int fd)
 		err = -ENOMEM;
 		goto err_dmabuf_detach;
 	}
-
-	dir = epfile->in ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
 
 	err = ffs_dma_resv_lock(dmabuf, nonblock);
 	if (err)
@@ -1538,7 +1538,7 @@ static int ffs_dmabuf_detach(struct file *file, int fd)
 	struct dma_buf *dmabuf;
 	int ret = -EPERM;
 
-	dmabuf = dma_buf_get(fd);
+	dmabuf = dma_buf_get_with_perm(fd, MAY_READ);
 	if (IS_ERR(dmabuf))
 		return PTR_ERR(dmabuf);
 
@@ -1589,7 +1589,11 @@ static int ffs_dmabuf_transfer(struct file *file,
 	if (req->flags & ~USB_FFS_DMABUF_TRANSFER_MASK)
 		return -EINVAL;
 
-	dmabuf = dma_buf_get(req->fd);
+	dmabuf = dma_buf_get_with_perm(
+		req->fd,
+		dma_buf_file_perm_from_dma_dir(epfile->in ?
+					       DMA_FROM_DEVICE :
+					       DMA_TO_DEVICE));
 	if (IS_ERR(dmabuf))
 		return PTR_ERR(dmabuf);
 

@@ -5,6 +5,7 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/nospec.h>
+#include <linux/security.h>
 #include <linux/io_uring.h>
 
 #include <uapi/linux/io_uring.h>
@@ -237,7 +238,7 @@ static int io_ring_add_registered_fd(struct io_uring_task *tctx, int fd,
 				     int start, int end)
 {
 	struct file *file;
-	int offset;
+	int offset, ret;
 
 	file = fget(fd);
 	if (!file) {
@@ -245,6 +246,11 @@ static int io_ring_add_registered_fd(struct io_uring_task *tctx, int fd,
 	} else if (!io_is_uring_fops(file)) {
 		fput(file);
 		return -EOPNOTSUPP;
+	}
+	ret = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (ret) {
+		fput(file);
+		return ret;
 	}
 	offset = io_ring_add_registered_file(tctx, file, start, end);
 	if (offset < 0)

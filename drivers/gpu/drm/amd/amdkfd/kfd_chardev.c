@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/compat.h>
+#include <linux/security.h>
 #include <uapi/linux/kfd_ioctl.h>
 #include <linux/time.h>
 #include <linux/mm.h>
@@ -978,6 +979,11 @@ static int kfd_ioctl_acquire_vm(struct file *filep, struct kfd_process *p,
 	drm_file = fget(args->drm_fd);
 	if (!drm_file)
 		return -EINVAL;
+	ret = security_file_permission(drm_file, MAY_READ | MAY_WRITE);
+	if (ret) {
+		fput(drm_file);
+		return ret;
+	}
 
 	mutex_lock(&p->mutex);
 	pdd = kfd_process_device_data_by_id(p, args->gpu_id);
@@ -1848,6 +1854,7 @@ static int criu_get_prime_handle(struct kgd_mem *mem,
 				 struct file **file)
 {
 	struct dma_buf *dmabuf;
+	int fd;
 	int ret;
 
 	ret = amdgpu_amdkfd_gpuvm_export_dmabuf(mem, &dmabuf);
@@ -1861,11 +1868,18 @@ static int criu_get_prime_handle(struct kgd_mem *mem,
 		pr_err("dmabuf create fd failed, ret:%d\n", ret);
 		goto out_free_dmabuf;
 	}
+	fd = ret;
 
-	*shared_fd = ret;
+	ret = security_file_receive(dmabuf->file);
+	if (ret)
+		goto out_put_fd;
+
+	*shared_fd = fd;
 	*file = dmabuf->file;
 	return 0;
 
+out_put_fd:
+	put_unused_fd(fd);
 out_free_dmabuf:
 	dma_buf_put(dmabuf);
 	return ret;
@@ -2248,8 +2262,14 @@ static int criu_restore_devices(struct kfd_process *p,
 			ret = -EINVAL;
 			goto exit;
 		}
+		ret = security_file_permission(drm_file, MAY_READ | MAY_WRITE);
+		if (ret) {
+			fput(drm_file);
+			goto exit;
+		}
 
 		if (pdd->drm_file) {
+			fput(drm_file);
 			ret = -EINVAL;
 			goto exit;
 		}

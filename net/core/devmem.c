@@ -195,7 +195,8 @@ net_devmem_bind_dmabuf(struct net_device *dev,
 		return ERR_PTR(-EOPNOTSUPP);
 	}
 
-	dmabuf = dma_buf_get(dmabuf_fd);
+	dmabuf = dma_buf_get_with_perm(
+		dmabuf_fd, dma_buf_file_perm_from_dma_dir(direction));
 	if (IS_ERR(dmabuf))
 		return ERR_CAST(dmabuf);
 

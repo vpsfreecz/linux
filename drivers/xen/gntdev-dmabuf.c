@@ -16,6 +16,7 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/module.h>
+#include <linux/security.h>
 
 #include <xen/xen.h>
 #include <xen/grant_table.h>
@@ -359,6 +360,7 @@ static int dmabuf_exp_from_pages(struct gntdev_dmabuf_export_args *args)
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
 	struct gntdev_dmabuf *gntdev_dmabuf __free(kfree) = NULL;
 	CLASS(get_unused_fd, ret)(O_CLOEXEC);
+	int rc;
 
 	if (ret < 0)
 		return ret;
@@ -398,6 +400,14 @@ static int dmabuf_exp_from_pages(struct gntdev_dmabuf_export_args *args)
 	mutex_lock(&args->dmabuf_priv->lock);
 	list_add(&gntdev_dmabuf->next, &args->dmabuf_priv->exp_list);
 	mutex_unlock(&args->dmabuf_priv->lock);
+
+	rc = security_file_receive(gntdev_dmabuf->dmabuf->file);
+	if (rc) {
+		dma_buf_put(gntdev_dmabuf->dmabuf);
+		args->map = NULL;
+		retain_and_null_ptr(gntdev_dmabuf);
+		return rc;
+	}
 
 	fd_install(take_fd(ret), no_free_ptr(gntdev_dmabuf)->dmabuf->file);
 	return 0;
@@ -463,8 +473,11 @@ static int dmabuf_exp_from_refs(struct gntdev_priv *priv, int flags,
 	args.fd = -1; /* Shut up unnecessary gcc warning for i386 */
 
 	ret = dmabuf_exp_from_pages(&args);
-	if (ret < 0)
+	if (ret < 0) {
+		if (!args.map)
+			return ret;
 		goto out;
+	}
 
 	*fd = args.fd;
 	return 0;
@@ -566,7 +579,7 @@ dmabuf_imp_to_refs(struct gntdev_dmabuf_priv *priv, struct device *dev,
 	unsigned long *gfns;
 	int i;
 
-	dma_buf = dma_buf_get(fd);
+	dma_buf = dma_buf_get_with_perm(fd, MAY_READ | MAY_WRITE);
 	if (IS_ERR(dma_buf))
 		return ERR_CAST(dma_buf);
 

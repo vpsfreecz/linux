@@ -27,6 +27,7 @@
 #include <linux/dma-buf.h>
 #include <linux/module.h>
 #include <linux/compat.h>
+#include <linux/security.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/info.h>
@@ -1079,6 +1080,12 @@ static int snd_compr_task_new(struct snd_compr_stream *stream, struct snd_compr_
 		retval = -EINVAL;
 		goto cleanup;
 	}
+	retval = security_file_receive(task->input->file);
+	if (retval)
+		goto cleanup;
+	retval = security_file_receive(task->output->file);
+	if (retval)
+		goto cleanup;
 	fd_i = get_unused_fd_flags(O_WRONLY|O_CLOEXEC);
 	if (fd_i < 0)
 		goto cleanup;

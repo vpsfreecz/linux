@@ -56,6 +56,9 @@ struct sync_file {
 #define POLL_ENABLED 0
 
 struct sync_file *sync_file_create(struct dma_fence *fence);
+int sync_file_prepare_install(struct sync_file *sync_file);
+int sync_file_install(struct sync_file *sync_file, int fd);
+void sync_file_install_prepared(struct sync_file *sync_file, int fd);
 struct dma_fence *sync_file_get_fence(int fd);
 char *sync_file_get_name(struct sync_file *sync_file, char *buf, int len);
 

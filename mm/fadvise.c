@@ -18,6 +18,7 @@
 #include <linux/writeback.h>
 #include <linux/syscalls.h>
 #include <linux/swap.h>
+#include <linux/security.h>
 
 #include <asm/unistd.h>
 
@@ -190,10 +191,21 @@ EXPORT_SYMBOL(vfs_fadvise);
 
 int ksys_fadvise64_64(int fd, loff_t offset, loff_t len, int advice)
 {
+	int mask = 0;
+	int ret;
 	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
 		return -EBADF;
+	if (fd_file(f)->f_mode & FMODE_READ)
+		mask |= MAY_READ;
+	if (fd_file(f)->f_mode & FMODE_WRITE)
+		mask |= MAY_WRITE;
+	if (!mask)
+		return -EBADF;
+	ret = security_file_permission(fd_file(f), mask);
+	if (ret)
+		return ret;
 
 	return vfs_fadvise(fd_file(f), offset, len, advice);
 }

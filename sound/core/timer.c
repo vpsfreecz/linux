@@ -15,6 +15,7 @@
 #include <linux/sched/signal.h>
 #include <linux/anon_inodes.h>
 #include <linux/idr.h>
+#include <linux/security.h>
 #include <sound/core.h>
 #include <sound/timer.h>
 #include <sound/control.h>
@@ -2074,8 +2075,13 @@ static int snd_utimer_trigger(struct file *file)
 
 static long snd_utimer_ioctl(struct file *file, unsigned int ioctl, unsigned long arg)
 {
+	int err;
+
 	switch (ioctl) {
 	case SNDRV_TIMER_IOCTL_TRIGGER:
+		err = security_file_permission(file, MAY_WRITE);
+		if (err)
+			return err;
 		return snd_utimer_trigger(file);
 	}
 
@@ -2289,10 +2295,52 @@ static long __snd_timer_user_ioctl(struct file *file, unsigned int cmd,
 	return -ENOTTY;
 }
 
+static int snd_timer_user_ioctl_permission(struct file *file, unsigned int cmd)
+{
+	int mask;
+
+	switch (cmd) {
+	case SNDRV_TIMER_IOCTL_PVERSION:
+	case SNDRV_TIMER_IOCTL_NEXT_DEVICE:
+	case SNDRV_TIMER_IOCTL_GINFO:
+	case SNDRV_TIMER_IOCTL_GSTATUS:
+	case SNDRV_TIMER_IOCTL_INFO:
+	case SNDRV_TIMER_IOCTL_STATUS32:
+	case SNDRV_TIMER_IOCTL_STATUS64:
+		mask = MAY_READ;
+		break;
+	case SNDRV_TIMER_IOCTL_TREAD_OLD:
+	case SNDRV_TIMER_IOCTL_TREAD64:
+	case SNDRV_TIMER_IOCTL_GPARAMS:
+	case SNDRV_TIMER_IOCTL_SELECT:
+	case SNDRV_TIMER_IOCTL_PARAMS:
+	case SNDRV_TIMER_IOCTL_START:
+	case SNDRV_TIMER_IOCTL_START_OLD:
+	case SNDRV_TIMER_IOCTL_STOP:
+	case SNDRV_TIMER_IOCTL_STOP_OLD:
+	case SNDRV_TIMER_IOCTL_CONTINUE:
+	case SNDRV_TIMER_IOCTL_CONTINUE_OLD:
+	case SNDRV_TIMER_IOCTL_PAUSE:
+	case SNDRV_TIMER_IOCTL_PAUSE_OLD:
+	case SNDRV_TIMER_IOCTL_CREATE:
+		mask = MAY_WRITE;
+		break;
+	default:
+		return 0;
+	}
+
+	return security_file_permission(file, mask);
+}
+
 static long snd_timer_user_ioctl(struct file *file, unsigned int cmd,
 				 unsigned long arg)
 {
 	struct snd_timer_user *tu = file->private_data;
+	int err;
+
+	err = snd_timer_user_ioctl_permission(file, cmd);
+	if (err)
+		return err;
 
 	guard(mutex)(&tu->ioctl_lock);
 	return __snd_timer_user_ioctl(file, cmd, arg, false);

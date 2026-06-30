@@ -95,6 +95,10 @@ struct bpf_map_ops {
 	int (*map_get_next_key)(struct bpf_map *map, void *key, void *next_key);
 	void (*map_release_uref)(struct bpf_map *map);
 	void *(*map_lookup_elem_sys_only)(struct bpf_map *map, void *key);
+	void *(*map_lookup_fd_key)(struct bpf_map *map, struct file *file);
+	long (*map_update_fd_key)(struct bpf_map *map, struct file *file,
+				  void *value, u64 flags);
+	long (*map_delete_fd_key)(struct bpf_map *map, struct file *file);
 	int (*map_lookup_batch)(struct bpf_map *map, const union bpf_attr *attr,
 				union bpf_attr __user *uattr);
 	int (*map_lookup_and_delete_elem)(struct bpf_map *map, void *key,
@@ -2617,6 +2621,7 @@ bool bpf_token_task_match(const struct bpf_token *token,
 			     const struct task_struct *task);
 bool bpf_token_current_container_capable(int cap);
 bool bpf_token_current_container_member(void);
+bool bpf_token_current_container_task_allowed(const struct task_struct *task);
 bool bpf_token_current_restrict_tracing_symbols(void);
 struct bpf_token *bpf_token_get_current_container(void);
 bool bpf_token_allow_prog_helper(const struct bpf_prog *prog, enum bpf_func_id func_id);
@@ -2667,6 +2672,8 @@ struct bpf_link *bpf_link_inc_not_zero(struct bpf_link *link);
 void bpf_link_put(struct bpf_link *link);
 bool bpf_link_current_container_allowed(const struct bpf_link *link);
 int bpf_link_new_fd(struct bpf_link *link);
+bool bpf_link_file(const struct file *file);
+struct bpf_prog *bpf_link_file_prog(const struct file *file);
 struct bpf_link *bpf_link_get_from_fd(u32 ufd);
 struct bpf_link *bpf_link_get_curr_or_next(u32 *id);
 
@@ -3044,6 +3051,16 @@ static inline void bpf_link_inc(struct bpf_link *link)
 {
 }
 
+static inline bool bpf_link_file(const struct file *file)
+{
+	return false;
+}
+
+static inline struct bpf_prog *bpf_link_file_prog(const struct file *file)
+{
+	return NULL;
+}
+
 static inline struct bpf_link *bpf_link_inc_not_zero(struct bpf_link *link)
 {
 	return NULL;
@@ -3088,6 +3105,11 @@ static inline bool bpf_token_current_container_capable(int cap)
 static inline bool bpf_token_current_container_member(void)
 {
 	return false;
+}
+
+static inline bool bpf_token_current_container_task_allowed(const struct task_struct *task)
+{
+	return true;
 }
 
 static inline bool bpf_token_current_restrict_tracing_symbols(void)

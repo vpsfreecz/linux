@@ -225,7 +225,7 @@ struct tee_shm *tee_shm_register_fd(struct tee_context *ctx, int fd)
 	ref->shm.id = -1;
 	ref->shm.flags = TEE_SHM_DMA_BUF;
 
-	ref->dmabuf = dma_buf_get(fd);
+	ref->dmabuf = dma_buf_get_with_perm(fd, MAY_READ | MAY_WRITE);
 	if (IS_ERR(ref->dmabuf)) {
 		rc = PTR_ERR(ref->dmabuf);
 		goto err_kfree_ref;

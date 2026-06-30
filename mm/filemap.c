@@ -4608,7 +4608,7 @@ resched:
 static inline bool can_do_cachestat(struct file *f)
 {
 	if (f->f_mode & FMODE_WRITE)
-		return true;
+		return security_file_permission(f, MAY_WRITE) == 0;
 	if (inode_owner_or_capable(file_mnt_idmap(f), file_inode(f)))
 		return true;
 	return file_permission(f, MAY_WRITE) == 0;

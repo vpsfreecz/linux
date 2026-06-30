@@ -13,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/sched/stat.h>
+#include <linux/security.h>
 #include <linux/module.h>
 #include <linux/bitops.h>
 #include <linux/user_namespace.h>
@@ -120,6 +121,7 @@ static int proc_parse_pidns_param(struct fs_context *fc,
 	struct pid_namespace *target, *active = task_active_pid_ns(current);
 	struct ns_common *ns;
 	struct file *ns_filp __free(fput) = NULL;
+	int err;
 
 	switch (param->type) {
 	case fs_value_is_file:
@@ -139,6 +141,10 @@ static int proc_parse_pidns_param(struct fs_context *fc,
 		errorfc(fc, "could not get file from pidns argument");
 		return PTR_ERR(ns_filp);
 	}
+
+	err = security_file_permission(ns_filp, MAY_READ);
+	if (err)
+		return err;
 
 	if (!proc_ns_file(ns_filp))
 		return invalfc(fc, "pidns argument is not an nsfs file");

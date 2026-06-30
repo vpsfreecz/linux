@@ -73,33 +73,50 @@ out:
 	rcu_read_unlock_migrate();
 }
 
-static void *bpf_fd_inode_storage_lookup_elem(struct bpf_map *map, void *key)
+static void *bpf_file_inode_storage_lookup_elem(struct bpf_map *map,
+						struct file *file)
 {
 	struct bpf_local_storage_data *sdata;
+
+	sdata = inode_storage_lookup(file_inode(file), map, true);
+	return sdata ? sdata->data : NULL;
+}
+
+static void *bpf_fd_inode_storage_lookup_elem(struct bpf_map *map, void *key)
+{
 	CLASS(fd_raw, f)(*(int *)key);
 
 	if (fd_empty(f))
 		return ERR_PTR(-EBADF);
 
-	sdata = inode_storage_lookup(file_inode(fd_file(f)), map, true);
-	return sdata ? sdata->data : NULL;
+	return bpf_file_inode_storage_lookup_elem(map, fd_file(f));
+}
+
+static long bpf_file_inode_storage_update_elem(struct bpf_map *map,
+					       struct file *file, void *value,
+					       u64 map_flags)
+{
+	struct bpf_local_storage_data *sdata;
+
+	if (!inode_storage_ptr(file_inode(file)))
+		return -EBADF;
+
+	sdata = bpf_local_storage_update(file_inode(file),
+					 (struct bpf_local_storage_map *)map,
+					 value, map_flags, false, GFP_ATOMIC);
+	return PTR_ERR_OR_ZERO(sdata);
 }
 
 static long bpf_fd_inode_storage_update_elem(struct bpf_map *map, void *key,
 					     void *value, u64 map_flags)
 {
-	struct bpf_local_storage_data *sdata;
 	CLASS(fd_raw, f)(*(int *)key);
 
 	if (fd_empty(f))
 		return -EBADF;
-	if (!inode_storage_ptr(file_inode(fd_file(f))))
-		return -EBADF;
 
-	sdata = bpf_local_storage_update(file_inode(fd_file(f)),
-					 (struct bpf_local_storage_map *)map,
-					 value, map_flags, false, GFP_ATOMIC);
-	return PTR_ERR_OR_ZERO(sdata);
+	return bpf_file_inode_storage_update_elem(map, fd_file(f), value,
+						  map_flags);
 }
 
 static int inode_storage_delete(struct inode *inode, struct bpf_map *map)
@@ -115,13 +132,20 @@ static int inode_storage_delete(struct inode *inode, struct bpf_map *map)
 	return 0;
 }
 
+static long bpf_file_inode_storage_delete_elem(struct bpf_map *map,
+					       struct file *file)
+{
+	return inode_storage_delete(file_inode(file), map);
+}
+
 static long bpf_fd_inode_storage_delete_elem(struct bpf_map *map, void *key)
 {
 	CLASS(fd_raw, f)(*(int *)key);
 
 	if (fd_empty(f))
 		return -EBADF;
-	return inode_storage_delete(file_inode(fd_file(f)), map);
+
+	return bpf_file_inode_storage_delete_elem(map, fd_file(f));
 }
 
 /* *gfp_flags* is a hidden argument provided by the verifier */
@@ -195,6 +219,9 @@ const struct bpf_map_ops inode_storage_map_ops = {
 	.map_alloc = inode_storage_map_alloc,
 	.map_free = inode_storage_map_free,
 	.map_get_next_key = notsupp_get_next_key,
+	.map_lookup_fd_key = bpf_file_inode_storage_lookup_elem,
+	.map_update_fd_key = bpf_file_inode_storage_update_elem,
+	.map_delete_fd_key = bpf_file_inode_storage_delete_elem,
 	.map_lookup_elem = bpf_fd_inode_storage_lookup_elem,
 	.map_update_elem = bpf_fd_inode_storage_update_elem,
 	.map_delete_elem = bpf_fd_inode_storage_delete_elem,

@@ -326,11 +326,26 @@ static struct user_namespace *syslogns_owner(struct ns_common *ns)
 	return to_syslog_ns(ns)->user_ns;
 }
 
+static bool syslogns_contains(const struct syslog_namespace *ancestor,
+			      const struct syslog_namespace *ns)
+{
+	while (ns) {
+		if (ns == ancestor)
+			return true;
+		ns = ns->parent;
+	}
+
+	return false;
+}
+
 static struct ns_common *syslogns_get_parent(struct ns_common *ns)
 {
 	struct syslog_namespace *parent = to_syslog_ns(ns)->parent;
+	struct syslog_namespace *caller_ns = current_syslog_ns();
 
 	if (!parent)
+		return ERR_PTR(-EPERM);
+	if (!caller_ns || !syslogns_contains(caller_ns, parent))
 		return ERR_PTR(-EPERM);
 
 	return &get_syslog_ns(parent)->ns;

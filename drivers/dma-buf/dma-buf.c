@@ -29,6 +29,7 @@
 #include <linux/mm.h>
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
+#include <linux/security.h>
 
 #include <uapi/linux/dma-buf.h>
 #include <uapi/linux/magic.h>
@@ -453,7 +454,9 @@ static long dma_buf_export_sync_file(struct dma_buf *dmabuf,
 		goto err_put_file;
 	}
 
-	fd_install(fd, sync_file->file);
+	ret = sync_file_install(sync_file, fd);
+	if (ret)
+		goto err_put_file;
 
 	return 0;
 
@@ -769,9 +772,14 @@ EXPORT_SYMBOL_NS_GPL(dma_buf_export, "DMA_BUF");
 int dma_buf_fd(struct dma_buf *dmabuf, int flags)
 {
 	int fd;
+	int ret;
 
 	if (!dmabuf || !dmabuf->file)
 		return -EINVAL;
+
+	ret = security_file_receive(dmabuf->file);
+	if (ret)
+		return ret;
 
 	fd = get_unused_fd_flags(flags);
 	if (fd < 0)
@@ -784,16 +792,18 @@ int dma_buf_fd(struct dma_buf *dmabuf, int flags)
 EXPORT_SYMBOL_NS_GPL(dma_buf_fd, "DMA_BUF");
 
 /**
- * dma_buf_get - returns the struct dma_buf related to an fd
+ * dma_buf_get_with_perm - returns the struct dma_buf related to an fd
  * @fd:	[in]	fd associated with the struct dma_buf to be returned
+ * @mask:	[in]	descriptor-use permission mask for the import
  *
  * On success, returns the struct dma_buf associated with an fd; uses
  * file's refcounting done by fget to increase refcount. returns ERR_PTR
  * otherwise.
  */
-struct dma_buf *dma_buf_get(int fd)
+struct dma_buf *dma_buf_get_with_perm(int fd, int mask)
 {
 	struct file *file;
+	int ret;
 
 	file = fget(fd);
 
@@ -804,8 +814,27 @@ struct dma_buf *dma_buf_get(int fd)
 		fput(file);
 		return ERR_PTR(-EINVAL);
 	}
+	ret = security_file_permission(file, mask ?: MAY_READ);
+	if (ret) {
+		fput(file);
+		return ERR_PTR(ret);
+	}
 
 	return file->private_data;
+}
+EXPORT_SYMBOL_NS_GPL(dma_buf_get_with_perm, "DMA_BUF");
+
+/**
+ * dma_buf_get - returns the struct dma_buf related to an fd for read-like use
+ * @fd:	[in]	fd associated with the struct dma_buf to be returned
+ *
+ * This is the read-oriented default for metadata/lookup callers. Importers that
+ * expose the buffer to device writes or bidirectional DMA should use
+ * dma_buf_get_with_perm().
+ */
+struct dma_buf *dma_buf_get(int fd)
+{
+	return dma_buf_get_with_perm(fd, MAY_READ);
 }
 EXPORT_SYMBOL_NS_GPL(dma_buf_get, "DMA_BUF");
 

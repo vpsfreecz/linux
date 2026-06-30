@@ -13,6 +13,7 @@
 #include <linux/mount.h>
 #include <linux/mm.h>
 #include <linux/pagemap.h>
+#include <linux/security.h>
 #include "cifspdu.h"
 #include "cifsglob.h"
 #include "cifsproto.h"
@@ -80,6 +81,9 @@ static long cifs_ioctl_copychunk(unsigned int xid, struct file *dst_file,
 		cifs_dbg(FYI, "file target not open for write\n");
 		return -EINVAL;
 	}
+	rc = security_file_permission(dst_file, MAY_WRITE);
+	if (rc)
+		return rc;
 
 	/* check if target volume is readonly and take reference */
 	rc = mnt_want_write_file(dst_file);
@@ -99,6 +103,9 @@ static long cifs_ioctl_copychunk(unsigned int xid, struct file *dst_file,
 		cifs_dbg(VFS, "src file seems to be from a different filesystem type\n");
 		goto out_drop_write;
 	}
+	rc = security_file_permission(fd_file(src_file), MAY_READ);
+	if (rc)
+		goto out_drop_write;
 
 	src_inode = file_inode(fd_file(src_file));
 	rc = -EINVAL;

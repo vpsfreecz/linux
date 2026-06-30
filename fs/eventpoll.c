@@ -16,6 +16,7 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/poll.h>
+#include <linux/security.h>
 #include <linux/string.h>
 #include <linux/list.h>
 #include <linux/hash.h>
@@ -344,6 +345,21 @@ static const struct file_operations eventpoll_fops;
 static inline int is_file_epoll(struct file *f)
 {
 	return f->f_op == &eventpoll_fops;
+}
+
+static int ep_poll_file_permission(struct file *file, __poll_t events)
+{
+	int mask = 0;
+
+	if (events & (EPOLLIN | EPOLLRDNORM | EPOLLRDBAND | EPOLLPRI |
+		      EPOLLRDHUP | EPOLLMSG))
+		mask |= MAY_READ;
+	if (events & (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND))
+		mask |= MAY_WRITE;
+	if (!mask)
+		mask = MAY_READ;
+
+	return security_file_permission(file, mask);
 }
 
 /* Setup the structure that is used as key for the RB tree */
@@ -947,7 +963,15 @@ static long ep_eventpoll_ioctl(struct file *file, unsigned int cmd,
 
 	switch (cmd) {
 	case EPIOCSPARAMS:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
+		ret = ep_eventpoll_bp_ioctl(file, cmd, arg);
+		break;
 	case EPIOCGPARAMS:
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
 		ret = ep_eventpoll_bp_ioctl(file, cmd, arg);
 		break;
 	default:
@@ -977,6 +1001,9 @@ static __poll_t __ep_eventpoll_poll(struct file *file, poll_table *wait, int dep
 	struct epitem *epi, *tmp;
 	poll_table pt;
 	__poll_t res = 0;
+
+	if (security_file_permission(file, MAY_READ))
+		return EPOLLERR;
 
 	init_poll_funcptr(&pt, NULL);
 
@@ -1053,6 +1080,11 @@ static __poll_t ep_item_poll(const struct epitem *epi, poll_table *pt,
 	 */
 	if (!file)
 		return 0;
+
+	if (ep_poll_file_permission(file, epi->event.events)) {
+		fput(file);
+		return EPOLLERR;
+	}
 
 	pt->_key = epi->event.events;
 	if (!is_file_epoll(file))
@@ -2279,6 +2311,16 @@ int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds,
 	if (fd_file(f) == fd_file(tf) || !is_file_epoll(fd_file(f)))
 		goto error_tgt_fput;
 
+	error = security_file_permission(fd_file(f), MAY_WRITE);
+	if (error)
+		goto error_tgt_fput;
+
+	if (ep_op_has_event(op)) {
+		error = ep_poll_file_permission(fd_file(tf), epds->events);
+		if (error)
+			goto error_tgt_fput;
+	}
+
 	/*
 	 * epoll adds to the wakeup queue at EPOLL_CTL_ADD time only,
 	 * so EPOLLEXCLUSIVE is not allowed for a EPOLL_CTL_MOD operation.
@@ -2434,6 +2476,10 @@ int epoll_sendevents(struct file *file, struct epoll_event __user *events,
 	if (unlikely(ret))
 		return ret;
 
+	ret = security_file_permission(file, MAY_READ);
+	if (unlikely(ret))
+		return ret;
+
 	ep = file->private_data;
 	/*
 	 * Racy call, but that's ok - it should get retried based on
@@ -2460,6 +2506,10 @@ static int do_epoll_wait(int epfd, struct epoll_event __user *events,
 		return -EBADF;
 
 	ret = ep_check_params(fd_file(f), events, maxevents);
+	if (unlikely(ret))
+		return ret;
+
+	ret = security_file_permission(fd_file(f), MAY_READ);
 	if (unlikely(ret))
 		return ret;
 

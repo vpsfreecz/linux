@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/module.h>
+#include <linux/security.h>
 #include <linux/irqbypass.h>
 #include <linux/kvm_irqfd.h>
 #include <linux/of.h>
@@ -1934,6 +1935,10 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 		if (fd_empty(f))
 			break;
 
+		r = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+		if (r)
+			break;
+
 		r = -EPERM;
 		dev = kvm_device_from_filp(fd_file(f));
 		if (dev)
@@ -1949,6 +1954,10 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 
 		r = -EBADF;
 		if (fd_empty(f))
+			break;
+
+		r = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+		if (r)
 			break;
 
 		r = -EPERM;
@@ -1973,6 +1982,10 @@ static int kvm_vcpu_ioctl_enable_cap(struct kvm_vcpu *vcpu,
 
 		r = -ENXIO;
 		if (!xive_enabled())
+			break;
+
+		r = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+		if (r)
 			break;
 
 		r = -EPERM;

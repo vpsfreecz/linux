@@ -8027,6 +8027,22 @@ const struct file_operations btf_fops = {
 	.release	= btf_release,
 };
 
+bool btf_file(const struct file *file)
+{
+	return file->f_op == &btf_fops;
+}
+
+const struct bpf_token *btf_file_token(const struct file *file)
+{
+	const struct btf *btf;
+
+	if (!btf_file(file))
+		return NULL;
+
+	btf = file->private_data;
+	return btf->token;
+}
+
 static int __btf_new_fd(struct btf *btf)
 {
 	return anon_inode_getfd("btf", &btf_fops, btf, O_RDONLY | O_CLOEXEC);
@@ -8140,6 +8156,29 @@ int btf_get_info_by_fd(const struct btf *btf,
 	return ret;
 }
 
+struct btf *btf_get_curr_or_next(u32 *id)
+{
+	struct btf *btf;
+
+again:
+	spin_lock_bh(&btf_idr_lock);
+btf_again:
+	btf = idr_get_next(&btf_idr, id);
+	if (btf && !refcount_inc_not_zero(&btf->refcnt)) {
+		(*id)++;
+		goto btf_again;
+	}
+	spin_unlock_bh(&btf_idr_lock);
+
+	if (btf && !btf_current_container_allowed(btf)) {
+		btf_put(btf);
+		(*id)++;
+		goto again;
+	}
+
+	return btf;
+}
+
 int btf_get_fd_by_id(u32 id)
 {
 	struct btf *btf;
@@ -8153,6 +8192,10 @@ int btf_get_fd_by_id(u32 id)
 
 	if (IS_ERR(btf))
 		return PTR_ERR(btf);
+	if (!btf_current_container_allowed(btf)) {
+		btf_put(btf);
+		return -ENOENT;
+	}
 
 	fd = __btf_new_fd(btf);
 	if (fd < 0)

@@ -14,6 +14,7 @@
 #include <linux/idr.h>
 #include <linux/poll.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 #include <linux/wait.h>
 
 #include "rc-core-priv.h"
@@ -816,9 +817,10 @@ void __exit lirc_dev_exit(void)
 
 struct rc_dev *rc_dev_get_from_fd(int fd, bool write)
 {
-	CLASS(fd, f)(fd);
 	struct lirc_fh *fh;
 	struct rc_dev *dev;
+	int ret;
+	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
 		return ERR_PTR(-EBADF);
@@ -828,6 +830,9 @@ struct rc_dev *rc_dev_get_from_fd(int fd, bool write)
 
 	if (write && !(fd_file(f)->f_mode & FMODE_WRITE))
 		return ERR_PTR(-EPERM);
+	ret = security_file_permission(fd_file(f), write ? MAY_WRITE : MAY_READ);
+	if (ret)
+		return ERR_PTR(ret);
 
 	fh = fd_file(f)->private_data;
 	dev = fh->rc;

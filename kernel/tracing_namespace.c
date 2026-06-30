@@ -419,11 +419,26 @@ static struct user_namespace *tracingns_owner(struct ns_common *ns)
 	return to_tracing_ns(ns)->user_ns;
 }
 
+static bool tracingns_contains(const struct tracing_namespace *ancestor,
+			       const struct tracing_namespace *ns)
+{
+	while (ns) {
+		if (ns == ancestor)
+			return true;
+		ns = ns->parent;
+	}
+
+	return false;
+}
+
 static struct ns_common *tracingns_get_parent(struct ns_common *ns)
 {
 	struct tracing_namespace *parent = to_tracing_ns(ns)->parent;
+	struct tracing_namespace *caller_ns = current_tracing_ns();
 
 	if (!parent)
+		return ERR_PTR(-EPERM);
+	if (!caller_ns || !tracingns_contains(caller_ns, parent))
 		return ERR_PTR(-EPERM);
 
 	return &get_tracing_ns(parent)->ns;

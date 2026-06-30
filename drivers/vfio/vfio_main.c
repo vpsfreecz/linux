@@ -28,6 +28,7 @@
 #include <linux/pseudo_fs.h>
 #include <linux/rwsem.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
@@ -868,6 +869,10 @@ static int vfio_ioct_mig_return_fd(struct file *filp, void __user *arg,
 		ret = fd;
 		goto out_fput;
 	}
+
+	ret = security_file_receive(filp);
+	if (ret)
+		goto out_put_unused;
 
 	mig->data_fd = fd;
 	if (copy_to_user(arg, mig, sizeof(*mig))) {

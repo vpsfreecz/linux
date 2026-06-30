@@ -56,6 +56,7 @@
 #include <linux/nsproxy.h>
 #include <linux/file.h>
 #include <linux/fs_parser.h>
+#include <linux/security.h>
 #include <linux/sched/cputime.h>
 #include <linux/sched/deadline.h>
 #include <linux/psi.h>
@@ -6725,6 +6726,9 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
 		ret = -EBADF;
 		goto err;
 	}
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		goto err;
 	sb = fd_file(f)->f_path.dentry->d_sb;
 
 	dst_cgrp = cgroup_get_from_file(fd_file(f));
@@ -7194,9 +7198,14 @@ EXPORT_SYMBOL_GPL(cgroup_get_from_path);
  */
 struct cgroup *cgroup_v1v2_get_from_fd(int fd)
 {
+	int ret;
 	CLASS(fd_raw, f)(fd);
+
 	if (fd_empty(f))
 		return ERR_PTR(-EBADF);
+	ret = security_file_permission(fd_file(f), MAY_READ);
+	if (ret)
+		return ERR_PTR(ret);
 
 	return cgroup_v1v2_get_from_file(fd_file(f));
 }

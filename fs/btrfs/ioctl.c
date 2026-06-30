@@ -1217,6 +1217,9 @@ static noinline int __btrfs_ioctl_snap_create(struct file *file,
 			ret = -EINVAL;
 			goto out_drop_write;
 		}
+		ret = security_file_permission(fd_file(src), MAY_READ);
+		if (ret)
+			goto out_drop_write;
 
 		src_inode = file_inode(fd_file(src));
 		if (src_inode->i_sb != file_inode(file)->i_sb) {

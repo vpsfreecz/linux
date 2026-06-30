@@ -132,7 +132,9 @@ ib_umem_dmabuf_get_with_dma_device(struct ib_device *device,
 	if (unlikely(!ops || !ops->move_notify))
 		return ret;
 
-	dmabuf = dma_buf_get(fd);
+	dmabuf = dma_buf_get_with_perm(
+		fd, ib_access_writable(access) ?
+			    MAY_READ | MAY_WRITE : MAY_READ);
 	if (IS_ERR(dmabuf))
 		return ERR_CAST(dmabuf);
 

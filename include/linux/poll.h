@@ -75,12 +75,7 @@ static inline bool file_can_poll(struct file *file)
 	return file->f_op->poll;
 }
 
-static inline __poll_t vfs_poll(struct file *file, struct poll_table_struct *pt)
-{
-	if (unlikely(!file->f_op->poll))
-		return DEFAULT_POLLMASK;
-	return file->f_op->poll(file, pt);
-}
+__poll_t vfs_poll(struct file *file, struct poll_table_struct *pt);
 
 struct poll_table_entry {
 	struct file *filp;

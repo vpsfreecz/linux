@@ -543,7 +543,7 @@ int ttm_prime_fd_to_handle(struct ttm_object_file *tfile,
 	struct ttm_base_object *base;
 	int ret;
 
-	dma_buf = dma_buf_get(fd);
+	dma_buf = dma_buf_get_with_perm(fd, MAY_READ | MAY_WRITE);
 	if (IS_ERR(dma_buf))
 		return PTR_ERR(dma_buf);
 

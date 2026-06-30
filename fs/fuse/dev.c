@@ -24,6 +24,7 @@
 #include <linux/splice.h>
 #include <linux/sched.h>
 #include <linux/seq_file.h>
+#include <linux/security.h>
 
 #include "fuse_trace.h"
 
@@ -2605,8 +2606,13 @@ static long fuse_dev_ioctl_clone(struct file *file, __u32 __user *argp)
 	 * Check against file->f_op because CUSE
 	 * uses the same ioctl handler.
 	 */
-	if (fd_file(f)->f_op == file->f_op)
+	if (fd_file(f)->f_op == file->f_op) {
+		res = security_file_permission(fd_file(f),
+					       MAY_READ | MAY_WRITE);
+		if (res)
+			return res;
 		fud = __fuse_get_dev(fd_file(f));
+	}
 
 	res = -EINVAL;
 	if (fud) {

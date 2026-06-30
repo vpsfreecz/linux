@@ -193,6 +193,7 @@
 
 #include <linux/anon_inodes.h>
 #include <linux/nospec.h>
+#include <linux/security.h>
 #include <linux/sizes.h>
 #include <linux/uuid.h>
 
@@ -3686,6 +3687,19 @@ static long i915_perf_ioctl(struct file *file,
 {
 	struct i915_perf_stream *stream = file->private_data;
 	long ret;
+
+	switch (cmd) {
+	case I915_PERF_IOCTL_ENABLE:
+	case I915_PERF_IOCTL_DISABLE:
+	case I915_PERF_IOCTL_CONFIG:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = security_file_permission(file, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	mutex_lock(&stream->lock);
 	ret = i915_perf_ioctl_locked(stream, cmd, arg);

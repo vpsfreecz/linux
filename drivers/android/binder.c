@@ -2380,6 +2380,11 @@ static int binder_translate_fd(u32 fd, binder_size_t fd_offset,
 		ret = -EPERM;
 		goto err_security;
 	}
+	ret = security_file_receive_cred(target_proc->cred, file);
+	if (ret < 0) {
+		ret = -EPERM;
+		goto err_security;
+	}
 
 	/*
 	 * Add fixup record for this transaction. The allocation

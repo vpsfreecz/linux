@@ -20,6 +20,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/poll.h>
 #include <linux/compat.h>
+#include <linux/security.h>
 
 #include "tpm.h"
 
@@ -629,9 +630,14 @@ static long vtpmx_ioc_new_dev(struct file *file, unsigned int ioctl,
 	struct vtpm_proxy_new_dev __user *vtpm_new_dev_p;
 	struct vtpm_proxy_new_dev vtpm_new_dev;
 	struct file *vtpm_file;
+	int ret;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+
+	ret = security_file_permission(file, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	vtpm_new_dev_p = argp;
 

@@ -12,6 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/poll.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/anon_inodes.h>
@@ -76,6 +77,31 @@ struct sync_file *sync_file_create(struct dma_fence *fence)
 }
 EXPORT_SYMBOL(sync_file_create);
 
+int sync_file_prepare_install(struct sync_file *sync_file)
+{
+	return security_file_receive(sync_file->file);
+}
+EXPORT_SYMBOL(sync_file_prepare_install);
+
+void sync_file_install_prepared(struct sync_file *sync_file, int fd)
+{
+	fd_install(fd, sync_file->file);
+}
+EXPORT_SYMBOL(sync_file_install_prepared);
+
+int sync_file_install(struct sync_file *sync_file, int fd)
+{
+	int ret;
+
+	ret = sync_file_prepare_install(sync_file);
+	if (ret)
+		return ret;
+
+	sync_file_install_prepared(sync_file, fd);
+	return 0;
+}
+EXPORT_SYMBOL(sync_file_install);
+
 static struct sync_file *sync_file_fdget(int fd)
 {
 	struct file *file = fget(fd);
@@ -84,6 +110,9 @@ static struct sync_file *sync_file_fdget(int fd)
 		return NULL;
 
 	if (file->f_op != &sync_file_fops)
+		goto err;
+
+	if (security_file_permission(file, MAY_READ))
 		goto err;
 
 	return file->private_data;
@@ -250,7 +279,10 @@ static long sync_file_ioctl_merge(struct sync_file *sync_file,
 		goto err_put_fence3;
 	}
 
-	fd_install(fd, fence3->file);
+	err = sync_file_install(fence3, fd);
+	if (err)
+		goto err_put_fence3;
+
 	fput(fence2->file);
 	return 0;
 
@@ -383,6 +415,12 @@ static long sync_file_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
 	struct sync_file *sync_file = file->private_data;
+	int ret;
+
+	ret = security_file_permission(file, cmd == SYNC_IOC_SET_DEADLINE ?
+				       MAY_WRITE : MAY_READ);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case SYNC_IOC_MERGE:

@@ -26,6 +26,7 @@
 #include <linux/fs.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
+#include <linux/security.h>
 #include <linux/vmalloc.h>
 
 #include <linux/coda.h>
@@ -151,7 +152,9 @@ static int coda_parse_fd(struct fs_context *fc, struct fs_parameter *param,
 	if (!file)
 		return -EBADF;
 
-	err = coda_set_idx(fc, file);
+	err = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (!err)
+		err = coda_set_idx(fc, file);
 	fput(file);
 	return err;
 }
@@ -190,7 +193,8 @@ static int coda_parse_monolithic(struct fs_context *fc, void *_data)
 
 	file = fget(data->fd);
 	if (file) {
-		coda_set_idx(fc, file);
+		if (!security_file_permission(file, MAY_READ | MAY_WRITE))
+			coda_set_idx(fc, file);
 		fput(file);
 	}
 	return 0;
@@ -399,4 +403,3 @@ struct file_system_type coda_fs_type = {
 	.fs_flags	= FS_BINARY_MOUNTDATA,
 };
 MODULE_ALIAS_FS("coda");
-

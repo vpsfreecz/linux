@@ -41,4 +41,10 @@ int rust_helper_security_binder_transfer_file(const struct cred *from,
 {
 	return security_binder_transfer_file(from, to, file);
 }
+
+int rust_helper_security_file_receive_cred(const struct cred *cred,
+					   struct file *file)
+{
+	return security_file_receive_cred(cred, file);
+}
 #endif

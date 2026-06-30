@@ -37,6 +37,8 @@ struct key_user root_key_user = {
  */
 static struct key *get_user_register(struct user_namespace *user_ns)
 {
+	const struct cred *cred = user_ns == &init_user_ns ?
+		&init_cred : current_cred();
 	struct key *reg_keyring = READ_ONCE(user_ns->user_keyring_register);
 
 	if (reg_keyring)
@@ -51,7 +53,7 @@ static struct key *get_user_register(struct user_namespace *user_ns)
 	if (!reg_keyring) {
 		reg_keyring = keyring_alloc(".user_reg",
 					    user_ns->owner, INVALID_GID,
-					    &init_cred,
+					    cred,
 					    KEY_POS_WRITE | KEY_POS_SEARCH |
 					    KEY_USR_VIEW | KEY_USR_READ,
 					    0,

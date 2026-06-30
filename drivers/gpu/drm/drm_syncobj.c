@@ -200,6 +200,7 @@
 #include <linux/fs.h>
 #include <linux/sched/signal.h>
 #include <linux/sync_file.h>
+#include <linux/security.h>
 #include <linux/uaccess.h>
 
 #include <drm/drm.h>
@@ -674,6 +675,7 @@ int drm_syncobj_get_fd(struct drm_syncobj *syncobj, int *p_fd)
 {
 	struct file *file;
 	int fd;
+	int ret;
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0)
@@ -688,6 +690,14 @@ int drm_syncobj_get_fd(struct drm_syncobj *syncobj, int *p_fd)
 	}
 
 	drm_syncobj_get(syncobj);
+	ret = security_file_receive(file);
+	if (ret) {
+		drm_syncobj_put(syncobj);
+		fput(file);
+		put_unused_fd(fd);
+		return ret;
+	}
+
 	fd_install(fd, file);
 
 	*p_fd = fd;
@@ -721,6 +731,9 @@ static int drm_syncobj_fd_to_handle(struct drm_file *file_private,
 
 	if (fd_file(f)->f_op != &drm_syncobj_file_fops)
 		return -EINVAL;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	/* take a reference to put in the idr */
 	syncobj = fd_file(f)->private_data;
@@ -796,10 +809,14 @@ static int drm_syncobj_export_sync_file(struct drm_file *file_private,
 		goto err_put_fd;
 	}
 
-	fd_install(fd, sync_file->file);
+	ret = sync_file_install(sync_file, fd);
+	if (ret)
+		goto err_put_file;
 
 	*p_fd = fd;
 	return 0;
+err_put_file:
+	fput(sync_file->file);
 err_put_fd:
 	put_unused_fd(fd);
 	return ret;

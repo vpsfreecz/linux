@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 #include <linux/bitmap.h>
 #include <linux/ktime.h>
+#include <linux/security.h>
 #include "heartbeat.h"
 #include "tcp.h"
 #include "nodemanager.h"
@@ -1796,6 +1797,10 @@ static ssize_t o2hb_region_dev_store(struct config_item *item,
 
 	if (!S_ISBLK(fd_file(f)->f_mapping->host->i_mode))
 		return -EINVAL;
+
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	reg->hr_bdev_file = bdev_file_open_by_dev(fd_file(f)->f_mapping->host->i_rdev,
 			BLK_OPEN_WRITE | BLK_OPEN_READ, NULL, NULL);

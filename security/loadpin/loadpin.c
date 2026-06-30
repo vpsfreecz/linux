@@ -17,6 +17,7 @@
 #include <linux/blkdev.h>
 #include <linux/path.h>
 #include <linux/sched.h>	/* current */
+#include <linux/security.h>
 #include <linux/string_helpers.h>
 #include <linux/dm-verity-loadpin.h>
 #include <uapi/linux/loadpin.h>
@@ -297,6 +298,10 @@ static int read_trusted_verity_root_digests(unsigned int fd)
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
 		return -EINVAL;
+
+	rc = security_file_permission(fd_file(f), MAY_READ);
+	if (rc)
+		return rc;
 
 	data = kzalloc(SZ_4K, GFP_KERNEL);
 	if (!data) {

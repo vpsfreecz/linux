@@ -5,6 +5,7 @@
 #include <linux/slab.h>
 #include <linux/net.h>
 #include <linux/compat.h>
+#include <linux/security.h>
 #include <net/compat.h>
 #include <linux/io_uring.h>
 
@@ -121,6 +122,22 @@ static int io_sg_from_iter_iovec(struct sk_buff *skb,
 static int io_sg_from_iter(struct sk_buff *skb,
 			   struct iov_iter *from, size_t length);
 
+static struct socket *io_sock_from_file_perm(struct file *file, int mask)
+{
+	struct socket *sock;
+	int ret;
+
+	sock = sock_from_file(file);
+	if (unlikely(!sock))
+		return ERR_PTR(-ENOTSOCK);
+
+	ret = security_file_permission(file, mask);
+	if (ret)
+		return ERR_PTR(ret);
+
+	return sock;
+}
+
 int io_shutdown_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
 	struct io_shutdown *shutdown = io_kiocb_to_cmd(req, struct io_shutdown);
@@ -142,9 +159,9 @@ int io_shutdown(struct io_kiocb *req, unsigned int issue_flags)
 
 	WARN_ON_ONCE(issue_flags & IO_URING_F_NONBLOCK);
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_WRITE);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	ret = __sys_shutdown_sock(sock, shutdown->how);
 	io_req_set_res(req, ret, 0);
@@ -544,9 +561,9 @@ int io_sendmsg(struct io_kiocb *req, unsigned int issue_flags)
 	int min_ret = 0;
 	int ret;
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_WRITE);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	if (!(req->flags & REQ_F_POLLED) &&
 	    (sr->flags & IORING_RECVSEND_POLL_FIRST))
@@ -642,9 +659,9 @@ int io_send(struct io_kiocb *req, unsigned int issue_flags)
 	int min_ret = 0;
 	int ret;
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_WRITE);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	if (!(req->flags & REQ_F_POLLED) &&
 	    (sr->flags & IORING_RECVSEND_POLL_FIRST))
@@ -1014,9 +1031,9 @@ int io_recvmsg(struct io_kiocb *req, unsigned int issue_flags)
 	bool force_nonblock = issue_flags & IO_URING_F_NONBLOCK;
 	bool mshot_finished = true;
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_READ);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	if (!(req->flags & REQ_F_POLLED) &&
 	    (sr->flags & IORING_RECVSEND_POLL_FIRST))
@@ -1177,9 +1194,9 @@ int io_recv(struct io_kiocb *req, unsigned int issue_flags)
 	    (sr->flags & IORING_RECVSEND_POLL_FIRST))
 		return -EAGAIN;
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_READ);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	flags = sr->msg_flags;
 	if (force_nonblock)
@@ -1278,9 +1295,9 @@ int io_recvzc(struct io_kiocb *req, unsigned int issue_flags)
 	    (zc->flags & IORING_RECVSEND_POLL_FIRST))
 		return -EAGAIN;
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_READ);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	len = zc->len;
 	ret = io_zcrx_recv(req, zc->ifq, sock, zc->msg_flags | MSG_DONTWAIT,
@@ -1459,9 +1476,9 @@ int io_send_zc(struct io_kiocb *req, unsigned int issue_flags)
 	unsigned msg_flags;
 	int ret, min_ret = 0;
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_WRITE);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 	if (!test_bit(SOCK_SUPPORT_ZC, &sock->flags))
 		return -EOPNOTSUPP;
 
@@ -1541,9 +1558,9 @@ int io_sendmsg_zc(struct io_kiocb *req, unsigned int issue_flags)
 		req->flags &= ~REQ_F_IMPORT_BUFFER;
 	}
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_WRITE);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 	if (!test_bit(SOCK_SUPPORT_ZC, &sock->flags))
 		return -EOPNOTSUPP;
 
@@ -1650,12 +1667,17 @@ int io_accept(struct io_kiocb *req, unsigned int issue_flags)
 		.flags = force_nonblock ? O_NONBLOCK : 0,
 	};
 	struct file *file;
+	struct socket *sock;
 	unsigned cflags;
 	int ret, fd;
 
 	if (!(req->flags & REQ_F_POLLED) &&
 	    accept->iou_flags & IORING_ACCEPT_POLL_FIRST)
 		return -EAGAIN;
+
+	sock = io_sock_from_file_perm(req->file, MAY_READ);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 retry:
 	if (!fixed) {
@@ -1779,9 +1801,14 @@ int io_connect(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_connect *connect = io_kiocb_to_cmd(req, struct io_connect);
 	struct io_async_msghdr *io = req->async_data;
+	struct socket *sock;
 	unsigned file_flags;
 	int ret;
 	bool force_nonblock = issue_flags & IO_URING_F_NONBLOCK;
+
+	sock = io_sock_from_file_perm(req->file, MAY_WRITE);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	if (connect->in_progress) {
 		struct poll_table_struct pt = { ._key = EPOLLERR };
@@ -1814,7 +1841,7 @@ int io_connect(struct io_kiocb *req, unsigned int issue_flags)
 		 */
 		if (ret == -EBADFD || ret == -EISCONN) {
 get_sock_err:
-			ret = sock_error(sock_from_file(req->file)->sk);
+			ret = sock_error(sock->sk);
 		}
 	}
 	if (ret == -ERESTARTSYS)
@@ -1852,9 +1879,9 @@ int io_bind(struct io_kiocb *req, unsigned int issue_flags)
 	struct socket *sock;
 	int ret;
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_WRITE);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	ret = __sys_bind_socket(sock, &io->addr, bind->addr_len);
 	if (ret < 0)
@@ -1880,9 +1907,9 @@ int io_listen(struct io_kiocb *req, unsigned int issue_flags)
 	struct socket *sock;
 	int ret;
 
-	sock = sock_from_file(req->file);
-	if (unlikely(!sock))
-		return -ENOTSOCK;
+	sock = io_sock_from_file_perm(req->file, MAY_WRITE);
+	if (IS_ERR(sock))
+		return PTR_ERR(sock);
 
 	ret = __sys_listen_socket(sock, listen->backlog);
 	if (ret < 0)

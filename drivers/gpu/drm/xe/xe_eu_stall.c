@@ -6,6 +6,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/fs.h>
 #include <linux/poll.h>
+#include <linux/security.h>
 #include <linux/types.h>
 
 #include <drm/drm_drv.h>
@@ -832,6 +833,18 @@ static long xe_eu_stall_stream_ioctl(struct file *file, unsigned int cmd, unsign
 	struct xe_eu_stall_data_stream *stream = file->private_data;
 	struct xe_gt *gt = stream->gt;
 	long ret;
+
+	switch (cmd) {
+	case DRM_XE_OBSERVATION_IOCTL_ENABLE:
+	case DRM_XE_OBSERVATION_IOCTL_DISABLE:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = security_file_permission(file, MAY_WRITE);
+	if (ret)
+		return ret;
 
 	mutex_lock(&gt->eu_stall->stream_lock);
 	ret = xe_eu_stall_stream_ioctl_locked(stream, cmd, arg);

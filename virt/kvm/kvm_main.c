@@ -29,6 +29,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/stat.h>
+#include <linux/security.h>
 #include <linux/cpumask.h>
 #include <linux/smp.h>
 #include <linux/anon_inodes.h>
@@ -4424,6 +4425,10 @@ static long kvm_vcpu_ioctl(struct file *filp,
 	if (unlikely(_IOC_TYPE(ioctl) != KVMIO))
 		return -EINVAL;
 
+	r = security_file_permission(filp, MAY_READ | MAY_WRITE);
+	if (r)
+		return r;
+
 	/*
 	 * Wait for the vCPU to be online before handling the ioctl(), as KVM
 	 * assumes the vCPU is reachable via vcpu_array, i.e. may dereference
@@ -4664,6 +4669,10 @@ static long kvm_vcpu_compat_ioctl(struct file *filp,
 	if (vcpu->kvm->mm != current->mm || vcpu->kvm->vm_dead)
 		return -EIO;
 
+	r = security_file_permission(filp, MAY_READ | MAY_WRITE);
+	if (r)
+		return r;
+
 	switch (ioctl) {
 	case KVM_SET_SIGNAL_MASK: {
 		struct kvm_signal_mask __user *sigmask_arg = argp;
@@ -4726,9 +4735,14 @@ static long kvm_device_ioctl(struct file *filp, unsigned int ioctl,
 			     unsigned long arg)
 {
 	struct kvm_device *dev = filp->private_data;
+	int r;
 
 	if (dev->kvm->mm != current->mm || dev->kvm->vm_dead)
 		return -EIO;
+
+	r = security_file_permission(filp, MAY_READ | MAY_WRITE);
+	if (r)
+		return r;
 
 	switch (ioctl) {
 	case KVM_SET_DEVICE_ATTR:
@@ -5153,6 +5167,11 @@ static long kvm_vm_ioctl(struct file *filp,
 
 	if (kvm->mm != current->mm || kvm->vm_dead)
 		return -EIO;
+
+	r = security_file_permission(filp, MAY_READ | MAY_WRITE);
+	if (r)
+		return r;
+
 	switch (ioctl) {
 	case KVM_CREATE_VCPU:
 		r = kvm_vm_ioctl_create_vcpu(kvm, arg);
@@ -5418,6 +5437,10 @@ static long kvm_vm_compat_ioctl(struct file *filp,
 	if (kvm->mm != current->mm || kvm->vm_dead)
 		return -EIO;
 
+	r = security_file_permission(filp, MAY_READ | MAY_WRITE);
+	if (r)
+		return r;
+
 	r = kvm_arch_vm_compat_ioctl(filp, ioctl, arg);
 	if (r != -ENOTTY)
 		return r;
@@ -5523,6 +5546,26 @@ static long kvm_dev_ioctl(struct file *filp,
 			  unsigned int ioctl, unsigned long arg)
 {
 	int r = -EINVAL;
+	int mask;
+
+	switch (ioctl) {
+	case KVM_GET_API_VERSION:
+	case KVM_CHECK_EXTENSION:
+	case KVM_GET_VCPU_MMAP_SIZE:
+		mask = MAY_READ;
+		break;
+	case KVM_CREATE_VM:
+	case KVM_S390_ENABLE_SIE:
+		mask = MAY_WRITE;
+		break;
+	default:
+		mask = MAY_READ;
+		break;
+	}
+
+	r = security_file_permission(filp, mask);
+	if (r)
+		return r;
 
 	switch (ioctl) {
 	case KVM_GET_API_VERSION:

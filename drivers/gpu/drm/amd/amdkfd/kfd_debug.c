@@ -24,6 +24,7 @@
 #include "kfd_device_queue_manager.h"
 #include "kfd_topology.h"
 #include <linux/file.h>
+#include <linux/security.h>
 #include <uapi/linux/kfd_ioctl.h>
 #include <uapi/linux/kfd_sysfs.h>
 
@@ -793,6 +794,11 @@ int kfd_dbg_trap_enable(struct kfd_process *target, uint32_t fd,
 	if (!f) {
 		pr_err("Failed to get file for (%i)\n", fd);
 		return -EBADF;
+	}
+	r = security_file_permission(f, MAY_WRITE);
+	if (r) {
+		fput(f);
+		return r;
 	}
 
 	target->dbg_ev_file = f;

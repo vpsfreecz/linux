@@ -16,6 +16,7 @@
 #include <linux/file.h>
 #include <linux/quotaops.h>
 #include <linux/random.h>
+#include <linux/security.h>
 #include <linux/uaccess.h>
 #include <linux/delay.h>
 #include <linux/iversion.h>
@@ -1628,6 +1629,9 @@ group_extend_out:
 		if (!(filp->f_mode & FMODE_READ) ||
 		    !(filp->f_mode & FMODE_WRITE))
 			return -EBADF;
+		err = security_file_permission(filp, MAY_READ | MAY_WRITE);
+		if (err)
+			return err;
 
 		if (copy_from_user(&me,
 			(struct move_extent __user *)arg, sizeof(me)))
@@ -1640,6 +1644,10 @@ group_extend_out:
 
 		if (!(fd_file(donor)->f_mode & FMODE_WRITE))
 			return -EBADF;
+		err = security_file_permission(fd_file(donor),
+					       MAY_READ | MAY_WRITE);
+		if (err)
+			return err;
 
 		if (ext4_has_feature_bigalloc(sb)) {
 			ext4_msg(sb, KERN_ERR,

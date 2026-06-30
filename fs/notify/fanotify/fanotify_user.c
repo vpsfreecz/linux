@@ -902,6 +902,19 @@ static ssize_t copy_event_to_user(struct fsnotify_group *group,
 	else
 		metadata.fd = fd >= 0 ? fd : FAN_NOFD;
 
+	if (f) {
+		ret = security_file_receive(f);
+		if (ret) {
+			put_unused_fd(fd);
+			fput(f);
+			f = NULL;
+			fd = ret;
+			if (!FAN_GROUP_FLAG(group, FAN_REPORT_FD_ERROR))
+				return ret;
+			metadata.fd = ret;
+		}
+	}
+
 	if (pidfd_mode) {
 		/*
 		 * Complain if the FAN_REPORT_PIDFD and FAN_REPORT_TID mutual
@@ -925,6 +938,17 @@ static ssize_t copy_event_to_user(struct fsnotify_group *group,
 
 		if (!FAN_GROUP_FLAG(group, FAN_REPORT_FD_ERROR) && pidfd < 0)
 			pidfd = pidfd == -ESRCH ? FAN_NOPIDFD : FAN_EPIDFD;
+
+		if (pidfd_file) {
+			ret = security_file_receive(pidfd_file);
+			if (ret) {
+				put_unused_fd(pidfd);
+				fput(pidfd_file);
+				pidfd_file = NULL;
+				pidfd = FAN_GROUP_FLAG(group, FAN_REPORT_FD_ERROR) ?
+					ret : FAN_EPIDFD;
+			}
+		}
 	}
 
 	ret = -EFAULT;
@@ -976,6 +1000,9 @@ static __poll_t fanotify_poll(struct file *file, poll_table *wait)
 {
 	struct fsnotify_group *group = file->private_data;
 	__poll_t ret = 0;
+
+	if (security_file_permission(file, MAY_READ))
+		return EPOLLERR;
 
 	poll_wait(file, &group->notification_waitq, wait);
 	spin_lock(&group->notification_lock);
@@ -1207,6 +1234,9 @@ static int fanotify_find_path(int dfd, const char __user *filename,
 		if ((flags & FAN_MARK_ONLYDIR) &&
 		    !(S_ISDIR(file_inode(fd_file(f))->i_mode)))
 			return -ENOTDIR;
+		ret = security_file_permission(fd_file(f), MAY_READ);
+		if (ret)
+			return ret;
 
 		*path = fd_file(f)->f_path;
 		path_get(path);
@@ -1987,6 +2017,9 @@ static int do_fanotify_mark(int fanotify_fd, unsigned int flags, __u64 mask,
 	/* verify that this is indeed an fanotify instance */
 	if (unlikely(fd_file(f)->f_op != &fanotify_fops))
 		return -EINVAL;
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ret;
 	group = fd_file(f)->private_data;
 
 	/* Only report mount events on mnt namespace */

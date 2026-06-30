@@ -44,6 +44,7 @@
 
 #include <linux/mount.h>
 #include <linux/fileattr.h>
+#include <linux/security.h>
 
 /* Return 0 on success or positive error */
 int
@@ -924,6 +925,7 @@ xfs_ioc_swapext(
 	xfs_swapext_t	*sxp)
 {
 	xfs_inode_t     *ip, *tip;
+	int		error;
 
 	/* Pull information for the target fd */
 	CLASS(fd, f)((int)sxp->sx_fdtarget);
@@ -934,6 +936,9 @@ xfs_ioc_swapext(
 	    !(fd_file(f)->f_mode & FMODE_READ) ||
 	    (fd_file(f)->f_flags & O_APPEND))
 		return -EBADF;
+	error = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (error)
+		return error;
 
 	CLASS(fd, tmp)((int)sxp->sx_fdtmp);
 	if (fd_empty(tmp))
@@ -943,6 +948,9 @@ xfs_ioc_swapext(
 	    !(fd_file(tmp)->f_mode & FMODE_READ) ||
 	    (fd_file(tmp)->f_flags & O_APPEND))
 		return -EBADF;
+	error = security_file_permission(fd_file(tmp), MAY_READ | MAY_WRITE);
+	if (error)
+		return error;
 
 	if (IS_SWAPFILE(file_inode(fd_file(f))) ||
 	    IS_SWAPFILE(file_inode(fd_file(tmp))))

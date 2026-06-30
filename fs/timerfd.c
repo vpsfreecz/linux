@@ -14,6 +14,7 @@
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/fs.h>
+#include <linux/security.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -357,6 +358,9 @@ static long timerfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 	case TFD_IOC_SET_TICKS: {
 		u64 ticks;
 
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		if (copy_from_user(&ticks, (u64 __user *)arg, sizeof(ticks)))
 			return -EFAULT;
 		if (!ticks)
@@ -468,6 +472,9 @@ static int do_timerfd_settime(int ufd, int flags,
 
 	if (fd_file(f)->f_op != &timerfd_fops)
 		return -EINVAL;
+	ret = security_file_permission(fd_file(f), MAY_WRITE);
+	if (ret)
+		return ret;
 
 	ctx = fd_file(f)->private_data;
 
@@ -526,12 +533,16 @@ static int do_timerfd_settime(int ufd, int flags,
 static int do_timerfd_gettime(int ufd, struct itimerspec64 *t)
 {
 	struct timerfd_ctx *ctx;
+	int ret;
 	CLASS(fd, f)(ufd);
 
 	if (fd_empty(f))
 		return -EBADF;
 	if (fd_file(f)->f_op != &timerfd_fops)
 		return -EINVAL;
+	ret = security_file_permission(fd_file(f), MAY_READ);
+	if (ret)
+		return ret;
 	ctx = fd_file(f)->private_data;
 
 	spin_lock_irq(&ctx->wqh.lock);

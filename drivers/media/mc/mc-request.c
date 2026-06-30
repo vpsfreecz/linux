@@ -13,6 +13,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/file.h>
 #include <linux/refcount.h>
+#include <linux/security.h>
 
 #include <media/media-device.h>
 #include <media/media-request.h>
@@ -99,6 +100,9 @@ static __poll_t media_request_poll(struct file *filp,
 
 	if (!(poll_requested_events(wait) & EPOLLPRI))
 		return 0;
+
+	if (security_file_permission(filp, MAY_READ))
+		return EPOLLERR;
 
 	poll_wait(filp, &req->poll_wait, wait);
 	spin_lock_irqsave(&req->lock, flags);
@@ -222,6 +226,18 @@ static long media_request_ioctl(struct file *filp, unsigned int cmd,
 				unsigned long arg)
 {
 	struct media_request *req = filp->private_data;
+	int ret;
+
+	switch (cmd) {
+	case MEDIA_REQUEST_IOC_QUEUE:
+	case MEDIA_REQUEST_IOC_REINIT:
+		ret = security_file_permission(filp, MAY_WRITE);
+		if (ret)
+			return ret;
+		break;
+	default:
+		return -ENOIOCTLCMD;
+	}
 
 	switch (cmd) {
 	case MEDIA_REQUEST_IOC_QUEUE:
@@ -247,6 +263,7 @@ struct media_request *
 media_request_get_by_fd(struct media_device *mdev, int request_fd)
 {
 	struct media_request *req;
+	int ret;
 
 	if (!mdev || !mdev->ops ||
 	    !mdev->ops->req_validate || !mdev->ops->req_queue)
@@ -258,6 +275,9 @@ media_request_get_by_fd(struct media_device *mdev, int request_fd)
 
 	if (fd_file(f)->f_op != &request_fops)
 		goto err;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ERR_PTR(ret);
 	req = fd_file(f)->private_data;
 	if (req->mdev != mdev)
 		goto err;

@@ -19,6 +19,7 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/pid_namespace.h>
+#include <linux/security.h>
 #include <net/genetlink.h>
 #include <linux/atomic.h>
 #include <linux/sched/cputime.h>
@@ -411,6 +412,7 @@ static int cgroupstats_user_cmd(struct sk_buff *skb, struct genl_info *info)
 	struct nlattr *na;
 	size_t size;
 	u32 fd;
+	int ret;
 
 	na = info->attrs[CGROUPSTATS_CMD_ATTR_FD];
 	if (!na)
@@ -420,6 +422,10 @@ static int cgroupstats_user_cmd(struct sk_buff *skb, struct genl_info *info)
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
 		return 0;
+
+	ret = security_file_permission(fd_file(f), MAY_READ);
+	if (ret)
+		return ret;
 
 	size = nla_total_size(sizeof(struct cgroupstats));
 

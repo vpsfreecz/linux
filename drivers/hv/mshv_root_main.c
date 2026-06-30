@@ -28,6 +28,7 @@
 #include <linux/page-flags.h>
 #include <linux/crash_dump.h>
 #include <linux/panic_notifier.h>
+#include <linux/security.h>
 #include <linux/vmalloc.h>
 
 #include "mshv_eventfd.h"
@@ -757,9 +758,25 @@ mshv_vp_ioctl(struct file *filp, unsigned int ioctl, unsigned long arg)
 	struct mshv_vp *vp = filp->private_data;
 	long r = -ENOTTY;
 
+	switch (ioctl) {
+	case MSHV_GET_VP_STATE:
+		r = security_file_permission(filp, MAY_READ);
+		break;
+	case MSHV_RUN_VP:
+	case MSHV_SET_VP_STATE:
+	case MSHV_ROOT_HVCALL:
+		r = security_file_permission(filp, MAY_WRITE);
+		break;
+	default:
+		r = 0;
+	}
+	if (r)
+		return r;
+
 	if (mutex_lock_killable(&vp->vp_mutex))
 		return -EINTR;
 
+	r = -ENOTTY;
 	switch (ioctl) {
 	case MSHV_RUN_VP:
 		r = mshv_vp_ioctl_run_vp(vp, (void __user *)arg);
@@ -1574,6 +1591,23 @@ mshv_partition_ioctl(struct file *filp, unsigned int ioctl, unsigned long arg)
 	long ret;
 	void __user *uarg = (void __user *)arg;
 
+	switch (ioctl) {
+	case MSHV_INITIALIZE_PARTITION:
+	case MSHV_SET_GUEST_MEMORY:
+	case MSHV_CREATE_VP:
+	case MSHV_IRQFD:
+	case MSHV_IOEVENTFD:
+	case MSHV_SET_MSI_ROUTING:
+	case MSHV_GET_GPAP_ACCESS_BITMAP:
+	case MSHV_ROOT_HVCALL:
+		ret = security_file_permission(filp, MAY_WRITE);
+		break;
+	default:
+		ret = 0;
+	}
+	if (ret)
+		return ret;
+
 	if (mutex_lock_killable(&partition->pt_mutex))
 		return -EINTR;
 
@@ -1976,9 +2010,13 @@ static long mshv_dev_ioctl(struct file *filp, unsigned int ioctl,
 			   unsigned long arg)
 {
 	struct miscdevice *misc = filp->private_data;
+	long ret;
 
 	switch (ioctl) {
 	case MSHV_CREATE_PARTITION:
+		ret = security_file_permission(filp, MAY_WRITE);
+		if (ret)
+			return ret;
 		return mshv_ioctl_create_partition((void __user *)arg,
 						misc->this_device);
 	}

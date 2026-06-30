@@ -7,6 +7,7 @@
 #include <linux/ktime.h>
 #include <linux/hrtimer.h>
 #include <linux/poll.h>
+#include <linux/security.h>
 
 #include <linux/io_uring/cmd.h>
 #include <linux/io_uring_types.h>
@@ -168,6 +169,9 @@ static __poll_t io_mock_poll(struct file *file, struct poll_table_struct *pt)
 {
 	struct io_mock_file *mf = file->private_data;
 	__poll_t mask = 0;
+
+	if (security_file_permission(file, MAY_READ | MAY_WRITE))
+		return EPOLLERR;
 
 	poll_wait(file, &mf->poll_wq, pt);
 

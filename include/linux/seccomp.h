@@ -5,6 +5,8 @@
 #include <uapi/linux/seccomp.h>
 #include <linux/seccomp_types.h>
 
+struct file;
+
 #define SECCOMP_FILTER_FLAG_MASK	(SECCOMP_FILTER_FLAG_TSYNC | \
 					 SECCOMP_FILTER_FLAG_LOG | \
 					 SECCOMP_FILTER_FLAG_SPEC_ALLOW | \
@@ -75,6 +77,7 @@ static inline int seccomp_mode(struct seccomp *s)
 #ifdef CONFIG_SECCOMP_FILTER
 extern void seccomp_filter_release(struct task_struct *tsk);
 extern void get_seccomp_filter(struct task_struct *tsk);
+bool seccomp_is_notify_file(const struct file *file);
 #else  /* CONFIG_SECCOMP_FILTER */
 static inline void seccomp_filter_release(struct task_struct *tsk)
 {
@@ -83,6 +86,10 @@ static inline void seccomp_filter_release(struct task_struct *tsk)
 static inline void get_seccomp_filter(struct task_struct *tsk)
 {
 	return;
+}
+static inline bool seccomp_is_notify_file(const struct file *file)
+{
+	return false;
 }
 #endif /* CONFIG_SECCOMP_FILTER */
 

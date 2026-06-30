@@ -13,6 +13,7 @@
 #include <linux/io.h>
 #include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 
 #include <asm/acrn.h>
@@ -100,6 +101,49 @@ static int pmcmd_ioctl(u64 cmd, void __user *uptr)
 	return ret;
 }
 
+static int acrn_dev_ioctl_permission(struct file *filp, unsigned int cmd)
+{
+	int mask;
+
+	switch (cmd) {
+	case ACRN_IOCTL_PM_GET_CPU_STATE:
+		mask = MAY_READ;
+		break;
+	case ACRN_IOCTL_CREATE_VM:
+	case ACRN_IOCTL_DESTROY_VM:
+	case ACRN_IOCTL_START_VM:
+	case ACRN_IOCTL_PAUSE_VM:
+	case ACRN_IOCTL_RESET_VM:
+	case ACRN_IOCTL_SET_VCPU_REGS:
+	case ACRN_IOCTL_INJECT_MSI:
+	case ACRN_IOCTL_VM_INTR_MONITOR:
+	case ACRN_IOCTL_SET_IRQLINE:
+	case ACRN_IOCTL_NOTIFY_REQUEST_FINISH:
+	case ACRN_IOCTL_CREATE_IOREQ_CLIENT:
+	case ACRN_IOCTL_ATTACH_IOREQ_CLIENT:
+	case ACRN_IOCTL_DESTROY_IOREQ_CLIENT:
+	case ACRN_IOCTL_CLEAR_VM_IOREQ:
+	case ACRN_IOCTL_SET_MEMSEG:
+	case ACRN_IOCTL_UNSET_MEMSEG:
+	case ACRN_IOCTL_SET_PTDEV_INTR:
+	case ACRN_IOCTL_RESET_PTDEV_INTR:
+	case ACRN_IOCTL_ASSIGN_PCIDEV:
+	case ACRN_IOCTL_DEASSIGN_PCIDEV:
+	case ACRN_IOCTL_ASSIGN_MMIODEV:
+	case ACRN_IOCTL_DEASSIGN_MMIODEV:
+	case ACRN_IOCTL_CREATE_VDEV:
+	case ACRN_IOCTL_DESTROY_VDEV:
+	case ACRN_IOCTL_IOEVENTFD:
+	case ACRN_IOCTL_IRQFD:
+		mask = MAY_WRITE;
+		break;
+	default:
+		return 0;
+	}
+
+	return security_file_permission(filp, mask);
+}
+
 /*
  * HSM relies on hypercall layer of the ACRN hypervisor to do the
  * sanity check against the input parameters.
@@ -128,6 +172,10 @@ static long acrn_dev_ioctl(struct file *filp, unsigned int cmd,
 			"ioctl 0x%x: Invalid VM state!\n", cmd);
 		return -EINVAL;
 	}
+
+	ret = acrn_dev_ioctl_permission(filp, cmd);
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case ACRN_IOCTL_CREATE_VM:

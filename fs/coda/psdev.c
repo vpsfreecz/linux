@@ -29,6 +29,7 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/poll.h>
+#include <linux/security.h>
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
@@ -187,8 +188,20 @@ static ssize_t coda_psdev_write(struct file *file, const char __user *buf,
 			(struct coda_open_by_fd_out *)req->uc_data;
 		if (!outp->oh.result) {
 			outp->fh = fget(outp->fd);
-			if (!outp->fh)
+			if (!outp->fh) {
+				req->uc_flags |= CODA_REQ_ABORT;
+				wake_up(&req->uc_sleep);
 				return -EBADF;
+			}
+			retval = security_file_permission(outp->fh,
+							  MAY_READ | MAY_WRITE);
+			if (retval) {
+				fput(outp->fh);
+				outp->fh = NULL;
+				req->uc_flags |= CODA_REQ_ABORT;
+				wake_up(&req->uc_sleep);
+				return retval;
+			}
 		}
 	}
 
@@ -435,4 +448,3 @@ static void __exit exit_coda(void)
 
 module_init(init_coda);
 module_exit(exit_coda);
-

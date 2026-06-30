@@ -18,6 +18,7 @@
 #include <linux/swap.h>
 #include <linux/misc_cgroup.h>
 #include <linux/processor.h>
+#include <linux/security.h>
 #include <linux/trace_events.h>
 #include <uapi/linux/sev-guest.h>
 
@@ -2068,6 +2069,9 @@ int sev_vm_move_enc_context_from(struct kvm *kvm, unsigned int source_fd)
 
 	if (!file_is_kvm(fd_file(f)))
 		return -EBADF;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	source_kvm = fd_file(f)->private_data;
 	ret = sev_lock_two_vms(kvm, source_kvm);
@@ -2801,6 +2805,9 @@ int sev_vm_copy_enc_context_from(struct kvm *kvm, unsigned int source_fd)
 
 	if (!file_is_kvm(fd_file(f)))
 		return -EBADF;
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	source_kvm = fd_file(f)->private_data;
 	ret = sev_lock_two_vms(kvm, source_kvm);

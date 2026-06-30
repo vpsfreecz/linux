@@ -9,6 +9,7 @@
 #include <linux/memfd.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/security.h>
 #include <linux/shmem_fs.h>
 #include <linux/hugetlb.h>
 #include <linux/slab.h>
@@ -419,6 +420,11 @@ static long udmabuf_create(struct miscdevice *device,
 
 		if (!memfd) {
 			ret = -EBADFD;
+			goto err;
+		}
+		ret = security_file_permission(memfd, MAY_READ | MAY_WRITE);
+		if (ret) {
+			fput(memfd);
 			goto err;
 		}
 

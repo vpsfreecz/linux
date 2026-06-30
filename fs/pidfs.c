@@ -6,6 +6,7 @@
 #include <linux/cgroup.h>
 #include <linux/magic.h>
 #include <linux/mount.h>
+#include <linux/mnt_namespace.h>
 #include <linux/pid.h>
 #include <linux/pidfs.h>
 #include <linux/pid_namespace.h>
@@ -22,6 +23,7 @@
 #include <net/net_namespace.h>
 #include <linux/coredump.h>
 #include <linux/security.h>
+#include <linux/user_namespace.h>
 #include <linux/xattr.h>
 
 #include "internal.h"
@@ -215,12 +217,16 @@ static void pidfd_show_fdinfo(struct seq_file *m, struct file *f)
 {
 	struct pid *pid = pidfd_pid(f);
 	struct pid_namespace *ns;
+	struct task_struct *task;
 	pid_t nr = -1;
 
-	if (likely(pid_has_task(pid, PIDTYPE_PID))) {
+	task = get_pid_task(pid, PIDTYPE_PID);
+	if (task && ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
 		ns = proc_pid_ns(file_inode(m->file)->i_sb);
 		nr = pid_nr_ns(pid, ns);
 	}
+	if (task)
+		put_task_struct(task);
 
 	seq_put_decimal_ll(m, "Pid:\t", nr);
 
@@ -252,18 +258,22 @@ static __poll_t pidfd_poll(struct file *file, struct poll_table_struct *pts)
 	__poll_t poll_flags = 0;
 
 	poll_wait(file, &pid->wait_pidfd, pts);
+
 	/*
 	 * Don't wake waiters if the thread-group leader exited
 	 * prematurely. They either get notified when the last subthread
 	 * exits or not at all if one of the remaining subthreads execs
 	 * and assumes the struct pid of the old thread-group leader.
 	 */
-	guard(rcu)();
-	task = pid_task(pid, PIDTYPE_PID);
+	task = get_pid_task(pid, PIDTYPE_PID);
 	if (!task)
 		poll_flags = EPOLLIN | EPOLLRDNORM | EPOLLHUP;
+	else if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+		poll_flags = EPOLLERR;
 	else if (task->exit_state && !delay_group_leader(task))
 		poll_flags = EPOLLIN | EPOLLRDNORM;
+	if (task)
+		put_task_struct(task);
 
 	return poll_flags;
 }
@@ -322,6 +332,10 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 	if (!pid_in_current_pidns(pid))
 		return -ESRCH;
 
+	task = get_pid_task(pid, PIDTYPE_PID);
+	if (task && !ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+		return -EACCES;
+
 	attr = READ_ONCE(pid->attr);
 	if (mask & PIDFD_INFO_EXIT) {
 		exit_info = READ_ONCE(attr->exit_info);
@@ -340,7 +354,6 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 		kinfo.coredump_mask = READ_ONCE(attr->__pei.coredump_mask);
 	}
 
-	task = get_pid_task(pid, PIDTYPE_PID);
 	if (!task) {
 		/*
 		 * If the task has already been reaped, only exit
@@ -448,6 +461,24 @@ static bool pidfs_ioctl_valid(unsigned int cmd)
 	}
 
 	return false;
+}
+
+static bool pidfd_ns_current_boundary_can_see(struct ns_common *ns)
+{
+	switch (ns->ns_type) {
+	case CLONE_NEWNS:
+		return mnt_ns_current_boundary_can_see(to_mnt_ns(ns));
+#ifdef CONFIG_PID_NS
+	case CLONE_NEWPID:
+		return pidns_is_ancestor(to_pid_ns(ns), task_active_pid_ns(current));
+#endif
+#ifdef CONFIG_USER_NS
+	case CLONE_NEWUSER:
+		return userns_current_boundary_can_see(to_user_ns(ns));
+#endif
+	default:
+		return true;
+	}
 }
 
 static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -565,6 +596,11 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	if (!ns_common)
 		return -EOPNOTSUPP;
+
+	if (!pidfd_ns_current_boundary_can_see(ns_common)) {
+		ns_common->ops->put(ns_common);
+		return -EPERM;
+	}
 
 	/* open_namespace() unconditionally consumes the reference */
 	return open_namespace(ns_common);

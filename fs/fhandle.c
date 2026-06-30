@@ -12,6 +12,7 @@
 #include <linux/uaccess.h>
 #include <linux/compat.h>
 #include <linux/nsfs.h>
+#include <linux/security.h>
 #include "internal.h"
 #include "mount.h"
 
@@ -112,6 +113,34 @@ static long do_sys_name_to_handle(const struct path *path,
 	return retval;
 }
 
+static int user_handle_path_at(int dfd, const char __user *name,
+			       int flag, int lookup_flags, struct path *path)
+{
+	if ((flag & AT_EMPTY_PATH) && dfd >= 0) {
+		char c;
+
+		if (get_user(c, name))
+			return -EFAULT;
+		if (!c) {
+			int ret;
+			CLASS(fd_raw, f)(dfd);
+
+			if (fd_empty(f))
+				return -EBADF;
+
+			ret = security_file_permission(fd_file(f), MAY_READ);
+			if (ret)
+				return ret;
+
+			*path = fd_file(f)->f_path;
+			path_get(path);
+			return 0;
+		}
+	}
+
+	return user_path_at(dfd, name, lookup_flags, path);
+}
+
 /**
  * sys_name_to_handle_at: convert name to handle
  * @dfd: directory relative to which name is interpreted if not absolute
@@ -159,7 +188,7 @@ SYSCALL_DEFINE5(name_to_handle_at, int, dfd, const char __user *, name,
 	lookup_flags = (flag & AT_SYMLINK_FOLLOW) ? LOOKUP_FOLLOW : 0;
 	if (flag & AT_EMPTY_PATH)
 		lookup_flags |= LOOKUP_EMPTY;
-	err = user_path_at(dfd, name, lookup_flags, &path);
+	err = user_handle_path_at(dfd, name, flag, lookup_flags, &path);
 	if (!err) {
 		err = do_sys_name_to_handle(&path, handle, mnt_id,
 					    flag & AT_HANDLE_MNT_ID_UNIQUE,
@@ -172,9 +201,14 @@ SYSCALL_DEFINE5(name_to_handle_at, int, dfd, const char __user *, name,
 static int get_path_anchor(int fd, struct path *root)
 {
 	if (fd >= 0) {
+		int ret;
 		CLASS(fd, f)(fd);
+
 		if (fd_empty(f))
 			return -EBADF;
+		ret = security_file_permission(fd_file(f), MAY_READ);
+		if (ret)
+			return ret;
 		*root = fd_file(f)->f_path;
 		path_get(root);
 		return 0;

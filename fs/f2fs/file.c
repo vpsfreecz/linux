@@ -24,6 +24,7 @@
 #include <linux/fileattr.h>
 #include <linux/fadvise.h>
 #include <linux/iomap.h>
+#include <linux/security.h>
 
 #include "f2fs.h"
 #include "node.h"
@@ -3224,6 +3225,9 @@ static int __f2fs_ioc_move_range(struct file *filp,
 	if (!(filp->f_mode & FMODE_READ) ||
 			!(filp->f_mode & FMODE_WRITE))
 		return -EBADF;
+	err = security_file_permission(filp, MAY_READ | MAY_WRITE);
+	if (err)
+		return err;
 
 	CLASS(fd, dst)(range->dst_fd);
 	if (fd_empty(dst))
@@ -3231,6 +3235,9 @@ static int __f2fs_ioc_move_range(struct file *filp,
 
 	if (!(fd_file(dst)->f_mode & FMODE_WRITE))
 		return -EBADF;
+	err = security_file_permission(fd_file(dst), MAY_WRITE);
+	if (err)
+		return err;
 
 	err = mnt_want_write_file(filp);
 	if (err)

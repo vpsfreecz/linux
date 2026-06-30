@@ -4258,7 +4258,12 @@ int vmw_execbuf_process(struct drm_file *file_priv,
 			put_unused_fd(out_fence_fd);
 		} else {
 			/* Link the fence with the FD created earlier */
-			fd_install(out_fence_fd, sync_file->file);
+			ret = sync_file_install(sync_file, out_fence_fd);
+			if (ret) {
+				fput(sync_file->file);
+				put_unused_fd(out_fence_fd);
+				out_fence_fd = -1;
+			}
 		}
 	}
 

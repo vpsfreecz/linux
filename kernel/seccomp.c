@@ -40,6 +40,7 @@
 #include <linux/pid.h>
 #include <linux/ptrace.h>
 #include <linux/capability.h>
+#include <linux/security.h>
 #include <linux/uaccess.h>
 #include <linux/anon_inodes.h>
 #include <linux/lockdep.h>
@@ -1828,17 +1829,30 @@ static long seccomp_notify_ioctl(struct file *file, unsigned int cmd,
 {
 	struct seccomp_filter *filter = file->private_data;
 	void __user *buf = (void __user *)arg;
+	int ret;
 
 	/* Fixed-size ioctls */
 	switch (cmd) {
 	case SECCOMP_IOCTL_NOTIF_RECV:
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
 		return seccomp_notify_recv(filter, buf);
 	case SECCOMP_IOCTL_NOTIF_SEND:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return seccomp_notify_send(filter, buf);
 	case SECCOMP_IOCTL_NOTIF_ID_VALID_WRONG_DIR:
 	case SECCOMP_IOCTL_NOTIF_ID_VALID:
+		ret = security_file_permission(file, MAY_READ);
+		if (ret)
+			return ret;
 		return seccomp_notify_id_valid(filter, buf);
 	case SECCOMP_IOCTL_NOTIF_SET_FLAGS:
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return seccomp_notify_set_flags(filter, arg);
 	}
 
@@ -1846,6 +1860,9 @@ static long seccomp_notify_ioctl(struct file *file, unsigned int cmd,
 #define EA_IOCTL(cmd)	((cmd) & ~(IOC_INOUT | IOCSIZE_MASK))
 	switch (EA_IOCTL(cmd)) {
 	case EA_IOCTL(SECCOMP_IOCTL_NOTIF_ADDFD):
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 		return seccomp_notify_addfd(filter, buf, _IOC_SIZE(cmd));
 	default:
 		return -EINVAL;
@@ -1858,6 +1875,11 @@ static __poll_t seccomp_notify_poll(struct file *file,
 	struct seccomp_filter *filter = file->private_data;
 	__poll_t ret = 0;
 	struct seccomp_knotif *cur;
+	int err;
+
+	err = security_file_permission(file, MAY_READ);
+	if (err)
+		return EPOLLERR;
 
 	poll_wait(file, &filter->wqh, poll_tab);
 
@@ -1887,6 +1909,11 @@ static const struct file_operations seccomp_notify_ops = {
 	.unlocked_ioctl = seccomp_notify_ioctl,
 	.compat_ioctl = seccomp_notify_ioctl,
 };
+
+bool seccomp_is_notify_file(const struct file *file)
+{
+	return file && file->f_op == &seccomp_notify_ops;
+}
 
 static struct file *init_listener(struct seccomp_filter *filter)
 {

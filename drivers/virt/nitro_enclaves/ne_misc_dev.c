@@ -25,6 +25,7 @@
 #include <linux/pci.h>
 #include <linux/poll.h>
 #include <linux/range.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <uapi/linux/vm_sockets.h>
@@ -1145,6 +1146,23 @@ static int ne_start_enclave_ioctl(struct ne_enclave *ne_enclave,
 static long ne_enclave_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct ne_enclave *ne_enclave = file->private_data;
+	int ret;
+
+	switch (cmd) {
+	case NE_GET_IMAGE_LOAD_INFO:
+		ret = security_file_permission(file, MAY_READ);
+		break;
+	case NE_ADD_VCPU:
+	case NE_SET_USER_MEMORY_REGION:
+	case NE_START_ENCLAVE:
+		ret = security_file_permission(file, MAY_WRITE);
+		break;
+	default:
+		ret = 0;
+		break;
+	}
+	if (ret)
+		return ret;
 
 	switch (cmd) {
 	case NE_ADD_VCPU: {
@@ -1740,8 +1758,13 @@ static long ne_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case NE_CREATE_VM: {
 		int enclave_fd = -1;
+		int ret;
 		struct ne_pci_dev *ne_pci_dev = ne_devs.ne_pci_dev;
 		u64 __user *slot_uid = (void __user *)arg;
+
+		ret = security_file_permission(file, MAY_WRITE);
+		if (ret)
+			return ret;
 
 		mutex_lock(&ne_pci_dev->enclaves_list_mutex);
 		enclave_fd = ne_create_vm_ioctl(ne_pci_dev, slot_uid);

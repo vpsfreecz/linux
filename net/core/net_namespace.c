@@ -21,6 +21,7 @@
 #include <linux/uidgid.h>
 #include <linux/proc_fs.h>
 #include <linux/nstree.h>
+#include <linux/security.h>
 
 #include <net/aligned_data.h>
 #include <net/sock.h>
@@ -764,10 +765,14 @@ EXPORT_SYMBOL_GPL(get_net_ns);
 
 struct net *get_net_ns_by_fd(int fd)
 {
+	int ret;
 	CLASS(fd, f)(fd);
 
 	if (fd_empty(f))
 		return ERR_PTR(-EBADF);
+	ret = security_file_permission(fd_file(f), MAY_READ);
+	if (ret)
+		return ERR_PTR(ret);
 
 	if (proc_ns_file(fd_file(f))) {
 		struct ns_common *ns = get_proc_ns(file_inode(fd_file(f)));

@@ -21,6 +21,7 @@
 #include <linux/file.h>
 #include <linux/mm.h>
 #include <linux/rcupdate_wait.h>
+#include <linux/security.h>
 
 #include <asm/kvm_ppc.h>
 #include <asm/kvm_book3s.h>
@@ -114,11 +115,16 @@ long kvm_spapr_tce_attach_iommu_group(struct kvm *kvm, int tablefd,
 	struct iommu_table *tbl = NULL;
 	struct iommu_table_group *table_group;
 	long i;
+	long ret;
 	struct kvmppc_spapr_tce_iommu_table *stit;
 	CLASS(fd, f)(tablefd);
 
 	if (fd_empty(f))
 		return -EBADF;
+
+	ret = security_file_permission(fd_file(f), MAY_READ | MAY_WRITE);
+	if (ret)
+		return ret;
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(stt, &kvm->arch.spapr_tce_tables, list) {

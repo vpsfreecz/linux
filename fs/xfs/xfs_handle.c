@@ -29,6 +29,7 @@
 #include "xfs_acl.h"
 
 #include <linux/namei.h>
+#include <linux/security.h>
 
 static inline size_t
 xfs_filehandle_fid_len(void)
@@ -94,6 +95,9 @@ xfs_find_handle(
 
 		if (fd_empty(f))
 			return -EBADF;
+		error = security_file_permission(fd_file(f), MAY_READ);
+		if (error)
+			return error;
 		path = fd_file(f)->f_path;
 		path_get(&path);
 	} else {

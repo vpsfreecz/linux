@@ -11,6 +11,7 @@
 #include <linux/ns_common.h>
 #include <linux/nsproxy.h>
 #include <linux/slab.h>
+#include <linux/stat.h>
 #include <linux/uts.h>
 #include <linux/utsname.h>
 #include <linux/random.h>

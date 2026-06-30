@@ -47,6 +47,7 @@
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/compat.h>
@@ -5668,6 +5669,7 @@ static int sctp_getsockopt_peeloff_common(struct sock *sk, sctp_peeloff_arg_t *p
 					  struct file **newfile, unsigned flags)
 {
 	struct socket *newsock;
+	int err;
 	int retval;
 
 	retval = sctp_do_peeloff(sk, peeloff->associd, &newsock);
@@ -5687,6 +5689,14 @@ static int sctp_getsockopt_peeloff_common(struct sock *sk, sctp_peeloff_arg_t *p
 		retval = PTR_ERR(*newfile);
 		*newfile = NULL;
 		return retval;
+	}
+
+	err = security_socket_accept(sk->sk_socket, newsock);
+	if (err) {
+		fput(*newfile);
+		put_unused_fd(retval);
+		*newfile = NULL;
+		return err;
 	}
 
 	pr_debug("%s: sk:%p, newsk:%p, sd:%d\n", __func__, sk, newsock->sk,

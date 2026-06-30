@@ -686,6 +686,7 @@ impl Thread {
                     &view.alloc.process.cred,
                     &file,
                 )?;
+                security::file_receive_cred(&view.alloc.process.cred, &file)?;
 
                 let mut obj_write = BinderFdObject::default();
                 obj_write.hdr.type_ = BINDER_TYPE_FD;
@@ -845,6 +846,7 @@ impl Thread {
                         &view.alloc.process.cred,
                         &file,
                     )?;
+                    security::file_receive_cred(&view.alloc.process.cred, &file)?;
 
                     // The `validate_parent_fixup` call ensuers that this addition will not
                     // overflow.
@@ -934,11 +936,10 @@ impl Thread {
         let trd = &tr.transaction_data;
         let is_oneway = trd.flags & TF_ONE_WAY != 0;
         let mut secctx = if let Some(offset) = txn_security_ctx_offset {
-            let secid = self.process.cred.get_secid();
-            let ctx = match security::SecurityCtx::from_secid(secid) {
+            let ctx = match security::SecurityCtx::from_cred(&self.process.cred) {
                 Ok(ctx) => ctx,
                 Err(err) => {
-                    pr_warn!("Failed to get security ctx for id {}: {:?}", secid, err);
+                    pr_warn!("Failed to get security ctx: {:?}", err);
                     return Err(err.into());
                 }
             };

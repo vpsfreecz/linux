@@ -10,6 +10,7 @@
 #include <linux/fdtable.h>
 #include <linux/magic.h>
 #include <linux/nospec.h>
+#include <linux/security.h>
 
 #include "autofs_i.h"
 
@@ -371,6 +372,11 @@ static int autofs_dev_ioctl_setpipefd(struct file *fp,
 		pipe = fget(pipefd);
 		if (!pipe) {
 			err = -EBADF;
+			goto out;
+		}
+		err = security_file_permission(pipe, MAY_WRITE);
+		if (err) {
+			fput(pipe);
 			goto out;
 		}
 		if (autofs_prepare_pipe(pipe) < 0) {
@@ -735,6 +741,11 @@ static int _autofs_dev_ioctl(unsigned int command,
 			if (cmd == AUTOFS_DEV_IOCTL_ISMOUNTPOINT_CMD)
 				goto cont;
 			err = -EBADF;
+			goto out;
+		}
+		err = security_file_permission(fp, MAY_READ | MAY_WRITE);
+		if (err) {
+			fput(fp);
 			goto out;
 		}
 

@@ -4,6 +4,7 @@
 #include <linux/kvm_host.h>
 #include <linux/pagemap.h>
 #include <linux/anon_inodes.h>
+#include <linux/security.h>
 
 #include "kvm_mm.h"
 
@@ -580,6 +581,9 @@ int kvm_gmem_bind(struct kvm *kvm, struct kvm_memory_slot *slot,
 
 	gmem = file->private_data;
 	if (gmem->kvm != kvm)
+		goto err;
+	r = security_file_permission(file, MAY_READ | MAY_WRITE);
+	if (r)
 		goto err;
 
 	inode = file_inode(file);

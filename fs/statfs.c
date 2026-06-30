@@ -114,10 +114,16 @@ retry:
 
 int fd_statfs(int fd, struct kstatfs *st)
 {
+	int error;
 	CLASS(fd_raw, f)(fd);
 
 	if (fd_empty(f))
 		return -EBADF;
+
+	error = security_file_use(fd_file(f));
+	if (error)
+		return error;
+
 	return vfs_statfs(&fd_file(f)->f_path, st);
 }
 

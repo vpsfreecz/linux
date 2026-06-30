@@ -10,6 +10,7 @@
 #include <linux/poll.h>
 #include <linux/sort.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/seq_buf.h>
 
 #include "internal.h"
@@ -1110,7 +1111,7 @@ static ssize_t memcg_write_event_control(struct kernfs_open_file *of,
 
 	/* the process need read permission on control file */
 	/* AV: shouldn't we check that it's been opened for read instead? */
-	ret = file_permission(fd_file(cfile), MAY_READ);
+	ret = security_file_permission(fd_file(cfile), MAY_READ);
 	if (ret < 0)
 		goto out_put_eventfd;
 

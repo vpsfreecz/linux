@@ -192,6 +192,13 @@ static int selinuxfs_has_perm(struct selinux_fs_info *fsi, u32 perms)
 				  SECCLASS_SECURITY, perms, NULL);
 }
 
+static bool selinuxfs_is_init_state(struct selinux_fs_info *fsi)
+{
+	struct selinux_state *state = fsi->state ?: &selinux_state;
+
+	return state == &selinux_state;
+}
+
 #define SEL_INITCON_INO_OFFSET		0x01000000
 #define SEL_BOOL_INO_OFFSET		0x02000000
 #define SEL_CLASS_INO_OFFSET		0x04000000
@@ -364,6 +371,7 @@ static ssize_t sel_write_disable(struct file *file, const char __user *buf,
 				 size_t count, loff_t *ppos)
 
 {
+	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
 	char *page;
 	ssize_t length;
 	int new_value;
@@ -384,6 +392,12 @@ static ssize_t sel_write_disable(struct file *file, const char __user *buf,
 		goto out;
 	}
 	length = count;
+
+	if (!selinuxfs_is_init_state(fsi)) {
+		if (new_value)
+			length = -EOPNOTSUPP;
+		goto out;
+	}
 
 	if (new_value) {
 		pr_err("SELinux: https://github.com/SELinuxProject/selinux-kernel/wiki/DEPRECATE-runtime-disable\n");
@@ -806,12 +820,18 @@ static ssize_t sel_write_checkreqprot(struct file *file, const char __user *buf,
 	if (new_value) {
 		char comm[sizeof(current->comm)];
 
+		if (!selinuxfs_is_init_state(fsi)) {
+			length = -EOPNOTSUPP;
+			goto out;
+		}
+
 		strscpy(comm, current->comm);
 		pr_err("SELinux: %s (%d) set checkreqprot to 1. This is no longer supported.\n",
 		       comm, current->pid);
 	}
 
-	selinux_ima_measure_state();
+	if (selinuxfs_is_init_state(fsi))
+		selinux_ima_measure_state();
 
 out:
 	kfree(page);

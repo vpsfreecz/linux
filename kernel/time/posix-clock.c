@@ -8,6 +8,7 @@
 #include <linux/export.h>
 #include <linux/file.h>
 #include <linux/posix-clock.h>
+#include <linux/security.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
@@ -194,7 +195,8 @@ struct posix_clock_desc {
 	struct posix_clock *clk;
 };
 
-static int get_clock_desc(const clockid_t id, struct posix_clock_desc *cd)
+static int get_clock_desc(const clockid_t id, struct posix_clock_desc *cd,
+			  int mask)
 {
 	struct file *fp = fget(clockid_to_fd(id));
 	int err = -EINVAL;
@@ -203,6 +205,9 @@ static int get_clock_desc(const clockid_t id, struct posix_clock_desc *cd)
 		return err;
 
 	if (fp->f_op->open != posix_clock_open || !fp->private_data)
+		goto out;
+	err = security_file_permission(fp, mask);
+	if (err)
 		goto out;
 
 	cd->fp = fp;
@@ -226,7 +231,7 @@ static int pc_clock_adjtime(clockid_t id, struct __kernel_timex *tx)
 	struct posix_clock_desc cd;
 	int err;
 
-	err = get_clock_desc(id, &cd);
+	err = get_clock_desc(id, &cd, tx->modes ? MAY_WRITE : MAY_READ);
 	if (err)
 		return err;
 
@@ -250,7 +255,7 @@ static int pc_clock_gettime(clockid_t id, struct timespec64 *ts)
 	struct posix_clock_desc cd;
 	int err;
 
-	err = get_clock_desc(id, &cd);
+	err = get_clock_desc(id, &cd, MAY_READ);
 	if (err)
 		return err;
 
@@ -269,7 +274,7 @@ static int pc_clock_getres(clockid_t id, struct timespec64 *ts)
 	struct posix_clock_desc cd;
 	int err;
 
-	err = get_clock_desc(id, &cd);
+	err = get_clock_desc(id, &cd, MAY_READ);
 	if (err)
 		return err;
 
@@ -291,7 +296,7 @@ static int pc_clock_settime(clockid_t id, const struct timespec64 *ts)
 	if (!timespec64_valid_strict(ts))
 		return -EINVAL;
 
-	err = get_clock_desc(id, &cd);
+	err = get_clock_desc(id, &cd, MAY_WRITE);
 	if (err)
 		return err;
 

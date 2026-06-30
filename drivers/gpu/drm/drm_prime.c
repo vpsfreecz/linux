@@ -30,6 +30,7 @@
 #include <linux/dma-buf.h>
 #include <linux/rbtree.h>
 #include <linux/module.h>
+#include <linux/security.h>
 
 #include <drm/drm.h>
 #include <drm/drm_drv.h>
@@ -296,7 +297,7 @@ int drm_gem_prime_fd_to_handle(struct drm_device *dev,
 	struct drm_gem_object *obj;
 	int ret;
 
-	dma_buf = dma_buf_get(prime_fd);
+	dma_buf = dma_buf_get_with_perm(prime_fd, MAY_READ | MAY_WRITE);
 	if (IS_ERR(dma_buf))
 		return PTR_ERR(dma_buf);
 
@@ -513,6 +514,7 @@ int drm_gem_prime_handle_to_fd(struct drm_device *dev,
 {
 	struct dma_buf *dmabuf;
 	int fd = get_unused_fd_flags(flags);
+	int ret;
 
 	if (fd < 0)
 		return fd;
@@ -521,6 +523,13 @@ int drm_gem_prime_handle_to_fd(struct drm_device *dev,
 	if (IS_ERR(dmabuf)) {
 		put_unused_fd(fd);
 		return PTR_ERR(dmabuf);
+	}
+
+	ret = security_file_receive(dmabuf->file);
+	if (ret) {
+		put_unused_fd(fd);
+		dma_buf_put(dmabuf);
+		return ret;
 	}
 
 	fd_install(fd, dmabuf->file);

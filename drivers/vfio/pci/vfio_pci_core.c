@@ -27,6 +27,7 @@
 #include <linux/vgaarb.h>
 #include <linux/nospec.h>
 #include <linux/sched/mm.h>
+#include <linux/security.h>
 #include <linux/iommufd.h>
 #if IS_ENABLED(CONFIG_EEH)
 #include <asm/eeh.h>
@@ -1363,6 +1364,11 @@ vfio_pci_ioctl_pci_hot_reset_groups(struct vfio_pci_core_device *vdev,
 		if (!vfio_file_is_group(file)) {
 			fput(file);
 			ret = -EINVAL;
+			break;
+		}
+		ret = security_file_permission(file, MAY_READ | MAY_WRITE);
+		if (ret) {
+			fput(file);
 			break;
 		}
 
