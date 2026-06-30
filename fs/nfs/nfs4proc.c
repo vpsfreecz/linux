@@ -10637,8 +10637,11 @@ static int nfs41_free_stateid(struct nfs_server *server,
 
 	dprintk("NFS call  free_stateid %p\n", stateid);
 	data = kmalloc(sizeof(*data), GFP_KERNEL);
-	if (!data)
+	if (!data) {
+		nfs_sb_deactive(server->super);
+		nfs_put_client(clp);
 		return -ENOMEM;
+	}
 	data->server = server;
 	nfs4_stateid_copy(&data->args.stateid, stateid);
 
