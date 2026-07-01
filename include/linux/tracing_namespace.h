@@ -45,9 +45,6 @@ int tracing_ns_check_syslogns_setns_from(const struct syslog_namespace *syslog_n
 int tracing_ns_check_userns_setns(const struct user_namespace *user_ns);
 int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns);
 int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns);
-int tracing_ns_check_syslogns_setns_from(
-	const struct syslog_namespace *syslog_ns,
-	const struct tracing_namespace *current_ns);
 
 static inline struct tracing_namespace *current_tracing_ns(void)
 {
@@ -151,13 +148,6 @@ static inline int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_n
 }
 
 static inline int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns)
-{
-	return 0;
-}
-
-static inline int tracing_ns_check_syslogns_setns_from(
-	const struct syslog_namespace *syslog_ns,
-	const struct tracing_namespace *current_ns)
 {
 	return 0;
 }
