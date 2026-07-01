@@ -4953,6 +4953,7 @@ int security_socket_accept(struct socket *sock, struct socket *newsock)
 {
 	return call_int_hook(socket_accept, sock, newsock);
 }
+EXPORT_SYMBOL(security_socket_accept);
 
 /**
  * security_socket_sendmsg() - Check if sending a message is allowed
