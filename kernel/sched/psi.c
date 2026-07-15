@@ -1144,6 +1144,7 @@ void psi_cgroup_free(struct cgroup *cgroup)
  * cgroup_move_task - move task to a different cgroup
  * @task: the task
  * @to: the target css_set
+ * @allow_unpublished_task: allow fork-time assignment of an unpublished child
  *
  * Move task to a new cgroup and safely migrate its associated stall
  * state between the different groups.
@@ -1152,11 +1153,14 @@ void psi_cgroup_free(struct cgroup *cgroup)
  * changes to the task's scheduling state and - in case the task is
  * running - concurrent changes to its stall state.
  */
-void cgroup_move_task(struct task_struct *task, struct css_set *to)
+void cgroup_move_task(struct task_struct *task, struct css_set *to,
+		      bool allow_unpublished_task)
 {
 	unsigned int task_flags;
 	struct rq_flags rf;
 	struct rq *rq;
+
+	cgroup_move_task_auth_guard_check(task, allow_unpublished_task);
 
 	if (!static_branch_likely(&psi_cgroups_enabled)) {
 		/*
@@ -1164,6 +1168,8 @@ void cgroup_move_task(struct task_struct *task, struct css_set *to)
 		 * from the outside, so we move cgroups from inside sched/.
 		 */
 		rcu_assign_pointer(task->cgroups, to);
+		cgroup_move_task_auth_guard_validate(
+			task, allow_unpublished_task);
 		return;
 	}
 
@@ -1200,6 +1206,7 @@ void cgroup_move_task(struct task_struct *task, struct css_set *to)
 
 	/* See comment above */
 	rcu_assign_pointer(task->cgroups, to);
+	cgroup_move_task_auth_guard_validate(task, allow_unpublished_task);
 
 	if (task_flags)
 		psi_task_change(task, 0, task_flags);

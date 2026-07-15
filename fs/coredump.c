@@ -1088,7 +1088,7 @@ static inline bool coredump_skip(const struct coredump_params *cprm,
 
 void vfs_coredump(const kernel_siginfo_t *siginfo)
 {
-	struct cred *cred __free(put_cred) = NULL;
+	struct cred *cred = NULL;
 	size_t *argv __free(kfree) = NULL;
 	struct core_state core_state;
 	struct core_name cn;
@@ -1128,10 +1128,16 @@ void vfs_coredump(const kernel_siginfo_t *siginfo)
 	if (coredump_force_suid_safe(&cprm))
 		cred->fsuid = GLOBAL_ROOT_UID;
 
-	if (coredump_wait(siginfo->si_signo, &core_state) < 0)
+	if (coredump_wait(siginfo->si_signo, &core_state) < 0) {
+		abort_creds(cred);
 		return;
+	}
 
-	old_cred = override_creds(cred);
+	old_cred = override_creds_from_prepared(cred);
+	if (!old_cred) {
+		coredump_finish(false);
+		return;
+	}
 
 	if (!coredump_parse(&cn, &cprm, &argv, &argc)) {
 		coredump_report_failure("format_corename failed, aborting core");
@@ -1198,7 +1204,7 @@ void vfs_coredump(const kernel_siginfo_t *siginfo)
 
 close_fail:
 	coredump_cleanup(&cn, &cprm);
-	revert_creds(old_cred);
+	put_cred(revert_creds(old_cred));
 	return;
 }
 
