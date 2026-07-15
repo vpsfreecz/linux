@@ -21370,12 +21370,9 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 	if (err)
 		return err;
 
-	if (bpf_token_is_container(env->prog->aux->token)) {
-		if (!bpf_token_is_container(map->token) ||
-		    !bpf_token_same_container_domain(env->prog->aux->token, map->token)) {
-			verbose(env, "container tracing program cannot use map from another tracing domain\n");
-			return -EACCES;
-		}
+	if (!bpf_token_same_owner_domain(env->prog->aux->token, map->token)) {
+		verbose(env, "BPF program cannot use map from another owner domain\n");
+		return -EACCES;
 	}
 
 	if (env->prog->sleepable)

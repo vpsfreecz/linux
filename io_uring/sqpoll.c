@@ -239,7 +239,7 @@ static int __io_sq_thread(struct io_ring_ctx *ctx, struct io_sq_data *sqd,
 		if (to_submit && wq_has_sleeper(&ctx->sqo_sq_wait))
 			wake_up(&ctx->sqo_sq_wait);
 		if (creds)
-			revert_creds(creds);
+			put_cred(revert_creds(creds));
 	}
 
 	return ret;

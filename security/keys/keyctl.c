@@ -1230,7 +1230,7 @@ static long keyctl_instantiate_key_common(key_serial_t id,
 	/* discard the assumed authority if it's just been disabled by
 	 * instantiation of the key */
 	if (ret == 0)
-		keyctl_change_reqkey_auth(NULL);
+		ret = keyctl_change_reqkey_auth(NULL);
 
 error2:
 	kvfree_sensitive(payload, plen);
@@ -1377,7 +1377,7 @@ long keyctl_reject_key(key_serial_t id, unsigned timeout, unsigned error,
 	/* discard the assumed authority if it's just been disabled by
 	 * instantiation of the key */
 	if (ret == 0)
-		keyctl_change_reqkey_auth(NULL);
+		ret = keyctl_change_reqkey_auth(NULL);
 
 error:
 	return ret;
@@ -1433,7 +1433,9 @@ long keyctl_set_reqkey_keyring(int reqkey_defl)
 
 set:
 	new->jit_keyring = reqkey_defl;
-	commit_creds(new);
+	ret = commit_creds(new);
+	if (ret < 0)
+		return ret;
 	return old_setting;
 error:
 	abort_creds(new);
@@ -1626,7 +1628,7 @@ long keyctl_get_security(key_serial_t keyid,
 long keyctl_session_to_parent(void)
 {
 	struct task_struct *me, *parent;
-	const struct cred *mycred, *pcred;
+	const struct cred *mycred = NULL, *pcred = NULL;
 	struct callback_head *newwork, *oldwork;
 	key_ref_t keyring_r;
 	struct cred *cred;
@@ -1669,8 +1671,18 @@ long keyctl_session_to_parent(void)
 
 	/* the parent and the child must have different session keyrings or
 	 * there's no point */
-	mycred = current_cred();
-	pcred = __task_cred(parent);
+	mycred = get_task_cred_checked_nowait(me);
+	if (IS_ERR(mycred)) {
+		ret = PTR_ERR(mycred);
+		mycred = NULL;
+		goto unlock;
+	}
+	pcred = get_task_cred_checked_nowait(parent);
+	if (IS_ERR(pcred)) {
+		ret = PTR_ERR(pcred);
+		pcred = NULL;
+		goto unlock;
+	}
 	if (mycred == pcred ||
 	    mycred->session_keyring == pcred->session_keyring) {
 		ret = 0;
@@ -1704,6 +1716,8 @@ long keyctl_session_to_parent(void)
 unlock:
 	write_unlock_irq(&tasklist_lock);
 	rcu_read_unlock();
+	put_cred(mycred);
+	put_cred(pcred);
 	if (oldwork)
 		put_cred(container_of(oldwork, struct cred, rcu));
 	if (newwork)

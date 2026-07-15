@@ -30,6 +30,7 @@
 
 #include "cgroup-internal.h"
 
+#include <linux/auth_guard.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/cred.h>
 #include <linux/errno.h>
@@ -907,6 +908,8 @@ static void css_set_skip_task_iters(struct css_set *cset,
 		css_task_iter_skip(it, task);
 }
 
+static void css_set_quarantine_task_list(struct task_struct *task);
+
 /**
  * css_set_move_task - move a task from one css_set to another
  * @task: task being moved
@@ -922,11 +925,130 @@ static void css_set_skip_task_iters(struct css_set *cset,
  * css_task_iter adjustments but the caller is responsible for managing
  * @from_cset and @to_cset's reference counts.
  */
-static void css_set_move_task(struct task_struct *task,
-			      struct css_set *from_cset, struct css_set *to_cset,
-			      bool use_mg_tasks)
+enum css_set_move_auth_guard_mode {
+	CSS_SET_MOVE_AUTH_GUARD_RUNTIME,
+	CSS_SET_MOVE_AUTH_GUARD_RUNTIME_PRECHECKED,
+	CSS_SET_MOVE_AUTH_GUARD_FORK,
+	CSS_SET_MOVE_AUTH_GUARD_EXIT,
+};
+
+static bool
+css_set_move_task_auth_guard_check_where(struct task_struct *task,
+					 struct css_set *from_cset,
+					 struct css_set *to_cset,
+					 enum css_set_move_auth_guard_mode mode,
+					 const char *where)
 {
+	if (mode == CSS_SET_MOVE_AUTH_GUARD_RUNTIME &&
+	    !auth_guard_task_check_where(task, where))
+		return false;
+	if (mode == CSS_SET_MOVE_AUTH_GUARD_FORK &&
+	    !auth_guard_task_unpublished_where(task, where))
+		return false;
+	if (from_cset && !auth_guard_css_set_check_where(from_cset, where))
+		return false;
+	if (to_cset && !auth_guard_css_set_check_where(to_cset, where))
+		return false;
+
+	return true;
+}
+
+#define css_set_move_task_auth_guard_check(_task, _from, _to, _mode) \
+	css_set_move_task_auth_guard_check_where((_task), (_from), (_to), \
+						 (_mode), __func__)
+
+static bool
+css_set_move_task_auth_guard_begin_where(struct task_struct *task,
+					 struct css_set *from_cset,
+					 struct css_set *to_cset,
+					 const char *where)
+{
+	if (!auth_guard_task_begin_transition_where(task, where))
+		return false;
+	if (auth_guard_task_expect_cgroups_in_transition_where(
+		    task, from_cset, to_cset, where))
+		return true;
+
+	auth_guard_task_abort_transition_where(task, where);
+	return false;
+}
+
+#define css_set_move_task_auth_guard_begin(_task, _from, _to) \
+	css_set_move_task_auth_guard_begin_where((_task), (_from), (_to), \
+						 __func__)
+
+static bool css_set_move_task(struct task_struct *task,
+			      struct css_set *from_cset, struct css_set *to_cset,
+			      bool use_mg_tasks,
+			      enum css_set_move_auth_guard_mode auth_guard_mode)
+{
+	enum auth_guard_task_teardown_status auth_guard_teardown =
+		AUTH_GUARD_TASK_TEARDOWN_SKIP_TRUSTED;
+	bool preflight_ok = true;
+	bool teardown_exact = true;
+	bool teardown_old_valid = false;
+	bool auth_guarded = false;
+
 	lockdep_assert_held(&css_set_lock);
+
+	if (auth_guard_mode == CSS_SET_MOVE_AUTH_GUARD_EXIT) {
+		auth_guard_teardown =
+			auth_guard_task_begin_teardown_transition(task);
+		teardown_old_valid = auth_guard_task_validate_teardown(task,
+								       auth_guard_teardown);
+		teardown_exact = rcu_access_pointer(task->cgroups) == from_cset;
+		/* Only dereference @from_cset after the task seal bound it exactly. */
+		preflight_ok = teardown_old_valid && teardown_exact &&
+			css_set_move_task_auth_guard_check(task, from_cset, to_cset,
+							   CSS_SET_MOVE_AUTH_GUARD_EXIT);
+		if (!preflight_ok ||
+		    auth_guard_teardown == AUTH_GUARD_TASK_TEARDOWN_FAILED) {
+			/*
+			 * The rejected css_set cannot drive counters, iterator lookup,
+			 * freezer state, or callbacks.  Remove only the task-owned list
+			 * node and leave the rejected pointer for cgroup_free() to detach
+			 * and deliberately leak.
+			 */
+			WARN_ON_ONCE(1);
+			css_set_quarantine_task_list(task);
+			(void)auth_guard_task_complete_teardown(task,
+				auth_guard_teardown,
+				teardown_old_valid && preflight_ok,
+				teardown_exact, false);
+			return false;
+		}
+	} else if (auth_guard_mode !=
+		   CSS_SET_MOVE_AUTH_GUARD_RUNTIME_PRECHECKED) {
+		preflight_ok = css_set_move_task_auth_guard_check(task, from_cset,
+								  to_cset,
+								  auth_guard_mode);
+	}
+	if (!preflight_ok)
+		return false;
+	switch (auth_guard_mode) {
+	case CSS_SET_MOVE_AUTH_GUARD_RUNTIME:
+		auth_guarded = css_set_move_task_auth_guard_begin(task, from_cset,
+								  to_cset);
+		if (!auth_guarded)
+			return false;
+		break;
+	case CSS_SET_MOVE_AUTH_GUARD_RUNTIME_PRECHECKED:
+		/*
+		 * cgroup_migrate_execute() checked every task and css_set, then
+		 * opened and declared every exact source-to-destination task
+		 * transition under css_set_lock before the migration commit point.
+		 * There must be no new failure path here; just reseal after the
+		 * mutation.
+		 */
+		AUTH_GUARD_FAIL_STOP_UNLESS(auth_guard_task_transition_open(task));
+		auth_guarded = true;
+		break;
+	case CSS_SET_MOVE_AUTH_GUARD_EXIT:
+		break;
+	case CSS_SET_MOVE_AUTH_GUARD_FORK:
+		auth_guarded = false;
+		break;
+	}
 
 	if (to_cset && !css_set_populated(to_cset))
 		css_set_update_populated(to_cset, true);
@@ -950,10 +1072,103 @@ static void css_set_move_task(struct task_struct *task,
 		 */
 		WARN_ON_ONCE(task->flags & PF_EXITING);
 
-		cgroup_move_task(task, to_cset);
+		cgroup_move_task(task, to_cset,
+				 auth_guard_mode == CSS_SET_MOVE_AUTH_GUARD_FORK);
 		list_add_tail(&task->cg_list, use_mg_tasks ? &to_cset->mg_tasks :
 							     &to_cset->tasks);
 	}
+
+	if (auth_guard_mode == CSS_SET_MOVE_AUTH_GUARD_EXIT) {
+		/*
+		 * Exit cleanup disassociates the task from css_set lists while
+		 * task->cgroups remains pinned for final release in cgroup_free().
+		 * List membership is not in the task digest, so reseal the unchanged
+		 * pointer tuple for the remaining exit path.
+		 */
+		if (!auth_guard_task_complete_teardown(task, auth_guard_teardown,
+						       teardown_old_valid,
+						       teardown_exact, false)) {
+			WARN_ON_ONCE(1);
+			return false;
+		}
+	} else if (auth_guarded && !auth_guard_task_finish_transition(task)) {
+		switch (auth_guard_mode) {
+		case CSS_SET_MOVE_AUTH_GUARD_RUNTIME:
+		case CSS_SET_MOVE_AUTH_GUARD_RUNTIME_PRECHECKED:
+			/*
+			 * Migration has already passed its all-or-none commit point.
+			 * A late reseal failure is an authority integrity violation,
+			 * not a recoverable migration result.
+			 */
+			AUTH_GUARD_FAIL_STOP();
+			return false;
+		case CSS_SET_MOVE_AUTH_GUARD_FORK:
+			WARN_ON_ONCE(1);
+			return false;
+		case CSS_SET_MOVE_AUTH_GUARD_EXIT:
+			WARN_ON_ONCE(1);
+			return false;
+		}
+	}
+	return true;
+}
+
+static void cgroup_migrate_auth_guard_abort(struct cgroup_taskset *tset,
+					    struct task_struct *stop)
+{
+	struct task_struct *task, *tmp_task;
+	struct css_set *cset;
+
+	list_for_each_entry(cset, &tset->src_csets, mg_node) {
+		list_for_each_entry_safe(task, tmp_task, &cset->mg_tasks, cg_list) {
+			if (task == stop)
+				return;
+			auth_guard_task_abort_transition(task);
+		}
+	}
+}
+
+static bool cgroup_migrate_auth_guard_preflight(struct cgroup_taskset *tset)
+{
+	struct task_struct *task, *tmp_task;
+	struct css_set *cset;
+
+	lockdep_assert_held(&css_set_lock);
+
+	list_for_each_entry(cset, &tset->src_csets, mg_node) {
+		list_for_each_entry_safe(task, tmp_task, &cset->mg_tasks, cg_list) {
+			struct css_set *from_cset = cset;
+			struct css_set *to_cset = cset->mg_dst_cset;
+
+			if (!css_set_move_task_auth_guard_check(task, from_cset,
+								to_cset,
+								CSS_SET_MOVE_AUTH_GUARD_RUNTIME))
+				return false;
+		}
+	}
+
+	return true;
+}
+
+static void cgroup_migrate_release_tset(struct cgroup_taskset *tset)
+{
+	struct css_set *cset, *tmp_cset;
+
+	spin_lock_irq(&css_set_lock);
+	list_splice_init(&tset->dst_csets, &tset->src_csets);
+	list_for_each_entry_safe(cset, tmp_cset, &tset->src_csets, mg_node) {
+		list_splice_tail_init(&cset->mg_tasks, &cset->tasks);
+		list_del_init(&cset->mg_node);
+	}
+	spin_unlock_irq(&css_set_lock);
+
+	/*
+	 * Re-initialize the cgroup_taskset structure in case it is reused
+	 * again in another cgroup_migrate_add_task()/cgroup_migrate_execute()
+	 * iteration.
+	 */
+	tset->nr_tasks = 0;
+	tset->csets    = &tset->src_csets;
 }
 
 /*
@@ -963,6 +1178,25 @@ static void css_set_move_task(struct task_struct *task,
  */
 #define CSS_SET_HASH_BITS	7
 static DEFINE_HASHTABLE(css_set_table, CSS_SET_HASH_BITS);
+
+/*
+ * A rejected task->cgroups pointer cannot identify the css_set which owns the
+ * task list node.  Scan the trusted publication table only to advance any
+ * iterator which names that node, then detach the task-owned node without
+ * touching css_set authority, counters, or subsystem state.
+ */
+static void css_set_quarantine_task_list(struct task_struct *task)
+{
+	struct css_set *cset;
+	int bkt;
+
+	lockdep_assert_held(&css_set_lock);
+
+	hash_for_each(css_set_table, bkt, cset, hlist)
+		css_set_skip_task_iters(cset, task);
+	if (!list_empty(&task->cg_list))
+		list_del_init(&task->cg_list);
+}
 
 static unsigned long css_set_hash(struct cgroup_subsys_state **css)
 {
@@ -984,6 +1218,11 @@ void put_css_set_locked(struct css_set *cset)
 	int ssid;
 
 	lockdep_assert_held(&css_set_lock);
+	if (!auth_guard_css_set_check(cset)) {
+		/* Retain this reference rather than destruct a rejected authority tuple. */
+		WARN_ON_ONCE(1);
+		return;
+	}
 
 	if (!refcount_dec_and_test(&cset->refcount))
 		return;
@@ -1102,16 +1341,21 @@ static bool compare_css_sets(struct css_set *cset,
  * @old_cset: the css_set that we're using before the cgroup transition
  * @cgrp: the cgroup that we're moving into
  * @template: out param for the new set of csses, should be clear on entry
+ * @old_cset_unpublished: whether @old_cset is a private constructor object
  */
 static struct css_set *find_existing_css_set(struct css_set *old_cset,
 					struct cgroup *cgrp,
-					struct cgroup_subsys_state **template)
+					struct cgroup_subsys_state **template,
+					bool old_cset_unpublished)
 {
 	struct cgroup_root *root = cgrp->root;
 	struct cgroup_subsys *ss;
 	struct css_set *cset;
 	unsigned long key;
 	int i;
+
+	if (!old_cset_unpublished && !auth_guard_css_set_check(old_cset))
+		return ERR_PTR(-EACCES);
 
 	/*
 	 * Build the set of subsystem state objects that we want to see in the
@@ -1136,6 +1380,8 @@ static struct css_set *find_existing_css_set(struct css_set *old_cset,
 
 	key = css_set_hash(template);
 	hash_for_each_possible(css_set_table, cset, hlist, key) {
+		if (!auth_guard_css_set_check(cset))
+			return ERR_PTR(-EACCES);
 		if (!compare_css_sets(cset, old_cset, cgrp, template))
 			continue;
 
@@ -1184,7 +1430,72 @@ static int allocate_cgrp_cset_links(int count, struct list_head *tmp_links)
 }
 
 /**
- * link_css_set - a helper function to link a css_set to a cgroup
+ * build_css_set_link - construct a private css_set-to-cgroup link
+ * @tmp_links: cgrp_cset_link objects allocated by allocate_cgrp_cset_links()
+ * @cset: the css_set to be linked
+ * @cgrp: the destination cgroup
+ * @set_dfl_cgrp: whether to initialize @cset's default-hierarchy cgroup
+ *
+ * This builds @cset's private cgrp_links list and pins @cgrp, but doesn't add
+ * the link to @cgrp->cset_links.  Call publish_css_set_links() after the
+ * css_set authority tuple is complete and sealed.
+ */
+static struct cgrp_cset_link *build_css_set_link(struct list_head *tmp_links,
+						 struct css_set *cset,
+						 struct cgroup *cgrp,
+						 bool set_dfl_cgrp)
+{
+	struct cgrp_cset_link *link;
+
+	BUG_ON(list_empty(tmp_links));
+
+	if (set_dfl_cgrp && cgroup_on_dfl(cgrp))
+		cset->dfl_cgrp = cgrp;
+
+	link = list_first_entry(tmp_links, struct cgrp_cset_link, cset_link);
+	link->cset = cset;
+	link->cgrp = cgrp;
+
+	list_del_init(&link->cset_link);
+	list_add_tail(&link->cgrp_link, &cset->cgrp_links);
+
+	if (cgroup_parent(cgrp))
+		cgroup_get_live(cgrp);
+
+	return link;
+}
+
+static void publish_css_set_links(struct css_set *cset)
+{
+	struct cgrp_cset_link *link;
+
+	/*
+	 * Always add links to the tail of the lists so that the lists are
+	 * in chronological order.
+	 */
+	list_for_each_entry(link, &cset->cgrp_links, cgrp_link)
+		list_add_tail(&link->cset_link, &link->cgrp->cset_links);
+}
+
+static void publish_css_set_link(struct cgrp_cset_link *link)
+{
+	list_add_tail(&link->cset_link, &link->cgrp->cset_links);
+}
+
+static void free_private_css_set_links(struct css_set *cset)
+{
+	struct cgrp_cset_link *link, *tmp_link;
+
+	list_for_each_entry_safe(link, tmp_link, &cset->cgrp_links, cgrp_link) {
+		list_del(&link->cgrp_link);
+		if (cgroup_parent(link->cgrp))
+			cgroup_put(link->cgrp);
+		kfree(link);
+	}
+}
+
+/**
+ * link_css_set - link an already-sealed css_set to a cgroup
  * @tmp_links: cgrp_cset_link objects allocated by allocate_cgrp_cset_links()
  * @cset: the css_set to be linked
  * @cgrp: the destination cgroup
@@ -1192,26 +1503,7 @@ static int allocate_cgrp_cset_links(int count, struct list_head *tmp_links)
 static void link_css_set(struct list_head *tmp_links, struct css_set *cset,
 			 struct cgroup *cgrp)
 {
-	struct cgrp_cset_link *link;
-
-	BUG_ON(list_empty(tmp_links));
-
-	if (cgroup_on_dfl(cgrp))
-		cset->dfl_cgrp = cgrp;
-
-	link = list_first_entry(tmp_links, struct cgrp_cset_link, cset_link);
-	link->cset = cset;
-	link->cgrp = cgrp;
-
-	/*
-	 * Always add links to the tail of the lists so that the lists are
-	 * in chronological order.
-	 */
-	list_move_tail(&link->cset_link, &cgrp->cset_links);
-	list_add_tail(&link->cgrp_link, &cset->cgrp_links);
-
-	if (cgroup_parent(cgrp))
-		cgroup_get_live(cgrp);
+	publish_css_set_link(build_css_set_link(tmp_links, cset, cgrp, false));
 }
 
 /**
@@ -1220,10 +1512,12 @@ static void link_css_set(struct list_head *tmp_links, struct css_set *cset,
  * @cgrp: the cgroup to be updated
  *
  * Return a new css_set that's equivalent to @old_cset, but with @cgrp
- * substituted into the appropriate hierarchy.
+ * substituted into the appropriate hierarchy, or an ERR_PTR() on failure.
  */
-static struct css_set *find_css_set(struct css_set *old_cset,
-				    struct cgroup *cgrp)
+static struct css_set *__find_css_set(struct css_set *old_cset,
+				      struct cgroup *cgrp,
+				      bool old_cset_unpublished,
+				      const char *where)
 {
 	struct cgroup_subsys_state *template[CGROUP_SUBSYS_COUNT] = { };
 	struct css_set *cset;
@@ -1238,22 +1532,30 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 	/* First see if we already have a cgroup group that matches
 	 * the desired set */
 	spin_lock_irq(&css_set_lock);
-	cset = find_existing_css_set(old_cset, cgrp, template);
-	if (cset)
+	cset = find_existing_css_set(old_cset, cgrp, template,
+				     old_cset_unpublished);
+	if (!IS_ERR_OR_NULL(cset))
 		get_css_set(cset);
 	spin_unlock_irq(&css_set_lock);
 
-	if (cset)
+	if (IS_ERR(cset))
 		return cset;
+	if (cset) {
+		if (!auth_guard_css_set_check_where(cset, where)) {
+			put_css_set(cset);
+			return ERR_PTR(-EACCES);
+		}
+		return cset;
+	}
 
 	cset = kzalloc(sizeof(*cset), GFP_KERNEL);
 	if (!cset)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
 	/* Allocate all the cgrp_cset_link objects that we'll need */
 	if (allocate_cgrp_cset_links(cgroup_root_count, &tmp_links) < 0) {
 		kfree(cset);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	refcount_set(&cset->refcount, 1);
@@ -1263,6 +1565,7 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 	INIT_LIST_HEAD(&cset->dying_tasks);
 	INIT_LIST_HEAD(&cset->task_iters);
 	INIT_LIST_HEAD(&cset->threaded_csets);
+	INIT_LIST_HEAD(&cset->threaded_csets_node);
 	INIT_HLIST_NODE(&cset->hlist);
 	INIT_LIST_HEAD(&cset->cgrp_links);
 	INIT_LIST_HEAD(&cset->mg_src_preload_node);
@@ -1274,16 +1577,47 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 	memcpy(cset->subsys, template, sizeof(cset->subsys));
 
 	spin_lock_irq(&css_set_lock);
-	/* Add reference counts and links from the new css_set. */
 	list_for_each_entry(link, &old_cset->cgrp_links, cgrp_link) {
 		struct cgroup *c = link->cgrp;
 
 		if (c->root == cgrp->root)
 			c = cgrp;
-		link_css_set(&tmp_links, cset, c);
+		build_css_set_link(&tmp_links, cset, c, true);
 	}
+	spin_unlock_irq(&css_set_lock);
 
 	BUG_ON(!list_empty(&tmp_links));
+
+	/*
+	 * If @cset should be threaded, look up the matching dom_cset and
+	 * link them up.  We first fully initialize @cset then look for the
+	 * dom_cset.  It's simpler this way and safe as @cset is guaranteed
+	 * to stay empty until we return.
+	 */
+	if (cgroup_is_threaded(cset->dfl_cgrp)) {
+		struct css_set *dcset;
+
+		dcset = __find_css_set(cset, cset->dfl_cgrp->dom_cgrp, true,
+				       where);
+		if (IS_ERR(dcset)) {
+			free_private_css_set_links(cset);
+			kfree(cset);
+			return dcset;
+		}
+
+		cset->dom_cset = dcset;
+	}
+
+	if (!auth_guard_css_set_init_where(cset, where)) {
+		if (css_set_threaded(cset))
+			put_css_set(cset->dom_cset);
+		free_private_css_set_links(cset);
+		kfree(cset);
+		return ERR_PTR(-EACCES);
+	}
+
+	spin_lock_irq(&css_set_lock);
+	publish_css_set_links(cset);
 
 	css_set_count++;
 
@@ -1299,31 +1633,19 @@ static struct css_set *find_css_set(struct css_set *old_cset,
 		css_get(css);
 	}
 
+	if (css_set_threaded(cset)) {
+		list_add_tail(&cset->threaded_csets_node,
+			      &cset->dom_cset->threaded_csets);
+	}
 	spin_unlock_irq(&css_set_lock);
 
-	/*
-	 * If @cset should be threaded, look up the matching dom_cset and
-	 * link them up.  We first fully initialize @cset then look for the
-	 * dom_cset.  It's simpler this way and safe as @cset is guaranteed
-	 * to stay empty until we return.
-	 */
-	if (cgroup_is_threaded(cset->dfl_cgrp)) {
-		struct css_set *dcset;
-
-		dcset = find_css_set(cset, cset->dfl_cgrp->dom_cgrp);
-		if (!dcset) {
-			put_css_set(cset);
-			return NULL;
-		}
-
-		spin_lock_irq(&css_set_lock);
-		cset->dom_cset = dcset;
-		list_add_tail(&cset->threaded_csets_node,
-			      &dcset->threaded_csets);
-		spin_unlock_irq(&css_set_lock);
-	}
-
 	return cset;
+}
+
+static struct css_set *find_css_set(struct css_set *old_cset,
+				    struct cgroup *cgrp)
+{
+	return __find_css_set(old_cset, cgrp, false, __func__);
 }
 
 struct cgroup_root *cgroup_root_from_kf(struct kernfs_root *kf_root)
@@ -1442,7 +1764,7 @@ static void cgroup_destroy_root(struct cgroup_root *root)
  * Returned cgroup is without refcount but it's valid as long as cset pins it.
  */
 static inline struct cgroup *__cset_cgroup_from_root(struct css_set *cset,
-					    struct cgroup_root *root)
+						    struct cgroup_root *root)
 {
 	struct cgroup *res_cgroup = NULL;
 
@@ -1476,6 +1798,145 @@ static inline struct cgroup *__cset_cgroup_from_root(struct css_set *cset,
 	return res_cgroup;
 }
 
+struct css_set *
+cgroup_ns_root_cset_checked_where(struct cgroup_namespace *ns,
+				  const char *where)
+{
+	struct css_set *root_cset;
+
+	if (!ns)
+		return NULL;
+
+	root_cset = READ_ONCE(ns->root_cset);
+	if (!auth_guard_cgroup_ns_root_check_where(ns, where))
+		return NULL;
+	if (!root_cset || READ_ONCE(ns->root_cset) != root_cset) {
+		(void)auth_guard_cgroup_ns_root_check_where(ns, where);
+		return NULL;
+	}
+
+	return root_cset;
+}
+
+enum auth_guard_check_result
+cgroup_task_auth_snapshot_get_where(struct task_struct *task,
+				    int task_subsys_id,
+				    struct cgroup_task_auth_snapshot *snapshot,
+				    const char *where)
+{
+	struct nsproxy *nsproxy;
+	struct cgroup_namespace *ns;
+	struct css_set *root_cset;
+	struct cgroup_subsys_state *subsys_css = NULL;
+	enum auth_guard_check_result result = AUTH_GUARD_CHECK_INVALID;
+	bool nsproxy_reserved = false;
+	bool snapshot_acquired = false;
+	bool task_reserved = false;
+
+	if (WARN_ON_ONCE(!snapshot))
+		return AUTH_GUARD_CHECK_INVALID;
+	snapshot->cgroup_ns = NULL;
+	snapshot->root_cset = NULL;
+	snapshot->task_css = NULL;
+	if (!task)
+		return AUTH_GUARD_CHECK_INVALID;
+	if (WARN_ON_ONCE(task_subsys_id < -1 ||
+			 task_subsys_id >= CGROUP_SUBSYS_COUNT))
+		return AUTH_GUARD_CHECK_INVALID;
+
+	rcu_read_lock();
+	task_lock(task);
+	result = auth_guard_task_snapshot_begin_where(task, where);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		goto out_unlock;
+	task_reserved = true;
+
+	nsproxy = READ_ONCE(task->nsproxy);
+	if (!nsproxy) {
+		result = AUTH_GUARD_CHECK_UNAVAILABLE;
+		goto out_unlock;
+	}
+	result = auth_guard_nsproxy_snapshot_begin_where(nsproxy, where);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		goto out_unlock;
+	nsproxy_reserved = true;
+
+	ns = READ_ONCE(nsproxy->cgroup_ns);
+	if (!ns) {
+		result = AUTH_GUARD_CHECK_UNAVAILABLE;
+		goto out_unlock;
+	}
+	root_cset = cgroup_ns_root_cset_checked_where(ns, where);
+	if (!root_cset) {
+		result = AUTH_GUARD_CHECK_INVALID;
+		goto out_unlock;
+	}
+	if (task_subsys_id >= 0) {
+		subsys_css = task_css(task, task_subsys_id);
+		if (subsys_css && !css_tryget(subsys_css))
+			subsys_css = NULL;
+	}
+
+	get_cgroup_ns(ns);
+	snapshot->cgroup_ns = ns;
+	snapshot->root_cset = root_cset;
+	snapshot->task_css = subsys_css;
+	snapshot_acquired = true;
+	result = AUTH_GUARD_CHECK_VALID;
+
+out_unlock:
+	if (nsproxy_reserved &&
+	    !auth_guard_nsproxy_snapshot_end_where(nsproxy, where))
+		result = AUTH_GUARD_CHECK_INVALID;
+	if (task_reserved && !auth_guard_task_snapshot_end_where(task, where))
+		result = AUTH_GUARD_CHECK_INVALID;
+	task_unlock(task);
+	rcu_read_unlock();
+
+	if (snapshot_acquired && result != AUTH_GUARD_CHECK_VALID)
+		cgroup_task_auth_snapshot_put(snapshot);
+	return result;
+}
+
+void cgroup_task_auth_snapshot_put(struct cgroup_task_auth_snapshot *snapshot)
+{
+	struct cgroup_namespace *ns;
+	struct cgroup_subsys_state *task_css;
+
+	if (!snapshot)
+		return;
+	ns = snapshot->cgroup_ns;
+	task_css = snapshot->task_css;
+	snapshot->cgroup_ns = NULL;
+	snapshot->root_cset = NULL;
+	snapshot->task_css = NULL;
+
+	if (task_css)
+		css_put(task_css);
+	if (ns)
+		put_cgroup_ns(ns);
+}
+
+static struct css_set *
+cgroup_auth_guard_current_root_cset_where(const char *where)
+{
+	struct nsproxy *nsproxy;
+	struct cgroup_namespace *ns;
+
+	if (!auth_guard_current_where(where))
+		return NULL;
+
+	nsproxy = READ_ONCE(current->nsproxy);
+	if (!nsproxy)
+		return NULL;
+
+	ns = READ_ONCE(nsproxy->cgroup_ns);
+	return cgroup_ns_root_cset_checked_where(ns, where);
+}
+
+#define cgroup_auth_guard_current_root_cset() \
+	cgroup_auth_guard_current_root_cset_where(__func__)
+
 /*
  * look up cgroup associated with current task's cgroup namespace on the
  * specified hierarchy
@@ -1490,16 +1951,17 @@ current_cgns_cgroup_from_root(struct cgroup_root *root)
 
 	rcu_read_lock();
 
-	cset = current->nsproxy->cgroup_ns->root_cset;
-	res = __cset_cgroup_from_root(cset, root);
+	cset = cgroup_auth_guard_current_root_cset();
+	if (cset)
+		res = __cset_cgroup_from_root(cset, root);
 
 	rcu_read_unlock();
 
 	/*
 	 * The namespace_sem is held by current, so the root cgroup can't
-	 * be umounted. Therefore, we can ensure that the res is non-NULL.
+	 * be umounted. Therefore, we can ensure that the res is non-NULL
+	 * unless AUTH_GUARD rejected the namespace root authority.
 	 */
-	WARN_ON_ONCE(!res);
 	return res;
 }
 
@@ -1517,18 +1979,31 @@ current_cgns_cgroup_from_root(struct cgroup_root *root)
 static struct cgroup *current_cgns_cgroup_dfl(void)
 {
 	struct css_set *cset;
+	enum auth_guard_check_result result;
 
 	if (current->nsproxy) {
-		cset = current->nsproxy->cgroup_ns->root_cset;
+		cset = cgroup_auth_guard_current_root_cset();
+		if (!cset)
+			return NULL;
 		return __cset_cgroup_from_root(cset, &cgrp_dfl_root);
 	} else {
 		/*
 		 * NOTE: This function may be called from bpf_cgroup_from_id()
 		 * on a task which has already passed exit_task_namespaces() and
 		 * nsproxy == NULL. Fall back to cgrp_dfl_root which will make all
-		 * cgroups visible for lookups.
+		 * cgroups visible for lookups.  With task authority enforcement,
+		 * only an authenticated terminal task may use that fallback.  A
+		 * live sealed task with a NULL nsproxy has lost protected authority
+		 * and must not gain host-root visibility from this compatibility
+		 * path.  Before activation or with the guard disabled, tasks remain
+		 * unsealed and retain the native fallback.
 		 */
-		return &cgrp_dfl_root.cgrp;
+		result = auth_guard_task_check_status(current);
+		if (result == AUTH_GUARD_CHECK_UNAVAILABLE ||
+		    (result == AUTH_GUARD_CHECK_VALID &&
+		     !auth_guard_task_is_sealed(current)))
+			return &cgrp_dfl_root.cgrp;
+		return NULL;
 	}
 }
 
@@ -1974,6 +2449,11 @@ int cgroup_show_path(struct seq_file *sf, struct kernfs_node *kf_node,
 
 	spin_lock_irq(&css_set_lock);
 	ns_cgroup = current_cgns_cgroup_from_root(kf_cgroot);
+	if (!ns_cgroup) {
+		spin_unlock_irq(&css_set_lock);
+		kfree(buf);
+		return -EACCES;
+	}
 	len = kernfs_path_from_node(kf_node, ns_cgroup->kn, buf, PATH_MAX);
 	spin_unlock_irq(&css_set_lock);
 
@@ -2047,8 +2527,11 @@ struct cgroup_of_peak *of_peak(struct kernfs_open_file *of)
 	return &ctx->peak;
 }
 
-static void apply_cgroup_root_flags(unsigned int root_flags)
+static int apply_cgroup_root_flags(unsigned int root_flags)
 {
+	if (!auth_guard_current())
+		return -EACCES;
+
 	if (current->nsproxy->cgroup_ns == &init_cgroup_ns) {
 		if (root_flags & CGRP_ROOT_NS_DELEGATE)
 			cgrp_dfl_root.flags |= CGRP_ROOT_NS_DELEGATE;
@@ -2078,6 +2561,8 @@ static void apply_cgroup_root_flags(unsigned int root_flags)
 		else
 			cgrp_dfl_root.flags &= ~CGRP_ROOT_PIDS_LOCAL_EVENTS;
 	}
+
+	return 0;
 }
 
 static int cgroup_show_options(struct seq_file *seq, struct kernfs_root *kf_root)
@@ -2101,8 +2586,7 @@ static int cgroup_reconfigure(struct fs_context *fc)
 {
 	struct cgroup_fs_context *ctx = cgroup_fc2context(fc);
 
-	apply_cgroup_root_flags(ctx->flags);
-	return 0;
+	return apply_cgroup_root_flags(ctx->flags);
 }
 
 static void init_cgroup_housekeeping(struct cgroup *cgrp)
@@ -2279,14 +2763,28 @@ int cgroup_do_get_tree(struct fs_context *fc)
 		struct dentry *nsdentry;
 		struct super_block *sb = fc->root->d_sb;
 		struct cgroup *cgrp;
+		struct css_set *root_cset;
+		int nsret = -EACCES;
 
 		cgroup_lock();
 		spin_lock_irq(&css_set_lock);
 
-		cgrp = cset_cgroup_from_root(ctx->ns->root_cset, ctx->root);
+		root_cset = cgroup_ns_root_cset_checked(ctx->ns);
+		if (root_cset) {
+			cgrp = cset_cgroup_from_root(root_cset, ctx->root);
+			nsret = cgrp ? 0 : -ENOENT;
+		}
 
 		spin_unlock_irq(&css_set_lock);
 		cgroup_unlock();
+
+		if (nsret) {
+			dput(fc->root);
+			deactivate_locked_super(sb);
+			fc->root = NULL;
+			ret = nsret;
+			goto out_put_root;
+		}
 
 		nsdentry = kernfs_node_dentry(cgrp->kn, sb);
 		dput(fc->root);
@@ -2298,6 +2796,7 @@ int cgroup_do_get_tree(struct fs_context *fc)
 		fc->root = nsdentry;
 	}
 
+out_put_root:
 	if (!ctx->kfc.new_sb_created)
 		cgroup_put(&ctx->root->cgrp);
 
@@ -2329,7 +2828,7 @@ static int cgroup_get_tree(struct fs_context *fc)
 
 	ret = cgroup_do_get_tree(fc);
 	if (!ret)
-		apply_cgroup_root_flags(ctx->flags);
+		ret = apply_cgroup_root_flags(ctx->flags);
 	return ret;
 }
 
@@ -2354,6 +2853,9 @@ static const struct fs_context_operations cgroup1_fs_context_ops = {
 static int cgroup_init_fs_context(struct fs_context *fc)
 {
 	struct cgroup_fs_context *ctx;
+
+	if (!auth_guard_current())
+		return -EACCES;
 
 	ctx = kzalloc(sizeof(struct cgroup_fs_context), GFP_KERNEL);
 	if (!ctx)
@@ -2486,7 +2988,16 @@ static struct file_system_type cpuset_fs_type = {
 int cgroup_path_ns_locked(struct cgroup *cgrp, char *buf, size_t buflen,
 			  struct cgroup_namespace *ns)
 {
-	struct cgroup *root = cset_cgroup_from_root(ns->root_cset, cgrp->root);
+	struct css_set *root_cset;
+	struct cgroup *root;
+
+	root_cset = cgroup_ns_root_cset_checked(ns);
+	if (!root_cset)
+		return -EACCES;
+
+	root = cset_cgroup_from_root(root_cset, cgrp->root);
+	if (!root)
+		return -ENOENT;
 
 	return kernfs_path_from_node(cgrp->kn, root->kn, buf, buflen);
 }
@@ -2589,11 +3100,12 @@ void cgroup_attach_unlock(enum cgroup_attach_lock_mode lock_mode,
  * @mgctx: target migration context
  *
  * Add @task, which is a migration target, to @mgctx->tset.  This function
- * becomes noop if @task doesn't need to be migrated.  @task's css_set
- * should have been added as a migration source and @task->cg_list will be
- * moved from the css_set's tasks list to mg_tasks one.
+ * becomes noop if @task doesn't need to be migrated.  Returns false if
+ * AUTH_GUARD rejects @task before its css_set edge is consumed.  @task's
+ * css_set should have been added as a migration source and @task->cg_list
+ * will be moved from the css_set's tasks list to mg_tasks one.
  */
-static void cgroup_migrate_add_task(struct task_struct *task,
+static bool cgroup_migrate_add_task(struct task_struct *task,
 				    struct cgroup_mgctx *mgctx)
 {
 	struct css_set *cset;
@@ -2602,14 +3114,17 @@ static void cgroup_migrate_add_task(struct task_struct *task,
 
 	/* @task either already exited or can't exit until the end */
 	if (task->flags & PF_EXITING)
-		return;
+		return true;
+
+	if (!auth_guard_task_check(task))
+		return false;
 
 	/* cgroup_threadgroup_rwsem protects racing against forks */
 	WARN_ON_ONCE(list_empty(&task->cg_list));
 
 	cset = task_css_set(task);
 	if (!cset->mg_src_cgrp)
-		return;
+		return true;
 
 	mgctx->tset.nr_tasks++;
 
@@ -2620,6 +3135,8 @@ static void cgroup_migrate_add_task(struct task_struct *task,
 	if (list_empty(&cset->mg_dst_cset->mg_node))
 		list_add_tail(&cset->mg_dst_cset->mg_node,
 			      &mgctx->tset.dst_csets);
+
+	return true;
 }
 
 /**
@@ -2698,11 +3215,19 @@ static int cgroup_migrate_execute(struct cgroup_mgctx *mgctx)
 	struct cgroup_taskset *tset = &mgctx->tset;
 	struct cgroup_subsys *ss;
 	struct task_struct *task, *tmp_task;
-	struct css_set *cset, *tmp_cset;
+	struct css_set *cset;
 	int ssid, failed_ssid, ret;
 
 	/* check that we can legitimately attach to the cgroup */
 	if (tset->nr_tasks) {
+		spin_lock_irq(&css_set_lock);
+		if (!cgroup_migrate_auth_guard_preflight(tset)) {
+			spin_unlock_irq(&css_set_lock);
+			ret = -EACCES;
+			goto out_release_tset;
+		}
+		spin_unlock_irq(&css_set_lock);
+
 		do_each_subsys_mask(ss, ssid, mgctx->ss_mask) {
 			if (ss->can_attach) {
 				tset->ssid = ssid;
@@ -2716,19 +3241,47 @@ static int cgroup_migrate_execute(struct cgroup_mgctx *mgctx)
 	}
 
 	/*
-	 * Now that we're guaranteed success, proceed to move all tasks to
-	 * the new cgroup.  There are no failure cases after here, so this
-	 * is the commit point.
+	 * Check the guarded authority graph, then open and declare each exact
+	 * source-to-destination task transition under css_set_lock immediately
+	 * before the commit point.  The commit pass can then reseal each moved
+	 * task without introducing a new failure case after a partial migration.
 	 */
 	spin_lock_irq(&css_set_lock);
 	list_for_each_entry(cset, &tset->src_csets, mg_node) {
 		list_for_each_entry_safe(task, tmp_task, &cset->mg_tasks, cg_list) {
-			struct css_set *from_cset = task_css_set(task);
+			struct css_set *from_cset = cset;
 			struct css_set *to_cset = cset->mg_dst_cset;
+
+			if (!css_set_move_task_auth_guard_check(task, from_cset,
+								to_cset,
+								CSS_SET_MOVE_AUTH_GUARD_RUNTIME) ||
+			    !css_set_move_task_auth_guard_begin(task, from_cset,
+								to_cset)) {
+				cgroup_migrate_auth_guard_abort(tset, task);
+				spin_unlock_irq(&css_set_lock);
+				ret = -EACCES;
+				failed_ssid = CGROUP_SUBSYS_COUNT;
+				goto out_cancel_attach;
+			}
+		}
+	}
+
+	/*
+	 * Now that we're guaranteed success, proceed to move all tasks to
+	 * the new cgroup.  There are no failure cases after here, so this
+	 * is the commit point.
+	 */
+	list_for_each_entry(cset, &tset->src_csets, mg_node) {
+		list_for_each_entry_safe(task, tmp_task, &cset->mg_tasks, cg_list) {
+			struct css_set *from_cset = cset;
+			struct css_set *to_cset = cset->mg_dst_cset;
+			bool move_ok;
 
 			get_css_set(to_cset);
 			to_cset->nr_tasks++;
-			css_set_move_task(task, from_cset, to_cset, true);
+			move_ok = css_set_move_task(task, from_cset, to_cset, true,
+						    CSS_SET_MOVE_AUTH_GUARD_RUNTIME_PRECHECKED);
+			WARN_ON_ONCE(!move_ok);
 			from_cset->nr_tasks--;
 			/*
 			 * If the source or destination cgroup is frozen,
@@ -2773,21 +3326,7 @@ out_cancel_attach:
 		} while_each_subsys_mask();
 	}
 out_release_tset:
-	spin_lock_irq(&css_set_lock);
-	list_splice_init(&tset->dst_csets, &tset->src_csets);
-	list_for_each_entry_safe(cset, tmp_cset, &tset->src_csets, mg_node) {
-		list_splice_tail_init(&cset->mg_tasks, &cset->tasks);
-		list_del_init(&cset->mg_node);
-	}
-	spin_unlock_irq(&css_set_lock);
-
-	/*
-	 * Re-initialize the cgroup_taskset structure in case it is reused
-	 * again in another cgroup_migrate_add_task()/cgroup_migrate_execute()
-	 * iteration.
-	 */
-	tset->nr_tasks = 0;
-	tset->csets    = &tset->src_csets;
+	cgroup_migrate_release_tset(tset);
 	return ret;
 }
 
@@ -2870,20 +3409,24 @@ void cgroup_migrate_finish(struct cgroup_mgctx *mgctx)
  * @src_cset and add it to @mgctx->src_csets, which should later be cleaned
  * up by cgroup_migrate_finish().
  *
+ * Return: %0 on success or %-EACCES if @src_cset is unauthenticated
+ *
  * This function may be called without holding cgroup_threadgroup_rwsem
  * even if the target is a process.  Threads may be created and destroyed
  * but as long as cgroup_mutex is not dropped, no new css_set can be put
  * into play and the preloaded css_sets are guaranteed to cover all
  * migrations.
  */
-void cgroup_migrate_add_src(struct css_set *src_cset,
-			    struct cgroup *dst_cgrp,
-			    struct cgroup_mgctx *mgctx)
+int cgroup_migrate_add_src(struct css_set *src_cset,
+			   struct cgroup *dst_cgrp,
+			   struct cgroup_mgctx *mgctx)
 {
 	struct cgroup *src_cgrp;
 
 	lockdep_assert_held(&cgroup_mutex);
 	lockdep_assert_held(&css_set_lock);
+	if (!auth_guard_css_set_check(src_cset))
+		return -EACCES;
 
 	/*
 	 * If ->dead, @src_set is associated with one or more dead cgroups
@@ -2891,10 +3434,10 @@ void cgroup_migrate_add_src(struct css_set *src_cset,
 	 * that the rest of migration path doesn't get confused by it.
 	 */
 	if (src_cset->dead)
-		return;
+		return 0;
 
 	if (!list_empty(&src_cset->mg_src_preload_node))
-		return;
+		return 0;
 
 	src_cgrp = cset_cgroup_from_root(src_cset, dst_cgrp->root);
 
@@ -2907,6 +3450,7 @@ void cgroup_migrate_add_src(struct css_set *src_cset,
 	src_cset->mg_dst_cgrp = dst_cgrp;
 	get_css_set(src_cset);
 	list_add_tail(&src_cset->mg_src_preload_node, &mgctx->preloaded_src_csets);
+	return 0;
 }
 
 /**
@@ -2936,9 +3480,12 @@ int cgroup_migrate_prepare_dst(struct cgroup_mgctx *mgctx)
 		struct cgroup_subsys *ss;
 		int ssid;
 
+		if (!auth_guard_css_set_check(src_cset))
+			return -EACCES;
+
 		dst_cset = find_css_set(src_cset, src_cset->mg_dst_cgrp);
-		if (!dst_cset)
-			return -ENOMEM;
+		if (IS_ERR(dst_cset))
+			return PTR_ERR(dst_cset);
 
 		WARN_ON_ONCE(src_cset->mg_dst_cset || dst_cset->mg_dst_cset);
 
@@ -2994,6 +3541,7 @@ int cgroup_migrate(struct task_struct *leader, bool threadgroup,
 		   struct cgroup_mgctx *mgctx)
 {
 	struct task_struct *task;
+	int ret = 0;
 
 	/*
 	 * The following thread iteration should be inside an RCU critical
@@ -3003,11 +3551,19 @@ int cgroup_migrate(struct task_struct *leader, bool threadgroup,
 	spin_lock_irq(&css_set_lock);
 	task = leader;
 	do {
-		cgroup_migrate_add_task(task, mgctx);
+		if (!cgroup_migrate_add_task(task, mgctx)) {
+			ret = -EACCES;
+			break;
+		}
 		if (!threadgroup)
 			break;
 	} while_each_thread(leader, task);
 	spin_unlock_irq(&css_set_lock);
+
+	if (ret) {
+		cgroup_migrate_release_tset(&mgctx->tset);
+		return ret;
+	}
 
 	return cgroup_migrate_execute(mgctx);
 }
@@ -3031,17 +3587,27 @@ int cgroup_attach_task(struct cgroup *dst_cgrp, struct task_struct *leader,
 	spin_lock_irq(&css_set_lock);
 	task = leader;
 	do {
-		cgroup_migrate_add_src(task_css_set(task), dst_cgrp, &mgctx);
+		if (!auth_guard_task_check(task)) {
+			ret = -EACCES;
+			break;
+		}
+		ret = cgroup_migrate_add_src(task_css_set(task), dst_cgrp, &mgctx);
+		if (ret)
+			break;
 		if (!threadgroup)
 			break;
 	} while_each_thread(leader, task);
 	spin_unlock_irq(&css_set_lock);
+
+	if (ret)
+		goto out_finish;
 
 	/* prepare dst csets and commit */
 	ret = cgroup_migrate_prepare_dst(&mgctx);
 	if (!ret)
 		ret = cgroup_migrate(leader, threadgroup, &mgctx);
 
+out_finish:
 	cgroup_migrate_finish(&mgctx);
 
 	if (!ret)
@@ -3187,7 +3753,7 @@ static int cgroup_update_dfl_csses(struct cgroup *cgrp)
 	struct css_set *src_cset;
 	enum cgroup_attach_lock_mode lock_mode;
 	bool has_tasks;
-	int ret;
+	int ret = 0;
 
 	lockdep_assert_held(&cgroup_mutex);
 
@@ -3205,10 +3771,18 @@ static int cgroup_update_dfl_csses(struct cgroup *cgrp)
 		if (dsct == cgrp)
 			continue;
 
-		list_for_each_entry(link, &dsct->cset_links, cset_link)
-			cgroup_migrate_add_src(link->cset, dsct, &mgctx);
+		list_for_each_entry(link, &dsct->cset_links, cset_link) {
+			ret = cgroup_migrate_add_src(link->cset, dsct, &mgctx);
+			if (ret)
+				goto out_unlock;
+		}
 	}
+out_unlock:
 	spin_unlock_irq(&css_set_lock);
+	if (ret) {
+		cgroup_migrate_finish(&mgctx);
+		return ret;
+	}
 
 	/*
 	 * We need to write-lock threadgroup_rwsem while migrating tasks.
@@ -3236,10 +3810,21 @@ static int cgroup_update_dfl_csses(struct cgroup *cgrp)
 		struct task_struct *task, *ntask;
 
 		/* all tasks in src_csets need to be migrated */
-		list_for_each_entry_safe(task, ntask, &src_cset->tasks, cg_list)
-			cgroup_migrate_add_task(task, &mgctx);
+		list_for_each_entry_safe(task, ntask, &src_cset->tasks, cg_list) {
+			if (!cgroup_migrate_add_task(task, &mgctx)) {
+				ret = -EACCES;
+				break;
+			}
+		}
+		if (ret)
+			break;
 	}
 	spin_unlock_irq(&css_set_lock);
+
+	if (ret) {
+		cgroup_migrate_release_tset(&mgctx.tset);
+		goto out_finish;
+	}
 
 	ret = cgroup_migrate_execute(&mgctx);
 out_finish:
@@ -4256,6 +4841,9 @@ static int cgroup_file_open(struct kernfs_open_file *of)
 	struct cgroup_file_ctx *ctx;
 	int ret;
 
+	if (!auth_guard_current())
+		return -EACCES;
+
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return -ENOMEM;
@@ -4307,8 +4895,15 @@ static ssize_t cgroup_file_write(struct kernfs_open_file *of, char *buf,
 	 */
 	if ((cgrp->root->flags & CGRP_ROOT_NS_DELEGATE) &&
 	    !(cft->flags & CFTYPE_NS_DELEGATABLE) &&
-	    ctx->ns != &init_cgroup_ns && ctx->ns->root_cset->dfl_cgrp == cgrp)
-		return -EPERM;
+	    ctx->ns != &init_cgroup_ns) {
+		struct css_set *root_cset;
+
+		root_cset = cgroup_ns_root_cset_checked(ctx->ns);
+		if (!root_cset)
+			return -EACCES;
+		if (root_cset->dfl_cgrp == cgrp)
+			return -EPERM;
+	}
 
 	if (cft->write)
 		return cft->write(of, buf, nbytes, off);
@@ -5331,9 +5926,16 @@ static int cgroup_procs_write_permission(struct cgroup *src_cgrp,
 	 * to see both source and destination cgroups from its namespace.
 	 */
 	if ((cgrp_dfl_root.flags & CGRP_ROOT_NS_DELEGATE) &&
-	    (!cgroup_is_descendant(src_cgrp, ns->root_cset->dfl_cgrp) ||
-	     !cgroup_is_descendant(dst_cgrp, ns->root_cset->dfl_cgrp)))
-		return -ENOENT;
+	    (ns != &init_cgroup_ns)) {
+		struct css_set *root_cset;
+
+		root_cset = cgroup_ns_root_cset_checked(ns);
+		if (!root_cset)
+			return -EACCES;
+		if (!cgroup_is_descendant(src_cgrp, root_cset->dfl_cgrp) ||
+		    !cgroup_is_descendant(dst_cgrp, root_cset->dfl_cgrp))
+			return -ENOENT;
+	}
 
 	return 0;
 }
@@ -5365,7 +5967,6 @@ static ssize_t __cgroup_procs_write(struct kernfs_open_file *of, char *buf,
 	struct cgroup_file_ctx *ctx = of->priv;
 	struct cgroup *src_cgrp, *dst_cgrp;
 	struct task_struct *task;
-	const struct cred *saved_cred;
 	ssize_t ret;
 	enum cgroup_attach_lock_mode lock_mode;
 
@@ -5380,6 +5981,11 @@ static ssize_t __cgroup_procs_write(struct kernfs_open_file *of, char *buf,
 
 	/* find the source cgroup */
 	spin_lock_irq(&css_set_lock);
+	if (!auth_guard_task_check(task)) {
+		spin_unlock_irq(&css_set_lock);
+		ret = -EACCES;
+		goto out_finish;
+	}
 	src_cgrp = task_cgroup_from_root(task, &cgrp_dfl_root);
 	spin_unlock_irq(&css_set_lock);
 
@@ -5388,11 +5994,11 @@ static ssize_t __cgroup_procs_write(struct kernfs_open_file *of, char *buf,
 	 * permissions using the credentials from file open to protect against
 	 * inherited fd attacks.
 	 */
-	saved_cred = override_creds(of->file->f_cred);
-	ret = cgroup_attach_permissions(src_cgrp, dst_cgrp,
-					of->file->f_path.dentry->d_sb,
-					threadgroup, ctx->ns);
-	revert_creds(saved_cred);
+	scoped_with_creds(of->file->f_cred) {
+		ret = cgroup_attach_permissions(src_cgrp, dst_cgrp,
+						of->file->f_path.dentry->d_sb,
+						threadgroup, ctx->ns);
+	}
 	if (ret)
 		goto out_finish;
 
@@ -6315,6 +6921,10 @@ int __init cgroup_init_early(void)
 	struct cgroup_subsys *ss;
 	int i;
 
+	/* Static namespaces do not pass through ns_common_init(). */
+	RB_CLEAR_NODE(&init_cgroup_ns.ns.ns_tree_node);
+	INIT_LIST_HEAD(&init_cgroup_ns.ns.ns_list_node);
+
 	ctx.root = &cgrp_dfl_root;
 	init_cgroup_root(&ctx);
 	cgrp_dfl_root.cgrp.self.flags |= CSS_NO_REF;
@@ -6445,7 +7055,8 @@ int __init cgroup_init(void)
 	WARN_ON(register_filesystem(&cpuset_fs_type));
 #endif
 
-	ns_tree_add(&init_cgroup_ns);
+	auth_guard_cgroup_enable();
+	BUG_ON(cgroup_ns_publish(&init_cgroup_ns));
 	return 0;
 }
 
@@ -6531,6 +7142,10 @@ struct cgroup *cgroup_get_from_id(u64 id)
 		return cgrp;
 
 	root_cgrp = current_cgns_cgroup_dfl();
+	if (!root_cgrp) {
+		cgroup_put(cgrp);
+		return ERR_PTR(-EACCES);
+	}
 	if (!cgroup_is_descendant(cgrp, root_cgrp)) {
 		cgroup_put(cgrp);
 		return ERR_PTR(-ENOENT);
@@ -6542,7 +7157,12 @@ EXPORT_SYMBOL_GPL(cgroup_get_from_id);
 
 bool cgroup_is_descendant_of_current_cgns(struct cgroup *cgrp)
 {
-	return cgroup_is_descendant(cgrp, current_cgns_cgroup_dfl());
+	struct cgroup *root_cgrp = current_cgns_cgroup_dfl();
+
+	if (!root_cgrp)
+		return false;
+
+	return cgroup_is_descendant(cgrp, root_cgrp);
 }
 EXPORT_SYMBOL_GPL(cgroup_is_descendant_of_current_cgns);
 
@@ -6630,8 +7250,9 @@ out:
  * cgroup_fork - initialize cgroup related fields during copy_process()
  * @child: pointer to task_struct of forking parent process.
  *
- * A task is associated with the init_css_set until cgroup_post_fork()
- * attaches it to the target css_set.
+ * A task is associated with the init_css_set until
+ * cgroup_finalize_fork_authority() attaches it to the target css_set before
+ * the task becomes visible.
  */
 void cgroup_fork(struct task_struct *child)
 {
@@ -6683,7 +7304,7 @@ static struct cgroup *cgroup_get_from_file(struct file *f)
  * @kargs: the arguments passed to create the child process
  *
  * This functions finds or creates a new css_set which the child
- * process will be attached to in cgroup_post_fork(). By default,
+ * process will be attached to before it is published. By default,
  * the child process will be given the same css_set as its parent.
  *
  * If CLONE_INTO_CGROUP is specified this function will try to find an
@@ -6699,7 +7320,8 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
 {
 	int ret;
 	struct cgroup *dst_cgrp = NULL;
-	struct css_set *cset;
+	struct css_set *cset = NULL;
+	struct cgroup_namespace *cgroup_ns = NULL;
 	struct super_block *sb;
 
 	if (kargs->flags & CLONE_INTO_CGROUP)
@@ -6708,6 +7330,12 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
 	cgroup_threadgroup_change_begin(current);
 
 	spin_lock_irq(&css_set_lock);
+	if (!auth_guard_current()) {
+		ret = -EACCES;
+		spin_unlock_irq(&css_set_lock);
+		goto err;
+	}
+	cgroup_ns = current->nsproxy->cgroup_ns;
 	cset = task_css_set(current);
 	get_css_set(cset);
 	if (kargs->cgrp)
@@ -6716,78 +7344,89 @@ static int cgroup_css_set_fork(struct kernel_clone_args *kargs)
 		kargs->kill_seq = cset->dfl_cgrp->kill_seq;
 	spin_unlock_irq(&css_set_lock);
 
+	if (!auth_guard_css_set_check(cset)) {
+		ret = -EACCES;
+		goto err;
+	}
+
 	if (!(kargs->flags & CLONE_INTO_CGROUP)) {
 		kargs->cset = cset;
 		return 0;
 	}
 
-	CLASS(fd_raw, f)(kargs->cgroup);
-	if (fd_empty(f)) {
-		ret = -EBADF;
-		goto err;
+	{
+		CLASS(fd_raw, f)(kargs->cgroup);
+
+		if (fd_empty(f)) {
+			ret = -EBADF;
+			goto err;
+		}
+		ret = security_file_permission(fd_file(f), MAY_WRITE);
+		if (ret)
+			goto err;
+		sb = fd_file(f)->f_path.dentry->d_sb;
+
+		dst_cgrp = cgroup_get_from_file(fd_file(f));
+		if (IS_ERR(dst_cgrp)) {
+			ret = PTR_ERR(dst_cgrp);
+			dst_cgrp = NULL;
+			goto err;
+		}
+
+		if (cgroup_is_dead(dst_cgrp)) {
+			ret = -ENODEV;
+			goto err;
+		}
+
+		/*
+		 * Verify that we the target cgroup is writable for us. This is
+		 * usually done by the vfs layer but since we're not going through
+		 * the vfs layer here we need to do it "manually".
+		 */
+		ret = cgroup_may_write(dst_cgrp, sb);
+		if (ret)
+			goto err;
+
+		/*
+		 * Spawning a task directly into a cgroup works by passing a file
+		 * descriptor to the target cgroup directory. This can even be an O_PATH
+		 * file descriptor. But it can never be a cgroup.procs file descriptor.
+		 * This was done on purpose so spawning into a cgroup could be
+		 * conceptualized as an atomic
+		 *
+		 *   fd = openat(dfd_cgroup, "cgroup.procs", ...);
+		 *   write(fd, <child-pid>, ...);
+		 *
+		 * sequence, i.e. it's a shorthand for the caller opening and writing
+		 * cgroup.procs of the cgroup indicated by @dfd_cgroup. This allows us
+		 * to always use the caller's credentials.
+		 */
+		ret = cgroup_attach_permissions(cset->dfl_cgrp, dst_cgrp, sb,
+						!(kargs->flags & CLONE_THREAD),
+						cgroup_ns);
+		if (ret)
+			goto err;
+
+		kargs->cset = find_css_set(cset, dst_cgrp);
+		if (IS_ERR(kargs->cset)) {
+			ret = PTR_ERR(kargs->cset);
+			kargs->cset = NULL;
+			goto err;
+		}
+
+		put_css_set(cset);
+		kargs->cgrp = dst_cgrp;
+		return ret;
 	}
-	ret = security_file_permission(fd_file(f), MAY_WRITE);
-	if (ret)
-		goto err;
-	sb = fd_file(f)->f_path.dentry->d_sb;
-
-	dst_cgrp = cgroup_get_from_file(fd_file(f));
-	if (IS_ERR(dst_cgrp)) {
-		ret = PTR_ERR(dst_cgrp);
-		dst_cgrp = NULL;
-		goto err;
-	}
-
-	if (cgroup_is_dead(dst_cgrp)) {
-		ret = -ENODEV;
-		goto err;
-	}
-
-	/*
-	 * Verify that we the target cgroup is writable for us. This is
-	 * usually done by the vfs layer but since we're not going through
-	 * the vfs layer here we need to do it "manually".
-	 */
-	ret = cgroup_may_write(dst_cgrp, sb);
-	if (ret)
-		goto err;
-
-	/*
-	 * Spawning a task directly into a cgroup works by passing a file
-	 * descriptor to the target cgroup directory. This can even be an O_PATH
-	 * file descriptor. But it can never be a cgroup.procs file descriptor.
-	 * This was done on purpose so spawning into a cgroup could be
-	 * conceptualized as an atomic
-	 *
-	 *   fd = openat(dfd_cgroup, "cgroup.procs", ...);
-	 *   write(fd, <child-pid>, ...);
-	 *
-	 * sequence, i.e. it's a shorthand for the caller opening and writing
-	 * cgroup.procs of the cgroup indicated by @dfd_cgroup. This allows us
-	 * to always use the caller's credentials.
-	 */
-	ret = cgroup_attach_permissions(cset->dfl_cgrp, dst_cgrp, sb,
-					!(kargs->flags & CLONE_THREAD),
-					current->nsproxy->cgroup_ns);
-	if (ret)
-		goto err;
-
-	kargs->cset = find_css_set(cset, dst_cgrp);
-	if (!kargs->cset) {
-		ret = -ENOMEM;
-		goto err;
-	}
-
-	put_css_set(cset);
-	kargs->cgrp = dst_cgrp;
-	return ret;
 
 err:
 	cgroup_threadgroup_change_end(current);
-	cgroup_unlock();
+	if (kargs->flags & CLONE_INTO_CGROUP)
+		cgroup_unlock();
 	if (dst_cgrp)
 		cgroup_put(dst_cgrp);
-	put_css_set(cset);
+	if (cset)
+		put_css_set(cset);
 	if (kargs->cset)
 		put_css_set(kargs->cset);
 	return ret;
@@ -6827,8 +7466,8 @@ static void cgroup_css_set_put_fork(struct kernel_clone_args *kargs)
  * @child: the child process
  * @kargs: the arguments passed to create the child process
  *
- * This prepares a new css_set for the child process which the child will
- * be attached to in cgroup_post_fork().
+ * This prepares a new css_set for the child process which the child will be
+ * attached to by cgroup_finalize_fork_authority() before publication.
  * This calls the subsystem can_fork() callbacks. If the cgroup_can_fork()
  * callback returns an error, the fork aborts with that error code. This
  * allows for a cgroup subsystem to conditionally allow or deny new forks.
@@ -6841,6 +7480,11 @@ int cgroup_can_fork(struct task_struct *child, struct kernel_clone_args *kargs)
 	ret = cgroup_css_set_fork(kargs);
 	if (ret)
 		return ret;
+
+	if (!auth_guard_css_set_check(kargs->cset)) {
+		ret = -EACCES;
+		goto out_put_fork;
+	}
 
 	do_each_subsys_mask(ss, i, have_canfork_callback) {
 		ret = ss->can_fork(child, kargs->cset);
@@ -6858,6 +7502,7 @@ out_revert:
 			ss->cancel_fork(child, kargs->cset);
 	}
 
+out_put_fork:
 	cgroup_css_set_put_fork(kargs);
 
 	return ret;
@@ -6886,28 +7531,27 @@ void cgroup_cancel_fork(struct task_struct *child,
 }
 
 /**
- * cgroup_post_fork - finalize cgroup setup for the child process
+ * cgroup_finalize_fork_authority - publish the child's cgroup authority edges
  * @child: the child process
  * @kargs: the arguments passed to create the child process
  *
- * Attach the child process to its css_set calling the subsystem fork()
- * callbacks.
+ * Attach the child process to its css_set and finish cgroup-namespace root
+ * authority while the fork path is past its normal failure points but before
+ * the child is visible outside copy_process().
  */
-void cgroup_post_fork(struct task_struct *child,
-		      struct kernel_clone_args *kargs)
-	__releases(&cgroup_threadgroup_rwsem) __releases(&cgroup_mutex)
+void cgroup_finalize_fork_authority(struct task_struct *child,
+				    struct kernel_clone_args *kargs)
 {
 	unsigned int cgrp_kill_seq = 0;
 	unsigned long cgrp_flags = 0;
-	bool kill = false;
-	struct cgroup_subsys *ss;
 	struct css_set *cset;
-	int i;
 
 	cset = kargs->cset;
-	kargs->cset = NULL;
+	kargs->cgroup_fork_kill = 0;
+	kargs->cgroup_fork_skip_callbacks = 0;
 
 	spin_lock_irq(&css_set_lock);
+	AUTH_GUARD_FAIL_STOP_UNLESS(auth_guard_css_set_check(cset));
 
 	/* init tasks are special, only link regular threads */
 	if (likely(child->pid)) {
@@ -6921,10 +7565,20 @@ void cgroup_post_fork(struct task_struct *child,
 
 		WARN_ON_ONCE(!list_empty(&child->cg_list));
 		cset->nr_tasks++;
-		css_set_move_task(child, NULL, cset, false);
+		if (!css_set_move_task(child, NULL, cset, false,
+				       CSS_SET_MOVE_AUTH_GUARD_FORK)) {
+			cset->nr_tasks--;
+			put_css_set_locked(cset);
+			kargs->cset = NULL;
+			spin_unlock_irq(&css_set_lock);
+			AUTH_GUARD_FAIL_STOP();
+			return;
+		}
+		kargs->cset = NULL;
 	} else {
-		put_css_set(cset);
+		put_css_set_locked(cset);
 		cset = NULL;
+		kargs->cset = NULL;
 	}
 
 	if (!(child->flags & PF_KTHREAD)) {
@@ -6952,34 +7606,74 @@ void cgroup_post_fork(struct task_struct *child,
 		 * child down right after we finished preparing it for
 		 * userspace.
 		 */
-		kill = kargs->kill_seq != cgrp_kill_seq;
+		kargs->cgroup_fork_kill |= kargs->kill_seq != cgrp_kill_seq;
 	}
 
 	spin_unlock_irq(&css_set_lock);
+
+	/* Finish and publish the new cgroup namespace authority root. */
+	if (kargs->flags & CLONE_NEWCGROUP) {
+		struct nsproxy *nsproxy = child->nsproxy;
+		struct cgroup_namespace *cgroup_ns = nsproxy->cgroup_ns;
+
+		AUTH_GUARD_FAIL_STOP_IF(ns_tree_active(cgroup_ns));
+		if (cset) {
+			enum auth_guard_mutation_result result;
+
+			AUTH_GUARD_FAIL_STOP_UNLESS(auth_guard_css_set_check(cset));
+			result = auth_guard_nsproxy_replace_cgroup_root_owned(nsproxy,
+									      cset, get_css_set,
+									      put_css_set);
+			AUTH_GUARD_FAIL_STOP_IF(result != AUTH_GUARD_MUTATION_APPLIED);
+		}
+		AUTH_GUARD_FAIL_STOP_IF(cgroup_ns_publish(cgroup_ns));
+	}
+}
+
+/**
+ * cgroup_post_fork - run cgroup callbacks after publishing the child process
+ * @child: the child process
+ * @kargs: the arguments passed to create the child process
+ *
+ * The child is already attached to its css_set by
+ * cgroup_finalize_fork_authority().  This calls subsystem fork() callbacks and
+ * releases cgroup fork references.
+ */
+void cgroup_post_fork(struct task_struct *child,
+		      struct kernel_clone_args *kargs)
+	__releases(&cgroup_threadgroup_rwsem) __releases(&cgroup_mutex)
+{
+	struct cgroup_subsys *ss;
+	int i;
 
 	/*
 	 * Call ss->fork().  This must happen after @child is linked on
 	 * css_set; otherwise, @child might change state between ->fork()
 	 * and addition to css_set.
 	 */
-	do_each_subsys_mask(ss, i, have_fork_callback) {
-		ss->fork(child);
-	} while_each_subsys_mask();
-
-	/* Make the new cset the root_cset of the new cgroup namespace. */
-	if (kargs->flags & CLONE_NEWCGROUP) {
-		struct css_set *rcset = child->nsproxy->cgroup_ns->root_cset;
-
-		get_css_set(cset);
-		child->nsproxy->cgroup_ns->root_cset = cset;
-		put_css_set(rcset);
+	if (!kargs->cgroup_fork_skip_callbacks) {
+		AUTH_GUARD_FAIL_STOP_UNLESS(auth_guard_task_check_wait(current));
+		AUTH_GUARD_FAIL_STOP_UNLESS(auth_guard_task_check_wait(child));
+		do_each_subsys_mask(ss, i, have_fork_callback) {
+			ss->fork(child);
+		} while_each_subsys_mask();
 	}
 
 	/* Cgroup has to be killed so take down child immediately. */
-	if (unlikely(kill))
+	if (unlikely(kargs->cgroup_fork_kill))
 		do_send_sig_info(SIGKILL, SEND_SIG_NOINFO, child, PIDTYPE_TGID);
 
 	cgroup_css_set_put_fork(kargs);
+
+	if (kargs->flags & CLONE_NEWCGROUP) {
+		struct cgroup_task_auth_snapshot snapshot
+			__free(cgroup_task_auth_snapshot) = {};
+		enum auth_guard_check_result result;
+
+		result = cgroup_task_auth_snapshot_get(child, -1, &snapshot);
+		AUTH_GUARD_FAIL_STOP_IF(result != AUTH_GUARD_CHECK_VALID);
+		cgroup_ns_activate_loadavg(snapshot.cgroup_ns);
+	}
 }
 
 /**
@@ -6999,7 +7693,11 @@ void cgroup_exit(struct task_struct *tsk)
 
 	WARN_ON_ONCE(list_empty(&tsk->cg_list));
 	cset = task_css_set(tsk);
-	css_set_move_task(tsk, cset, NULL, false);
+	if (!css_set_move_task(tsk, cset, NULL, false,
+			       CSS_SET_MOVE_AUTH_GUARD_EXIT)) {
+		spin_unlock_irq(&css_set_lock);
+		return;
+	}
 	cset->nr_tasks--;
 	/* matches the signal->live check in css_task_iter_advance() */
 	if (thread_group_leader(tsk) && atomic_read(&tsk->signal->live))
@@ -7010,8 +7708,8 @@ void cgroup_exit(struct task_struct *tsk)
 
 	WARN_ON_ONCE(cgroup_task_frozen(tsk));
 	if (unlikely(!(tsk->flags & PF_KTHREAD) &&
-		     test_bit(CGRP_FREEZE, &task_dfl_cgroup(tsk)->flags)))
-		cgroup_update_frozen(task_dfl_cgroup(tsk));
+		     test_bit(CGRP_FREEZE, &cset->dfl_cgrp->flags)))
+		cgroup_update_frozen(cset->dfl_cgrp);
 
 	spin_unlock_irq(&css_set_lock);
 
@@ -7024,24 +7722,96 @@ void cgroup_exit(struct task_struct *tsk)
 void cgroup_release(struct task_struct *task)
 {
 	struct cgroup_subsys *ss;
+	struct css_set *expected;
+	enum auth_guard_task_teardown_status auth_guard_status;
+	bool old_valid;
+	bool exact;
+	bool trusted;
 	int ssid;
 
+	auth_guard_status = auth_guard_task_begin_teardown_transition(task);
+	expected = rcu_access_pointer(task->cgroups);
+	old_valid = auth_guard_task_validate_teardown(task, auth_guard_status);
+	exact = expected && rcu_access_pointer(task->cgroups) == expected;
+	if (!old_valid || !exact)
+		goto quarantine;
+
 	do_each_subsys_mask(ss, ssid, have_release_callback) {
-		ss->release(task);
+		ss->release(task, expected);
 	} while_each_subsys_mask();
 
-	if (!list_empty(&task->cg_list)) {
-		spin_lock_irq(&css_set_lock);
-		css_set_skip_task_iters(task_css_set(task), task);
-		list_del_init(&task->cg_list);
-		spin_unlock_irq(&css_set_lock);
+	spin_lock_irq(&css_set_lock);
+	exact = rcu_access_pointer(task->cgroups) == expected;
+	if (exact) {
+		if (!list_empty(&task->cg_list))
+			css_set_skip_task_iters(expected, task);
+	} else {
+		css_set_quarantine_task_list(task);
 	}
+	if (!list_empty(&task->cg_list))
+		list_del_init(&task->cg_list);
+	spin_unlock_irq(&css_set_lock);
+
+	trusted = auth_guard_task_complete_teardown(task, auth_guard_status,
+						    old_valid, exact, false);
+	if (!trusted)
+		WARN_ON_ONCE(1);
+	return;
+
+quarantine:
+	spin_lock_irq(&css_set_lock);
+	css_set_quarantine_task_list(task);
+	spin_unlock_irq(&css_set_lock);
+	exact = expected && rcu_access_pointer(task->cgroups) == expected;
+	(void)auth_guard_task_complete_teardown(task, auth_guard_status,
+						 old_valid, exact, false);
+	WARN_ON_ONCE(1);
 }
 
 void cgroup_free(struct task_struct *task)
 {
-	struct css_set *cset = task_css_set(task);
-	put_css_set(cset);
+	struct css_set *expected;
+	struct css_set *cset;
+	enum auth_guard_task_teardown_status auth_guard_status;
+	bool declared;
+	bool old_valid;
+	bool result_valid;
+	bool trusted = false;
+
+	auth_guard_status = auth_guard_task_begin_teardown_transition(task);
+	expected = rcu_access_pointer(task->cgroups);
+	switch (auth_guard_status) {
+	case AUTH_GUARD_TASK_TEARDOWN_OPENED:
+		old_valid = auth_guard_task_validate_teardown(task,
+							      auth_guard_status);
+		/* Never declare against a transition that validation quarantined. */
+		declared = old_valid &&
+			auth_guard_task_expect_cgroups_in_transition(task, expected,
+								    NULL);
+		cset = xchg(&task->cgroups, NULL);
+		result_valid = declared &&
+			auth_guard_task_validate_transition_result(task);
+		trusted = auth_guard_task_complete_teardown(
+			task, auth_guard_status,
+			old_valid && declared && result_valid, cset == expected,
+			false);
+		break;
+	case AUTH_GUARD_TASK_TEARDOWN_SKIP_TRUSTED:
+	case AUTH_GUARD_TASK_TEARDOWN_SKIP_UNPUBLISHED:
+	case AUTH_GUARD_TASK_TEARDOWN_SKIP_UNTRUSTED:
+	case AUTH_GUARD_TASK_TEARDOWN_FAILED:
+		/* These statuses have no live transition on which to declare. */
+		cset = xchg(&task->cgroups, NULL);
+		trusted = auth_guard_task_complete_teardown(
+			task, auth_guard_status, false, cset == expected, false);
+		break;
+	default:
+		cset = xchg(&task->cgroups, NULL);
+		WARN_ON_ONCE(1);
+		break;
+	}
+	if (cset && trusted)
+		put_css_set(cset);
 }
 
 static int __init cgroup_disable(char *str)
@@ -7163,6 +7933,9 @@ struct cgroup *cgroup_get_from_path(const char *path)
 	struct cgroup *root_cgrp;
 
 	root_cgrp = current_cgns_cgroup_dfl();
+	if (!root_cgrp)
+		return ERR_PTR(-EACCES);
+
 	kn = kernfs_walk_and_get(root_cgrp->kn, path);
 	if (!kn)
 		goto out;
@@ -7292,14 +8065,30 @@ void cgroup_sk_alloc(struct sock_cgroup_data *skcd)
 
 	while (true) {
 		struct css_set *cset;
+		enum auth_guard_check_result result;
+
+		result = AUTH_GUARD_RETRY_BUSY(auth_guard_task_snapshot_begin(current));
+		if (result == AUTH_GUARD_CHECK_UNAVAILABLE)
+			goto fallback;
+		AUTH_GUARD_FAIL_STOP_IF(result != AUTH_GUARD_CHECK_VALID);
 
 		cset = task_css_set(current);
-		if (likely(cgroup_tryget(cset->dfl_cgrp))) {
-			cgroup = cset->dfl_cgrp;
-			break;
+		cgroup = cset ? READ_ONCE(cset->dfl_cgrp) : NULL;
+		if (cgroup && likely(cgroup_tryget(cgroup))) {
+			if (likely(auth_guard_task_snapshot_end(current)))
+				break;
+			cgroup_put(cgroup);
+			AUTH_GUARD_FAIL_STOP();
 		}
+		AUTH_GUARD_FAIL_STOP_UNLESS(auth_guard_task_snapshot_end(current));
 		cpu_relax();
 	}
+	goto out;
+
+fallback:
+	/* An authenticated terminal task has no usable live cgroup snapshot. */
+	cgroup = &cgrp_dfl_root.cgrp;
+	cgroup_get(cgroup);
 out:
 	skcd->cgroup = cgroup;
 	cgroup_bpf_get(cgroup);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/anon_inodes.h>
+#include <linux/auth_guard.h>
 #include <linux/exportfs.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -7,6 +8,7 @@
 #include <linux/magic.h>
 #include <linux/mount.h>
 #include <linux/mnt_namespace.h>
+#include <linux/nsproxy.h>
 #include <linux/pid.h>
 #include <linux/pidfs.h>
 #include <linux/pid_namespace.h>
@@ -304,9 +306,98 @@ static __u32 pidfs_coredump_mask(unsigned long mm_flags)
 	return 0;
 }
 
+/*
+ * Keep every authority-bearing PIDFD_GET_INFO input in one authenticated task
+ * epoch.  The task reader reservation pins the exact css_set through the task
+ * edge; the credential and default cgroup additionally carry native references
+ * while ptrace authorization and the corresponding fields are copied.
+ */
+struct pidfd_info_task_authority {
+	struct task_struct *task;
+	const struct cred *cred;
+#ifdef CONFIG_CGROUPS
+	struct css_set *cset;
+	struct cgroup *dfl_cgrp;
+#endif
+};
+
+static bool
+pidfd_info_task_authority_put(struct pidfd_info_task_authority *authority,
+			      const char *where)
+{
+	struct task_struct *task = authority->task;
+	const struct cred *cred = authority->cred;
+#ifdef CONFIG_CGROUPS
+	struct cgroup *dfl_cgrp = authority->dfl_cgrp;
+#endif
+	bool valid;
+
+	*authority = (struct pidfd_info_task_authority) {};
+	if (WARN_ON_ONCE(!task))
+		return false;
+
+	valid = auth_guard_task_snapshot_end_where(task, where);
+#ifdef CONFIG_CGROUPS
+	if (dfl_cgrp)
+		cgroup_put(dfl_cgrp);
+#endif
+	if (cred)
+		put_cred(cred);
+	return valid;
+}
+
+static int
+pidfd_info_task_authority_get(struct task_struct *task,
+			      struct pidfd_info_task_authority *authority,
+			      const char *where)
+{
+	enum auth_guard_check_result result;
+	int ret;
+
+	*authority = (struct pidfd_info_task_authority) {};
+	result = AUTH_GUARD_RETRY_BUSY(auth_guard_task_snapshot_begin_where(task, where));
+	if (result != AUTH_GUARD_CHECK_VALID)
+		return result == AUTH_GUARD_CHECK_UNAVAILABLE ||
+		       result == AUTH_GUARD_CHECK_CREDENTIAL_ONLY ? -ESRCH : -EACCES;
+	authority->task = task;
+
+	authority->cred = get_task_cred_checked_where(task, where);
+	if (IS_ERR(authority->cred)) {
+		ret = PTR_ERR(authority->cred);
+		authority->cred = NULL;
+		goto out_error;
+	}
+
+#ifdef CONFIG_CGROUPS
+	rcu_read_lock();
+	authority->cset = task_css_set(task);
+	authority->dfl_cgrp = READ_ONCE(authority->cset->dfl_cgrp);
+	if (authority->dfl_cgrp)
+		cgroup_get(authority->dfl_cgrp);
+	rcu_read_unlock();
+	if (!authority->dfl_cgrp) {
+		ret = -EACCES;
+		goto out_error;
+	}
+#endif
+
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
+		ret = -EACCES;
+		goto out_error;
+	}
+
+	return 0;
+
+out_error:
+	if (!pidfd_info_task_authority_put(authority, where))
+		return -EACCES;
+	return ret;
+}
+
 static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct pidfd_info __user *uinfo = (struct pidfd_info __user *)arg;
+	struct pidfd_info_task_authority authority;
 	struct task_struct *task __free(put_task) = NULL;
 	struct pid *pid = pidfd_pid(file);
 	size_t usize = _IOC_SIZE(cmd);
@@ -314,8 +405,11 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 	struct pidfs_exit_info *exit_info;
 	struct user_namespace *user_ns;
 	struct pidfs_attr *attr;
-	const struct cred *c;
+#ifdef CONFIG_CGROUPS
+	__u64 exit_cgroupid;
+#endif
 	__u64 mask;
+	int ret;
 
 	if (!uinfo)
 		return -EINVAL;
@@ -333,8 +427,11 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 		return -ESRCH;
 
 	task = get_pid_task(pid, PIDTYPE_PID);
-	if (task && !ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
-		return -EACCES;
+	if (task) {
+		ret = pidfd_info_task_authority_get(task, &authority, __func__);
+		if (ret)
+			return ret;
+	}
 
 	attr = READ_ONCE(pid->attr);
 	if (mask & PIDFD_INFO_EXIT) {
@@ -342,8 +439,11 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 		if (exit_info) {
 			kinfo.mask |= PIDFD_INFO_EXIT;
 #ifdef CONFIG_CGROUPS
-			kinfo.cgroupid = exit_info->cgroupid;
-			kinfo.mask |= PIDFD_INFO_CGROUPID;
+			exit_cgroupid = READ_ONCE(exit_info->cgroupid);
+			if (exit_cgroupid) {
+				kinfo.cgroupid = exit_cgroupid;
+				kinfo.mask |= PIDFD_INFO_CGROUPID;
+			}
 #endif
 			kinfo.exit_code = exit_info->exit_code;
 		}
@@ -365,10 +465,6 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 		goto copy_out;
 	}
 
-	c = get_task_cred(task);
-	if (!c)
-		return -ESRCH;
-
 	if ((kinfo.mask & PIDFD_INFO_COREDUMP) && !(kinfo.coredump_mask)) {
 		task_lock(task);
 		if (task->mm) {
@@ -382,42 +478,38 @@ static long pidfd_info(struct file *file, unsigned int cmd, unsigned long arg)
 	/* Unconditionally return identifiers and credentials, the rest only on request */
 
 	user_ns = current_user_ns();
-	kinfo.ruid = from_kuid_munged(user_ns, c->uid);
-	kinfo.rgid = from_kgid_munged(user_ns, c->gid);
-	kinfo.euid = from_kuid_munged(user_ns, c->euid);
-	kinfo.egid = from_kgid_munged(user_ns, c->egid);
-	kinfo.suid = from_kuid_munged(user_ns, c->suid);
-	kinfo.sgid = from_kgid_munged(user_ns, c->sgid);
-	kinfo.fsuid = from_kuid_munged(user_ns, c->fsuid);
-	kinfo.fsgid = from_kgid_munged(user_ns, c->fsgid);
+	kinfo.ruid = from_kuid_munged(user_ns, authority.cred->uid);
+	kinfo.rgid = from_kgid_munged(user_ns, authority.cred->gid);
+	kinfo.euid = from_kuid_munged(user_ns, authority.cred->euid);
+	kinfo.egid = from_kgid_munged(user_ns, authority.cred->egid);
+	kinfo.suid = from_kuid_munged(user_ns, authority.cred->suid);
+	kinfo.sgid = from_kgid_munged(user_ns, authority.cred->sgid);
+	kinfo.fsuid = from_kuid_munged(user_ns, authority.cred->fsuid);
+	kinfo.fsgid = from_kgid_munged(user_ns, authority.cred->fsgid);
 	kinfo.mask |= PIDFD_INFO_CREDS;
-	put_cred(c);
 
 #ifdef CONFIG_CGROUPS
 	if (!kinfo.cgroupid) {
-		struct cgroup *cgrp;
-
-		rcu_read_lock();
-		cgrp = task_dfl_cgroup(task);
-		kinfo.cgroupid = cgroup_id(cgrp);
+		kinfo.cgroupid = cgroup_id(authority.dfl_cgrp);
 		kinfo.mask |= PIDFD_INFO_CGROUPID;
-		rcu_read_unlock();
 	}
 #endif
 
 	/*
-	 * Copy pid/tgid last, to reduce the chances the information might be
-	 * stale. Note that it is not possible to ensure it will be valid as the
-	 * task might return as soon as the copy_to_user finishes, but that's ok
-	 * and userspace expects that might happen and can act accordingly, so
-	 * this is just best-effort. What we can do however is checking that all
-	 * the fields are set correctly, or return ESRCH to avoid providing
-	 * incomplete information. */
+	 * PID relationships are native task identity, not sealed authority.  Read
+	 * them last but before ending the task reservation so every returned live
+	 * field is nevertheless sampled within one authenticated authority epoch.
+	 * The task can still exit as soon as this ioctl completes, so the values
+	 * remain best-effort as userspace expects.
+	 */
 
 	kinfo.ppid = task_ppid_nr_ns(task, NULL);
 	kinfo.tgid = task_tgid_vnr(task);
 	kinfo.pid = task_pid_vnr(task);
 	kinfo.mask |= PIDFD_INFO_PID;
+
+	if (!pidfd_info_task_authority_put(&authority, __func__))
+		return -EACCES;
 
 	if (kinfo.pid == 0 || kinfo.tgid == 0)
 		return -ESRCH;
@@ -481,12 +573,22 @@ static bool pidfd_ns_current_boundary_can_see(struct ns_common *ns)
 	}
 }
 
+#define pidfd_get_nsproxy_member(_member, _get) \
+({                                                \
+	__auto_type __ns = READ_ONCE(_member);      \
+	_get(__ns);                                     \
+	to_ns_common(__ns);                             \
+})
+
 static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+	struct task_nsproxy_snapshot snapshot;
 	struct task_struct *task __free(put_task) = NULL;
-	struct nsproxy *nsp __free(put_nsproxy) = NULL;
+	struct nsproxy *nsp;
+	const struct cred *cred;
 	struct ns_common *ns_common = NULL;
 	struct pid_namespace *pid_ns;
+	int ret = 0;
 
 	if (!pidfs_ioctl_valid(cmd))
 		return -ENOIOCTLCMD;
@@ -510,75 +612,77 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if (arg)
 		return -EINVAL;
 
-	scoped_guard(task_lock, task) {
-		nsp = task->nsproxy;
-		if (nsp)
-			get_nsproxy(nsp);
-	}
-	if (!nsp)
-		return -ESRCH; /* just pretend it didn't exist */
+	ret = task_nsproxy_snapshot_get(task, &snapshot);
+	if (ret)
+		return ret;
+	nsp = snapshot.nsproxy;
 
 	/*
 	 * We're trying to open a file descriptor to the namespace so perform a
-	 * filesystem cred ptrace check. Also, we mirror nsfs behavior.
+	 * filesystem cred ptrace check. Also, we mirror nsfs behavior.  Keep the
+	 * task/nsproxy reader reservations through this authorization and member
+	 * reference acquisition so both apply to one exact authority graph.
 	 */
-	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
-		return -EACCES;
+	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
+		ret = -EACCES;
+		goto out_snapshot;
+	}
 
 	switch (cmd) {
 	/* Namespaces that hang of nsproxy. */
 	case PIDFD_GET_CGROUP_NAMESPACE:
-		if (IS_ENABLED(CONFIG_CGROUPS)) {
-			get_cgroup_ns(nsp->cgroup_ns);
-			ns_common = to_ns_common(nsp->cgroup_ns);
-		}
+		if (IS_ENABLED(CONFIG_CGROUPS))
+			ns_common =
+				pidfd_get_nsproxy_member(nsp->cgroup_ns,
+							 get_cgroup_ns);
 		break;
 	case PIDFD_GET_IPC_NAMESPACE:
-		if (IS_ENABLED(CONFIG_IPC_NS)) {
-			get_ipc_ns(nsp->ipc_ns);
-			ns_common = to_ns_common(nsp->ipc_ns);
-		}
+		if (IS_ENABLED(CONFIG_IPC_NS))
+			ns_common =
+				pidfd_get_nsproxy_member(nsp->ipc_ns,
+							 get_ipc_ns);
 		break;
 	case PIDFD_GET_MNT_NAMESPACE:
-		get_mnt_ns(nsp->mnt_ns);
-		ns_common = to_ns_common(nsp->mnt_ns);
+		ns_common = pidfd_get_nsproxy_member(nsp->mnt_ns, get_mnt_ns);
 		break;
 	case PIDFD_GET_NET_NAMESPACE:
-		if (IS_ENABLED(CONFIG_NET_NS)) {
-			ns_common = to_ns_common(nsp->net_ns);
-			get_net_ns(ns_common);
-		}
+		if (IS_ENABLED(CONFIG_NET_NS))
+			ns_common = pidfd_get_nsproxy_member(nsp->net_ns, get_net);
 		break;
 	case PIDFD_GET_PID_FOR_CHILDREN_NAMESPACE:
-		if (IS_ENABLED(CONFIG_PID_NS)) {
-			get_pid_ns(nsp->pid_ns_for_children);
-			ns_common = to_ns_common(nsp->pid_ns_for_children);
-		}
+		if (IS_ENABLED(CONFIG_PID_NS))
+			ns_common =
+				pidfd_get_nsproxy_member(nsp->pid_ns_for_children,
+							 get_pid_ns);
 		break;
 	case PIDFD_GET_TIME_NAMESPACE:
-		if (IS_ENABLED(CONFIG_TIME_NS)) {
-			get_time_ns(nsp->time_ns);
-			ns_common = to_ns_common(nsp->time_ns);
-		}
+		if (IS_ENABLED(CONFIG_TIME_NS))
+			ns_common =
+				pidfd_get_nsproxy_member(nsp->time_ns,
+							 get_time_ns);
 		break;
 	case PIDFD_GET_TIME_FOR_CHILDREN_NAMESPACE:
-		if (IS_ENABLED(CONFIG_TIME_NS)) {
-			get_time_ns(nsp->time_ns_for_children);
-			ns_common = to_ns_common(nsp->time_ns_for_children);
-		}
+		if (IS_ENABLED(CONFIG_TIME_NS))
+			ns_common =
+				pidfd_get_nsproxy_member(nsp->time_ns_for_children,
+							 get_time_ns);
 		break;
 	case PIDFD_GET_UTS_NAMESPACE:
-		if (IS_ENABLED(CONFIG_UTS_NS)) {
-			get_uts_ns(nsp->uts_ns);
-			ns_common = to_ns_common(nsp->uts_ns);
-		}
+		if (IS_ENABLED(CONFIG_UTS_NS))
+			ns_common =
+				pidfd_get_nsproxy_member(nsp->uts_ns,
+							 get_uts_ns);
 		break;
 	/* Namespaces that don't hang of nsproxy. */
 	case PIDFD_GET_USER_NAMESPACE:
 		if (IS_ENABLED(CONFIG_USER_NS)) {
-			rcu_read_lock();
-			ns_common = to_ns_common(get_user_ns(task_cred_xxx(task, user_ns)));
-			rcu_read_unlock();
+			cred = get_task_cred_checked(task);
+			if (IS_ERR(cred)) {
+				ret = PTR_ERR(cred);
+				goto out_snapshot;
+			}
+			ns_common = to_ns_common(get_user_ns(cred->user_ns));
+			put_cred(cred);
 		}
 		break;
 	case PIDFD_GET_PID_NAMESPACE:
@@ -591,9 +695,18 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		}
 		break;
 	default:
-		return -ENOIOCTLCMD;
+		ret = -ENOIOCTLCMD;
+		goto out_snapshot;
 	}
 
+out_snapshot:
+	if (!task_nsproxy_snapshot_put(&snapshot)) {
+		if (ns_common)
+			ns_common->ops->put(ns_common);
+		return -EACCES;
+	}
+	if (ret)
+		return ret;
 	if (!ns_common)
 		return -EOPNOTSUPP;
 
@@ -605,6 +718,8 @@ static long pidfd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	/* open_namespace() unconditionally consumes the reference */
 	return open_namespace(ns_common);
 }
+
+#undef pidfd_get_nsproxy_member
 
 static const struct file_operations pidfs_file_operations = {
 	.poll		= pidfd_poll,
@@ -621,6 +736,68 @@ struct pid *pidfd_pid(const struct file *file)
 		return ERR_PTR(-EBADF);
 	return file_inode(file)->i_private;
 }
+
+#ifdef CONFIG_CGROUPS
+/*
+ * A normal task check deliberately returns UNAVAILABLE for a sealed EXITING
+ * task after authenticating its complete remaining graph.  pidfs_exit() runs
+ * before cgroup_release(), so accept precisely that sealed terminal state in
+ * addition to the native guard-off VALID result.  The later unsealed terminal
+ * state must not supply a cgroup identity.
+ */
+static bool pidfs_task_cgroup_graph_valid(struct task_struct *task,
+					  const char *where)
+{
+	enum auth_guard_check_result result;
+
+	result = auth_guard_task_check_status_where(task, where);
+	if (result == AUTH_GUARD_CHECK_VALID)
+		return true;
+
+	return result == AUTH_GUARD_CHECK_UNAVAILABLE &&
+		auth_guard_task_is_sealed(task);
+}
+
+/*
+ * Authenticate, pin and reauthenticate the exact default cgroup before the
+ * pidfd waitqueue lock disables IRQs.  css_set_lock supplies the native task
+ * edge lifetime exclusion; the guard checks prove that the selected immutable
+ * css_set and its dfl_cgrp edge belong to the sealed task graph.  A zero ID is
+ * the internal "not available" value and causes PIDFD_INFO_CGROUPID to remain
+ * clear.
+ */
+static __u64 pidfs_exit_cgroupid(struct task_struct *task, const char *where)
+{
+	struct css_set *cset = NULL;
+	struct cgroup *cgrp = NULL;
+	__u64 cgroupid = 0;
+
+	if (!pidfs_task_cgroup_graph_valid(task, where))
+		return 0;
+
+	scoped_guard(spinlock_irq, &css_set_lock) {
+		cset = task_css_set(task);
+		if (cset)
+			cgrp = READ_ONCE(cset->dfl_cgrp);
+		if (cgrp && !cgroup_tryget(cgrp))
+			cgrp = NULL;
+	}
+
+	if (!pidfs_task_cgroup_graph_valid(task, where))
+		goto out_put;
+
+	scoped_guard(spinlock_irq, &css_set_lock) {
+		if (cset && cgrp && task_css_set(task) == cset &&
+		    READ_ONCE(cset->dfl_cgrp) == cgrp)
+			cgroupid = cgroup_id(cgrp);
+	}
+
+out_put:
+	if (cgrp)
+		cgroup_put(cgrp);
+	return cgroupid;
+}
+#endif
 
 /*
  * We're called from release_task(). We know there's at least one
@@ -645,23 +822,34 @@ void pidfs_exit(struct task_struct *tsk)
 	struct pidfs_attr *attr;
 	struct pidfs_exit_info *exit_info;
 #ifdef CONFIG_CGROUPS
-	struct cgroup *cgrp;
+	__u64 cgroupid;
 #endif
 
 	might_sleep();
 
+	/* Avoid an authority capture when no pidfd has ever referenced @pid. */
+	attr = READ_ONCE(pid->attr);
+	if (!attr) {
+		scoped_guard(spinlock_irq, &pid->wait_pidfd.lock) {
+			attr = pid->attr;
+			if (!attr) {
+				/* Prevent registration after exit information is lost. */
+				pid->attr = PIDFS_PID_DEAD;
+				return;
+			}
+		}
+	}
+	if (WARN_ON_ONCE(attr == PIDFS_PID_DEAD))
+		return;
+
+#ifdef CONFIG_CGROUPS
+	cgroupid = pidfs_exit_cgroupid(tsk, __func__);
+#endif
+
 	guard(spinlock_irq)(&pid->wait_pidfd.lock);
 	attr = pid->attr;
-	if (!attr) {
-		/*
-		 * No one ever held a pidfd for this struct pid.
-		 * Mark it as dead so no one can add a pidfs
-		 * entry anymore. We're about to be reaped and
-		 * so no exit information would be available.
-		 */
-		pid->attr = PIDFS_PID_DEAD;
+	if (WARN_ON_ONCE(!attr || attr == PIDFS_PID_DEAD))
 		return;
-	}
 
 	/*
 	 * If @pid->attr is set someone might still legitimately hold a
@@ -674,10 +862,7 @@ void pidfs_exit(struct task_struct *tsk)
 	exit_info = &attr->__pei;
 
 #ifdef CONFIG_CGROUPS
-	rcu_read_lock();
-	cgrp = task_dfl_cgroup(tsk);
-	exit_info->cgroupid = cgroup_id(cgrp);
-	rcu_read_unlock();
+	exit_info->cgroupid = cgroupid;
 #endif
 	exit_info->exit_code = tsk->exit_code;
 

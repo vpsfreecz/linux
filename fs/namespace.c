@@ -9,6 +9,7 @@
  */
 
 #include <linux/syscalls.h>
+#include <linux/auth_guard.h>
 #include <linux/export.h>
 #include <linux/capability.h>
 #include <linux/mnt_namespace.h>
@@ -2095,33 +2096,30 @@ struct ns_common *from_mnt_ns(struct mnt_namespace *mnt)
 
 bool mnt_ns_current_boundary_can_see(const struct mnt_namespace *mntns)
 {
-	struct syslog_namespace *syslog_ns;
+	struct auth_guard_userns_boundary boundary;
+	bool visible = false;
+
+	if (!mntns)
+		return false;
+
+	if (get_current_namespace_boundary(&boundary))
+		return false;
+
+	visible = boundary.syslog_ns == &init_syslog_ns ||
+		READ_ONCE(mntns->syslog_ns) == boundary.syslog_ns;
 #ifdef CONFIG_TRACING_NS
-	struct tracing_namespace *tracing_ns;
+	if (boundary.tracing_ns != &init_tracing_ns &&
+	    READ_ONCE(mntns->tracing_ns) != boundary.tracing_ns)
+		visible = false;
 #endif
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-	struct lsm_namespace *lsm_ns;
+	if (boundary.lsm_ns != &init_lsm_ns &&
+	    READ_ONCE(mntns->lsm_ns) != boundary.lsm_ns)
+		visible = false;
 #endif
 
-	syslog_ns = current_syslog_ns();
-	if (syslog_ns && syslog_ns != &init_syslog_ns &&
-	    READ_ONCE(mntns->syslog_ns) != syslog_ns)
-		return false;
-
-#ifdef CONFIG_TRACING_NS
-	tracing_ns = current_tracing_ns();
-	if (tracing_ns != &init_tracing_ns &&
-	    READ_ONCE(mntns->tracing_ns) != tracing_ns)
-		return false;
-#endif
-
-#ifdef CONFIG_SECURITY_LSM_NAMESPACE
-	lsm_ns = current_lsm_ns();
-	if (lsm_ns != &init_lsm_ns && READ_ONCE(mntns->lsm_ns) != lsm_ns)
-		return false;
-#endif
-
-	return true;
+	put_namespace_boundary(&boundary);
+	return visible;
 }
 
 struct mnt_namespace *get_sequential_mnt_ns(struct mnt_namespace *mntns, bool previous)
@@ -4156,6 +4154,7 @@ static atomic64_t mnt_ns_seq = ATOMIC64_INIT(1);
 static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns, bool anon)
 {
 	struct mnt_namespace *new_ns;
+	struct auth_guard_userns_boundary boundary;
 	struct ucounts *ucounts;
 	int ret;
 
@@ -4186,10 +4185,21 @@ static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns, bool a
 	new_ns->mounts = RB_ROOT;
 	init_waitqueue_head(&new_ns->poll);
 	new_ns->user_ns = get_user_ns(user_ns);
-	mnt_ns_set_boundary_namespaces(new_ns, current_syslog_ns(),
-				       current_tracing_ns(), current_lsm_ns());
+	ret = get_current_namespace_boundary(&boundary);
+	if (ret)
+		goto fail_user_ns;
+	mnt_ns_set_boundary_namespaces(new_ns, boundary.syslog_ns,
+				       boundary.tracing_ns, boundary.lsm_ns);
+	put_namespace_boundary(&boundary);
 	new_ns->ucounts = ucounts;
 	return new_ns;
+
+fail_user_ns:
+	put_user_ns(new_ns->user_ns);
+	ns_common_free(new_ns);
+	kfree(new_ns);
+	dec_mnt_namespaces(ucounts);
+	return ERR_PTR(ret);
 }
 
 __latent_entropy
@@ -6142,6 +6152,8 @@ static void __init init_mount_tree(void)
 	set_fs_root(current->fs, &root);
 
 	ns_tree_add(&init_mnt_ns);
+	/* Publish the root namespace tuple only after its mount edge is stable. */
+	auth_guard_enable();
 }
 
 void __init mnt_init(void)
@@ -6345,21 +6357,8 @@ bool mnt_may_suid(struct vfsmount *mnt)
 	       current_in_userns(mnt->mnt_sb->s_user_ns);
 }
 
-static struct ns_common *mntns_get(struct task_struct *task)
-{
-	struct ns_common *ns = NULL;
-	struct nsproxy *nsproxy;
-
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy) {
-		ns = &nsproxy->mnt_ns->ns;
-		get_mnt_ns(to_mnt_ns(ns));
-	}
-	task_unlock(task);
-
-	return ns;
-}
+DEFINE_TASK_NSPROXY_MEMBER_GETTER(mntns_get, struct mnt_namespace, mnt_ns,
+				  get_mnt_ns, put_mnt_ns)
 
 static void mntns_put(struct ns_common *ns)
 {
@@ -6370,7 +6369,7 @@ static int mntns_install(struct nsset *nsset, struct ns_common *ns)
 {
 	struct nsproxy *nsproxy = nsset->nsproxy;
 	struct fs_struct *fs = nsset->fs;
-	struct mnt_namespace *mnt_ns = to_mnt_ns(ns), *old_mnt_ns;
+	struct mnt_namespace *mnt_ns = to_mnt_ns(ns);
 	struct user_namespace *user_ns = nsset->cred->user_ns;
 	struct path root;
 	int err;
@@ -6389,21 +6388,16 @@ static int mntns_install(struct nsset *nsset, struct ns_common *ns)
 	if (fs->users != 1)
 		return -EINVAL;
 
-	get_mnt_ns(mnt_ns);
-	old_mnt_ns = nsproxy->mnt_ns;
-	nsproxy->mnt_ns = mnt_ns;
-
-	/* Find the root */
+	/* Find the root before entering the guarded mutation window. */
 	err = vfs_path_lookup(mnt_ns->root->mnt.mnt_root, &mnt_ns->root->mnt,
-				"/", LOOKUP_DOWN, &root);
-	if (err) {
-		/* revert to old namespace */
-		nsproxy->mnt_ns = old_mnt_ns;
-		put_mnt_ns(mnt_ns);
+			      "/", LOOKUP_DOWN, &root);
+	if (err)
 		return err;
-	}
 
-	put_mnt_ns(old_mnt_ns);
+	err = auth_guard_nsproxy_install_owned(nsproxy, mnt_ns, mnt_ns,
+					       get_mnt_ns, put_mnt_ns);
+	if (err)
+		goto out_path_put;
 
 	/* Update the pwd and root */
 	set_fs_pwd(fs, &root);
@@ -6411,6 +6405,10 @@ static int mntns_install(struct nsset *nsset, struct ns_common *ns)
 
 	path_put(&root);
 	return 0;
+
+out_path_put:
+	path_put(&root);
+	return err;
 }
 
 static struct user_namespace *mntns_owner(struct ns_common *ns)

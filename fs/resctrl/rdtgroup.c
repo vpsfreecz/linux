@@ -712,9 +712,13 @@ int rdtgroup_tasks_assigned(struct rdtgroup *r)
 static int rdtgroup_task_write_permission(struct task_struct *task,
 					  struct kernfs_open_file *of)
 {
-	const struct cred *tcred = get_task_cred(task);
+	const struct cred *tcred __free(put_cred) =
+		get_task_cred_checked(task);
 	const struct cred *cred = current_cred();
 	int ret = 0;
+
+	if (IS_ERR(tcred))
+		return PTR_ERR(tcred);
 
 	/*
 	 * Even if we're attaching all tasks in the thread group, we only
@@ -727,7 +731,6 @@ static int rdtgroup_task_write_permission(struct task_struct *task,
 		ret = -EPERM;
 	}
 
-	put_cred(tcred);
 	return ret;
 }
 

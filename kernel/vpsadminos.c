@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/atomic.h>
+#include <linux/auth_guard.h>
 #include <linux/capability.h>
 #include <linux/ctype.h>
 #include <linux/cred.h>
@@ -241,40 +242,20 @@ ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 	return 0;
 }
 
-unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
+static unsigned int
+online_cpus_in_cpu_snapshot(struct cgroup_task_auth_snapshot *snapshot)
 {
 	struct cgroup_subsys_state *css, *css_parent;
 	long quota, period;
 	int cpus = 0, mincpus = INT_MAX;
-	struct cgroup_namespace *cgns;
-	struct nsproxy *nsproxy;
 
-	rcu_read_lock();
-	task_lock(p);
-	nsproxy = p->nsproxy;
-	if (!nsproxy) {
-		task_unlock(p);
-		rcu_read_unlock();
+	if (snapshot->cgroup_ns == &init_cgroup_ns)
 		return 0;
-	}
-	cgns = nsproxy->cgroup_ns;
-	if (!cgns) {
-		task_unlock(p);
-		rcu_read_unlock();
-		return 0;
-	}
-	get_cgroup_ns(cgns);
-	if (cgns == &init_cgroup_ns) {
-		put_cgroup_ns(cgns);
-		task_unlock(p);
-		rcu_read_unlock();
-		return 0;
-	}
-	task_unlock(p);
-
-	rcu_read_unlock();
-
-	css = task_get_css(p, cpu_cgrp_id);
+	css = snapshot->task_css;
+	if (!css)
+		return 1;
+	/* Transfer the requested controller reference out of the snapshot. */
+	snapshot->task_css = NULL;
 
 up:
 	quota = cpu_cfs_quota_read_s64(css, NULL);
@@ -303,16 +284,26 @@ up:
 	pr_debug("%s:%d quota=%ld period=%ld cpus=%d\n",
 		 __func__, __LINE__, quota, period, cpus);
 	css_put(css);
-	put_cgroup_ns(cgns);
 	return (mincpus == INT_MAX) ? 0 : mincpus;
 }
 
-// Caller's responsibility to make sure p lives throughout
-int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
+unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
 {
-	unsigned int cpus, cpu, want;
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+	enum auth_guard_check_result auth_result;
 
-	cpus = online_cpus_in_cpu_cgroup(p);
+	auth_result = cgroup_task_auth_snapshot_get(p, cpu_cgrp_id, &snapshot);
+	if (auth_result != AUTH_GUARD_CHECK_VALID)
+		return auth_result == AUTH_GUARD_CHECK_UNAVAILABLE ? 0 : 1;
+	return online_cpus_in_cpu_snapshot(&snapshot);
+}
+
+static int fake_online_cpumask_from_count(unsigned int cpus,
+					  struct cpumask *dstmask)
+{
+	unsigned int cpu, want;
+
 	if (!cpus)
 		return 0;
 
@@ -328,6 +319,13 @@ int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
 	return want - cpus;
 }
 
+// Caller's responsibility to make sure p lives throughout
+int fake_online_cpumask(struct task_struct *p, struct cpumask *dstmask)
+{
+	return fake_online_cpumask_from_count(online_cpus_in_cpu_cgroup(p),
+					       dstmask);
+}
+
 
 // Caller's responsibility to make sure p lives throughout
 void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcmask)
@@ -336,8 +334,9 @@ void set_fake_affinity_cpumask(struct task_struct *p, const struct cpumask *srcm
 	unsigned int online_cpus = online_cpus_in_cpu_cgroup(p);
 
 	p->set_fake_cpu_mask = 1;
-	if (want_cpus > online_cpus || want_cpus == online_cpus || want_cpus == 0)
-		fake_online_cpumask(p, &p->fake_cpu_mask);
+	if (want_cpus >= online_cpus || !want_cpus)
+		fake_online_cpumask_from_count(online_cpus,
+					       &p->fake_cpu_mask);
 	else
 		cpumask_copy(&p->fake_cpu_mask, srcmask);
 }
@@ -358,35 +357,30 @@ int fake_affinity_cpumask(struct task_struct *p, struct cpumask *dstmask)
 	return 1;
 }
 
-void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp,
-			      u64 *user, u64 *system, int *cpus)
+static void
+fake_cputime_readout_v1(struct cgroup_task_auth_snapshot *snapshot, u64 timestamp,
+			u64 *user, u64 *system, int *cpus)
 {
-	struct nsproxy *nsproxy;
 	struct cgroup_subsys_state *css;
 	int i;
+	bool restricted;
 	u64 timestamp_old;
 	u64 elapsed, user_time, system_time, run_time;
 	u64 usr = 0, sys = 0, sys_old = 0, usr_old = 0;
 	u64 tmpusr, tmpusr_old, tmpsys, tmpsys_old;
-	u64 usr_frac, sys_frac;
-	struct cpumask cpu_fake_mask;
+	u64 usr_frac;
+	struct cpumask cpu_fake_mask = {};
 
-	rcu_read_lock();
-	task_lock(p);
-	nsproxy = p->nsproxy;
-	if (!nsproxy || !nsproxy->cgroup_ns) {
-		task_unlock(p);
-		rcu_read_unlock();
-		return;
-	}
-	css = nsproxy->cgroup_ns->root_cset->subsys[cpuacct_cgrp_id];
+	restricted = snapshot->cgroup_ns != &init_cgroup_ns;
+	css = snapshot->root_cset->subsys[cpuacct_cgrp_id];
 	if (!css || !css_tryget_online(css)) {
-		task_unlock(p);
-		rcu_read_unlock();
+		if (restricted) {
+			*user = 0;
+			*system = 0;
+			*cpus = 1;
+		}
 		return;
 	}
-	task_unlock(p);
-	rcu_read_unlock();
 
 	timestamp_old = cpustat_fake_set_timestamp(css, timestamp);
 	elapsed = timestamp - timestamp_old;
@@ -403,8 +397,8 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp,
 	}
 	*user = usr;
 	*system = sys;
-	*cpus = online_cpus_in_cpu_cgroup(p);
-	fake_online_cpumask(p, &cpu_fake_mask);
+	*cpus = online_cpus_in_cpu_snapshot(snapshot);
+	fake_online_cpumask_from_count(*cpus, &cpu_fake_mask);
 
 	user_time = usr - usr_old;
 	system_time = sys - sys_old;
@@ -415,8 +409,6 @@ void fake_cputime_readout_v1(struct task_struct *p, u64 timestamp,
 
 	usr_frac = 10000 * user_time;
 	do_div(usr_frac, run_time);
-	sys_frac = 10000 - usr_frac;
-
 	for_each_cpu(i, &cpu_fake_mask) {
 		if (run_time >= elapsed) {
 			usr = elapsed * usr_frac;
@@ -438,35 +430,30 @@ out:
 	css_put(css);
 }
 
-void fake_cputime_readout_v2(struct task_struct *p, u64 timestamp,
-			      u64 *user, u64 *system, int *cpus)
+static void
+fake_cputime_readout_v2(struct cgroup_task_auth_snapshot *snapshot, u64 timestamp,
+			u64 *user, u64 *system, int *cpus)
 {
-	struct nsproxy *nsproxy;
 	struct cgroup *cgrp;
 	int i;
+	bool restricted;
 	u64 timestamp_old;
 	u64 elapsed, user_time, system_time, run_time;
 	u64 usr = 0, sys = 0, sys_old = 0, usr_old = 0;
-	u64 usr_frac, sys_frac;
-	struct cpumask cpu_fake_mask;
+	u64 usr_frac;
+	struct cpumask cpu_fake_mask = {};
 
-	rcu_read_lock();
-	task_lock(p);
-	nsproxy = p->nsproxy;
-	if (!nsproxy || !nsproxy->cgroup_ns) {
-		task_unlock(p);
-		rcu_read_unlock();
-		return;
-	}
-	cgrp = nsproxy->cgroup_ns->root_cset->dfl_cgrp;
+	restricted = snapshot->cgroup_ns != &init_cgroup_ns;
+	cgrp = snapshot->root_cset->dfl_cgrp;
 	if (!cgrp || !cgroup_tryget(cgrp)) {
 		pr_debug("%s: cgrp is NULL\n", __func__);
-		task_unlock(p);
-		rcu_read_unlock();
+		if (restricted) {
+			*user = 0;
+			*system = 0;
+			*cpus = 1;
+		}
 		return;
 	}
-	task_unlock(p);
-	rcu_read_unlock();
 
 	timestamp_old = cgrp->rstat_cpu_fake_timestamp;
 	cgrp->rstat_cpu_fake_timestamp = timestamp;
@@ -486,8 +473,8 @@ void fake_cputime_readout_v2(struct task_struct *p, u64 timestamp,
 
 	*user = usr;
 	*system = sys;
-	*cpus = online_cpus_in_cpu_cgroup(p);
-	fake_online_cpumask(p, &cpu_fake_mask);
+	*cpus = online_cpus_in_cpu_snapshot(snapshot);
+	fake_online_cpumask_from_count(*cpus, &cpu_fake_mask);
 
 	user_time = usr - usr_old;
 	system_time = sys - sys_old;
@@ -498,8 +485,6 @@ void fake_cputime_readout_v2(struct task_struct *p, u64 timestamp,
 
 	usr_frac = 10000 * user_time;
 	do_div(usr_frac, run_time);
-	sys_frac = 10000 - usr_frac;
-
 	for_each_cpu(i, &cpu_fake_mask) {
 		struct prev_cputime *cputime_fake = per_cpu_ptr(cgrp->prev_cputime_fake, i);
 
@@ -524,37 +509,61 @@ out:
 	cgroup_put(cgrp);
 }
 
-void fake_cputime_readout(struct task_struct *p, u64 timestamp, u64 *user, u64 *system, int *cpus)
+static void
+fake_cputime_readout_snapshot(struct cgroup_task_auth_snapshot *snapshot,
+			      u64 timestamp, u64 *user, u64 *system,
+			      int *cpus)
 {
 	if (cgroup_subsys_on_dfl(cpuacct_cgrp_subsys))
-		fake_cputime_readout_v2(p, timestamp, user, system, cpus);
+		fake_cputime_readout_v2(snapshot, timestamp, user, system, cpus);
 	else
-		fake_cputime_readout_v1(p, timestamp, user, system, cpus);
+		fake_cputime_readout_v1(snapshot, timestamp, user, system, cpus);
+}
+
+void fake_cputime_readout(struct task_struct *p, u64 timestamp, u64 *user,
+			  u64 *system, int *cpus)
+{
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+	enum auth_guard_check_result auth_result;
+
+	auth_result = cgroup_task_auth_snapshot_get(p, cpu_cgrp_id, &snapshot);
+	if (auth_result != AUTH_GUARD_CHECK_VALID) {
+		if (auth_result != AUTH_GUARD_CHECK_UNAVAILABLE) {
+			*user = 0;
+			*system = 0;
+			*cpus = 1;
+		}
+		return;
+	}
+	fake_cputime_readout_snapshot(&snapshot, timestamp, user, system, cpus);
 }
 
 void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 *system)
 {
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+	enum auth_guard_check_result auth_result;
+	bool restricted;
+
+	auth_result = cgroup_task_auth_snapshot_get(p, -1, &snapshot);
+	if (auth_result != AUTH_GUARD_CHECK_VALID) {
+		if (auth_result != AUTH_GUARD_CHECK_UNAVAILABLE)
+			*user = *system = 0;
+		return;
+	}
+	restricted = snapshot.cgroup_ns != &init_cgroup_ns;
+
 	if (cgroup_subsys_on_dfl(cpuacct_cgrp_subsys)) {
 		struct cgroup *cgrp;
-		struct nsproxy *nsproxy;
 		struct prev_cputime *cputime_fake;
 
-		rcu_read_lock();
-		task_lock(p);
-		nsproxy = p->nsproxy;
-		if (!nsproxy || !nsproxy->cgroup_ns) {
-			task_unlock(p);
-			rcu_read_unlock();
-			return;
-		}
-		cgrp = nsproxy->cgroup_ns->root_cset->dfl_cgrp;
+		cgrp = snapshot.root_cset->dfl_cgrp;
 		if (!cgrp || !cgroup_tryget(cgrp)) {
-			task_unlock(p);
-			rcu_read_unlock();
+			if (restricted)
+				*user = *system = 0;
 			return;
 		}
-		task_unlock(p);
-		rcu_read_unlock();
 
 		cputime_fake = per_cpu_ptr(cgrp->prev_cputime_fake, cpu);
 		*user = cputime_fake->utime;
@@ -563,24 +572,13 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 		cgroup_put(cgrp);
 	} else {
 		struct cgroup_subsys_state *css;
-		struct nsproxy *nsproxy;
 
-		rcu_read_lock();
-		task_lock(p);
-		nsproxy = p->nsproxy;
-		if (!nsproxy || !nsproxy->cgroup_ns) {
-			task_unlock(p);
-			rcu_read_unlock();
-			return;
-		}
-		css = nsproxy->cgroup_ns->root_cset->subsys[cpuacct_cgrp_id];
+		css = snapshot.root_cset->subsys[cpuacct_cgrp_id];
 		if (!css || !css_tryget_online(css)) {
-			task_unlock(p);
-			rcu_read_unlock();
+			if (restricted)
+				*user = *system = 0;
 			return;
 		}
-		task_unlock(p);
-		rcu_read_unlock();
 
 		cpustat_fake_readout_percpu(css, cpu, user, system);
 
@@ -590,14 +588,19 @@ void fake_cputime_readout_percpu(struct task_struct *p, int cpu, u64 *user, u64 
 
 u64 fake_cputime_readout_idle(u64 timestamp, struct task_struct *p)
 {
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
+	enum auth_guard_check_result auth_result;
 	u64 user = 0, system = 0, total;
-	int cpus;
+	int cpus = 1;
 
-	if (!p->nsproxy || !p->nsproxy->cgroup_ns ||
-	    !p->nsproxy->cgroup_ns->loadavg_virt_enabled)
+	auth_result = cgroup_task_auth_snapshot_get(p, cpu_cgrp_id, &snapshot);
+	if (auth_result != AUTH_GUARD_CHECK_VALID)
+		return 0;
+	if (!snapshot.cgroup_ns->loadavg_virt_enabled)
 		return 0;
 
-	fake_cputime_readout(p, timestamp, &user, &system, &cpus);
+	fake_cputime_readout_snapshot(&snapshot, timestamp, &user, &system, &cpus);
 	total = timestamp * (u64)cpus;
 	if (user + system >= total)
 		return 0;
@@ -779,10 +782,10 @@ static struct vpsa_kernfs_filter *vpsa_kernfs_filter_active_policy_get(void)
 	return policy;
 }
 
-static void vpsa_kernfs_filter_parse_error_set(struct vpsa_kernfs_filter_parse_error *perr,
-				      unsigned int line,
-				      int err,
-				      const char *fmt, ...)
+static __printf(4, 5) void
+vpsa_kernfs_filter_parse_error_set(struct vpsa_kernfs_filter_parse_error *perr,
+				   unsigned int line, int err,
+				   const char *fmt, ...)
 {
 	va_list args;
 

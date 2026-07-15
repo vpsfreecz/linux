@@ -32,6 +32,43 @@ struct key_user root_key_user = {
 	.uid		= GLOBAL_ROOT_UID,
 };
 
+/**
+ * keyring_alloc_cache_cred - Create committed credentials for a kernel cache
+ * @description: Name of the dedicated thread keyring
+ *
+ * Return: A caller-owned committed credential, or an ERR_PTR() on failure.
+ */
+struct cred *keyring_alloc_cache_cred(const char *description)
+{
+	struct cred *cred;
+	struct key *keyring;
+	int ret;
+
+	cred = prepare_kernel_cred(&init_task);
+	if (!cred)
+		return ERR_PTR(-ENOMEM);
+
+	keyring = keyring_alloc(description, GLOBAL_ROOT_UID, GLOBAL_ROOT_GID,
+				cred, (KEY_POS_ALL & ~KEY_POS_SETATTR) |
+				KEY_USR_VIEW | KEY_USR_READ,
+				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
+	if (IS_ERR(keyring)) {
+		abort_creds(cred);
+		return ERR_CAST(keyring);
+	}
+
+	set_bit(KEY_FLAG_ROOT_CAN_CLEAR, &keyring->flags);
+	cred->thread_keyring = keyring;
+	cred->jit_keyring = KEY_REQKEY_DEFL_THREAD_KEYRING;
+
+	ret = commit_prepared_cred(cred);
+	if (ret < 0)
+		return ERR_PTR(ret);
+
+	return cred;
+}
+EXPORT_SYMBOL(keyring_alloc_cache_cred);
+
 /*
  * Get or create a user register keyring.
  */
@@ -889,8 +926,12 @@ long join_session_keyring(const char *name)
 	if (ret < 0)
 		goto error3;
 
-	commit_creds(new);
+	ret = commit_creds(new);
 	mutex_unlock(&key_session_mutex);
+	if (ret < 0) {
+		key_put(keyring);
+		return ret;
+	}
 
 	ret = keyring->serial;
 	key_put(keyring);
@@ -952,8 +993,12 @@ void key_change_session_keyring(struct callback_head *twork)
 	new->process_keyring	= key_get(old->process_keyring);
 
 	security_transfer_creds(new, old);
+	if (!cred_guard_prepare_transfer(new, old)) {
+		abort_creds(new);
+		return;
+	}
 
-	commit_creds(new);
+	AUTH_GUARD_FAIL_STOP_IF(commit_creds(new) < 0);
 }
 
 /*

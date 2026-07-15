@@ -5,6 +5,7 @@
  * Copyright 2007 IBM Corp
  */
 
+#include <linux/auth_guard.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/device_cgroup.h>
 #include <linux/cgroup.h>
@@ -859,18 +860,24 @@ static int devcgroup_legacy_check_permission(short type, u32 major, u32 minor,
 
 int devcgroup_check_permission(short type, u32 major, u32 minor, short access)
 {
-	int rc = BPF_CGROUP_RUN_PROG_DEVICE_CGROUP(type, major, minor, access);
+	enum auth_guard_check_result result;
+	int rc;
 
-	if (rc)
-		return rc;
+	result = auth_guard_task_snapshot_begin(current);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		return -EACCES;
+
+	rc = BPF_CGROUP_RUN_PROG_DEVICE_CGROUP(type, major, minor, access);
 
 	#ifdef CONFIG_CGROUP_DEVICE
-	return devcgroup_legacy_check_permission(type, major, minor, access);
-
-	#else /* CONFIG_CGROUP_DEVICE */
-	return 0;
-
+	if (!rc)
+		rc = devcgroup_legacy_check_permission(type, major, minor, access);
 	#endif /* CONFIG_CGROUP_DEVICE */
+
+	if (!auth_guard_task_snapshot_end(current))
+		rc = -EACCES;
+
+	return rc;
 }
 EXPORT_SYMBOL(devcgroup_check_permission);
 #endif /* defined(CONFIG_CGROUP_DEVICE) || defined(CONFIG_CGROUP_BPF) */

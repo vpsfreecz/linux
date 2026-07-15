@@ -79,7 +79,7 @@ static const struct cred *io_msg_get_target_cred(struct io_ring_ctx *target_ctx,
 	struct task_struct *task = READ_ONCE(target_ctx->submitter_task);
 
 	if (task)
-		return get_task_cred(task);
+		return get_task_cred_checked(task);
 
 	return get_cred(target_file->f_cred);
 }
@@ -92,6 +92,8 @@ static int io_msg_receive_file(struct io_ring_ctx *target_ctx,
 	int ret;
 
 	target_cred = io_msg_get_target_cred(target_ctx, target_file);
+	if (IS_ERR(target_cred))
+		return PTR_ERR(target_cred);
 	ret = security_file_receive_cred(target_cred, src_file);
 	put_cred(target_cred);
 	return ret;

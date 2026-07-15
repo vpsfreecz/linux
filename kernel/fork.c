@@ -13,6 +13,8 @@
  */
 
 #include <linux/anon_inodes.h>
+#include <linux/auth_guard.h>
+#include <linux/cred.h>
 #include <linux/slab.h>
 #include <linux/sched/autogroup.h>
 #include <linux/sched/mm.h>
@@ -45,6 +47,7 @@
 #include <linux/mm.h>
 #include <linux/mm_inline.h>
 #include <linux/memblock.h>
+#include <linux/lsm_namespace.h>
 #include <linux/nsproxy.h>
 #include <linux/capability.h>
 #include <linux/cpu.h>
@@ -192,6 +195,20 @@ static inline void free_task_struct(struct task_struct *tsk)
 	kfree(tsk->lsm_ns_for_child_ctx);
 #endif
 	kmem_cache_free(task_struct_cachep, tsk);
+}
+
+static void clear_task_pending_child_ns_requests(struct task_struct *tsk)
+{
+	tsk->syslog_ns_for_child = false;
+	tsk->syslog_ns_for_child_name = NULL;
+	tsk->syslog_ns_for_child_name_len = 0;
+	tsk->tracing_ns_for_child = false;
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	tsk->lsm_ns_for_child = false;
+	tsk->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
+	tsk->lsm_ns_for_child_ctx = NULL;
+	tsk->lsm_ns_for_child_ctx_len = 0;
+#endif
 }
 
 #ifdef CONFIG_VMAP_STACK
@@ -880,6 +897,11 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 		return NULL;
 
 	err = arch_dup_task_struct(tsk, orig);
+	/*
+	 * Pending namespace requests and their payloads remain owned by @orig.
+	 * Clear copied aliases before any failure path can free the new task.
+	 */
+	clear_task_pending_child_ns_requests(tsk);
 	if (err)
 		goto free_tsk;
 
@@ -1585,24 +1607,37 @@ static int copy_files(u64 clone_flags, struct task_struct *tsk,
 {
 	struct files_struct *oldf, *newf;
 
-	/*
-	 * A background process may not have any files ...
-	 */
-	oldf = current->files;
-	if (!oldf)
-		return 0;
-
 	if (no_files) {
 		tsk->files = NULL;
 		return 0;
 	}
 
+	/*
+	 * Authenticate and pin the exact source table.  dup_task_struct() copied
+	 * current->files much earlier, so relying on that inherited pointer here
+	 * could first-seal a stale or corrupted edge in the child.
+	 */
+	task_lock(current);
+	if (!auth_guard_current()) {
+		task_unlock(current);
+		return -EACCES;
+	}
+	oldf = current->files;
+	if (!oldf) {
+		tsk->files = NULL;
+		task_unlock(current);
+		return 0;
+	}
+	atomic_inc(&oldf->count);
+	task_unlock(current);
+
 	if (clone_flags & CLONE_FILES) {
-		atomic_inc(&oldf->count);
+		tsk->files = oldf;
 		return 0;
 	}
 
 	newf = dup_fd(oldf, NULL);
+	put_files_struct(oldf);
 	if (IS_ERR(newf))
 		return PTR_ERR(newf);
 
@@ -1944,8 +1979,9 @@ __latent_entropy struct task_struct *copy_process(
 	struct multiprocess_signals delayed;
 	struct file *pidfile = NULL;
 	const u64 clone_flags = args->flags;
-	struct nsproxy *nsp = current->nsproxy;
-	struct user_namespace *ns = current_user_ns();
+	struct nsproxy *nsp;
+	struct user_namespace *ns;
+	bool consume_lsm_child_request;
 
 	/*
 	 * Don't allow sharing the root directory with processes in a different
@@ -1981,6 +2017,12 @@ __latent_entropy struct task_struct *copy_process(
 	if ((clone_flags & CLONE_PARENT) &&
 				current->signal->flags & SIGNAL_UNKILLABLE)
 		return ERR_PTR(-EINVAL);
+
+	if (!auth_guard_current())
+		return ERR_PTR(-EACCES);
+
+	nsp = current->nsproxy;
+	ns = current_user_ns();
 
 	/*
 	 * If the new process will be in a different pid or user namespace
@@ -2023,18 +2065,7 @@ __latent_entropy struct task_struct *copy_process(
 	p = dup_task_struct(current, node);
 	if (!p)
 		goto fork_out;
-	/*
-	 * Pending namespace-on-next-clone state belongs to the current task and
-	 * must not be inherited by the freshly duplicated child task_struct.
-	 */
-	p->syslog_ns_for_child = false;
-	p->syslog_ns_for_child_name = NULL;
-	p->tracing_ns_for_child = false;
-#ifdef CONFIG_SECURITY_LSM_NAMESPACE
-	p->lsm_ns_for_child = false;
-	p->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
-	p->lsm_ns_for_child_ctx = NULL;
-#endif
+	auth_guard_task_mark_unpublished(p);
 	p->flags &= ~PF_KTHREAD;
 	if (args->kthread)
 		p->flags |= PF_KTHREAD;
@@ -2302,9 +2333,9 @@ __latent_entropy struct task_struct *copy_process(
 
 	/*
 	 * Ensure that the cgroup subsystem policies allow the new process to be
-	 * forked. It should be noted that the new process's css_set can be changed
-	 * between here and cgroup_post_fork() if an organisation operation is in
-	 * progress.
+	 * forked. The selected css_set is pinned here and attached later by
+	 * cgroup_finalize_fork_authority(), after the child authority tuple is fully
+	 * assembled but before the child is published.
 	 */
 	retval = cgroup_can_fork(p, args);
 	if (retval)
@@ -2391,6 +2422,37 @@ __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_core_free;
 	}
 
+	/*
+	 * Pending child namespace requests are one-shot only after the last
+	 * fork failure path and before the child becomes visible.
+	 */
+	consume_lsm_child_request =
+		pending_child_lsm_ns_request_consumable(current, p->cred->user_ns);
+	retval = consume_pending_child_ns_request(current,
+						  consume_lsm_child_request);
+	if (retval)
+		goto bad_fork_core_free;
+
+	/*
+	 * Preflight the already-populated child edges while fork can still
+	 * recover. Late seccomp and cgroup edges are attached below; the first
+	 * child task seal must cover that final tuple.
+	 */
+	if (!auth_guard_task_init_check(p)) {
+		retval = -EACCES;
+		goto bad_fork_core_free;
+	}
+	/*
+	 * The early fork check cannot authenticate a later TSYNC update or
+	 * corruption.  Recheck the final source while sighand->siglock keeps
+	 * seccomp mode, filter, filter count, and inherited no-new-privs stable
+	 * through copy_seccomp().
+	 */
+	if (!auth_guard_current()) {
+		retval = -EACCES;
+		goto bad_fork_core_free;
+	}
+
 	/* No more failure paths after this point. */
 
 	/*
@@ -2398,6 +2460,8 @@ __latent_entropy struct task_struct *copy_process(
 	 * before holding sighand lock.
 	 */
 	copy_seccomp(p);
+	cgroup_finalize_fork_authority(p, args);
+	BUG_ON(!auth_guard_task_init(p));
 
 	init_task_pid_links(p);
 	if (likely(p->pid)) {
@@ -3110,8 +3174,19 @@ int ksys_unshare(unsigned long unshare_flags)
 {
 	struct fs_struct *fs, *new_fs = NULL;
 	struct files_struct *new_fd = NULL;
+	struct files_struct *old_files = NULL;
 	struct cred *new_cred = NULL;
 	struct nsproxy *new_nsproxy = NULL;
+	struct nsproxy *old_nsproxy = NULL;
+	struct pending_child_ns_request_payloads pending_payloads = {
+		.lsm.lsmid = LSM_ID_UNDEF,
+	};
+	struct auth_guard_task_lsm_request detached_lsm = {
+		.lsmid = LSM_ID_UNDEF,
+	};
+	enum auth_guard_mutation_result mutation;
+	bool auth_guarded = false;
+	bool consume_lsm_child_ns_req = false;
 	int do_sysvsem = 0;
 	int err;
 
@@ -3150,6 +3225,11 @@ int ksys_unshare(unsigned long unshare_flags)
 	err = unshare_fs(unshare_flags, &new_fs);
 	if (err)
 		goto bad_unshare_out;
+	if ((unshare_flags & CLONE_FILES) &&
+	    !auth_guard_current()) {
+		err = -EACCES;
+		goto bad_unshare_cleanup_fs;
+	}
 	err = unshare_fd(unshare_flags, &new_fd);
 	if (err)
 		goto bad_unshare_cleanup_fs;
@@ -3160,14 +3240,46 @@ int ksys_unshare(unsigned long unshare_flags)
 					 new_cred, new_fs);
 	if (err)
 		goto bad_unshare_cleanup_cred;
+	if (new_nsproxy) {
+		struct user_namespace *user_ns;
+
+		user_ns = new_cred ? new_cred->user_ns : current_user_ns();
+		consume_lsm_child_ns_req =
+			pending_child_lsm_ns_request_consumable(current, user_ns);
+	}
 
 	if (new_cred) {
 		err = set_cred_ucounts(new_cred);
 		if (err)
-			goto bad_unshare_cleanup_cred;
+			goto bad_unshare_cleanup_nsproxy;
+		err = cred_guard_preflight_commit_creds(new_cred);
+		if (err)
+			goto bad_unshare_cleanup_nsproxy;
 	}
 
-	if (new_fs || new_fd || do_sysvsem || new_cred || new_nsproxy) {
+	if (new_nsproxy && !auth_guard_nsproxy_check(new_nsproxy)) {
+		err = -EACCES;
+		goto bad_unshare_cleanup_nsproxy;
+	}
+
+	if (new_cred || new_nsproxy || new_fd) {
+		auth_guarded = new_cred ?
+			cred_guard_task_begin_consuming_transition(current) :
+			auth_guard_task_begin_transition(current);
+		if (!auth_guarded) {
+			err = -EACCES;
+			goto bad_unshare_cleanup_nsproxy;
+		}
+	}
+
+	if (new_cred) {
+		err = commit_creds_in_task_transition(new_cred, &detached_lsm);
+		new_cred = NULL;
+		if (err)
+			goto bad_unshare_abort_transition;
+	}
+
+	if (new_fs || new_fd || do_sysvsem || new_nsproxy) {
 		if (do_sysvsem) {
 			/*
 			 * CLONE_SYSVSEM is equivalent to sys_exit().
@@ -3180,10 +3292,15 @@ int ksys_unshare(unsigned long unshare_flags)
 			shm_init_task(current);
 		}
 
-		if (new_nsproxy)
-			switch_task_namespaces(current, new_nsproxy);
-
 		task_lock(current);
+
+		if (new_nsproxy) {
+			mutation = auth_guard_task_replace_nsproxy_in_transition(
+				current, new_nsproxy, &old_nsproxy);
+			AUTH_GUARD_MUTATION_FAIL_STOP(mutation);
+			consume_pending_child_ns_request_in_transition(current,
+				consume_lsm_child_ns_req, &pending_payloads);
+		}
 
 		if (new_fs) {
 			fs = current->fs;
@@ -3196,23 +3313,49 @@ int ksys_unshare(unsigned long unshare_flags)
 			read_sequnlock_excl(&fs->seq);
 		}
 
-		if (new_fd)
-			swap(current->files, new_fd);
+		if (new_fd) {
+			mutation = auth_guard_task_replace_files_in_transition(
+				current, new_fd, &old_files);
+			AUTH_GUARD_MUTATION_FAIL_STOP(mutation);
+		}
+
+		if (auth_guarded)
+			AUTH_GUARD_FAIL_STOP_UNLESS(
+				auth_guard_task_finish_transition(current));
+		auth_guarded = false;
 
 		task_unlock(current);
 
-		if (new_cred) {
-			/* Install the new user namespace */
-			commit_creds(new_cred);
-			new_cred = NULL;
+		if (new_nsproxy) {
+			if (old_nsproxy)
+				put_nsproxy(old_nsproxy);
+			new_nsproxy = NULL;
 		}
+		if (new_fd) {
+			if (old_files)
+				put_files_struct(old_files);
+			new_fd = NULL;
+		}
+	}
+
+	if (auth_guarded) {
+		AUTH_GUARD_FAIL_STOP_UNLESS(auth_guard_task_finish_transition(current));
+		auth_guarded = false;
 	}
 
 	perf_event_namespaces(current);
 
+bad_unshare_abort_transition:
+	if (auth_guarded)
+		auth_guard_task_abort_transition(current);
+	release_pending_child_ns_request_payloads(&pending_payloads);
+	lsm_ns_release_pending_child_request(&detached_lsm);
+bad_unshare_cleanup_nsproxy:
+	if (new_nsproxy)
+		put_nsproxy(new_nsproxy);
 bad_unshare_cleanup_cred:
 	if (new_cred)
-		put_cred(new_cred);
+		abort_creds(new_cred);
 bad_unshare_cleanup_fd:
 	if (new_fd)
 		put_files_struct(new_fd);
@@ -3223,6 +3366,7 @@ bad_unshare_cleanup_fs:
 
 bad_unshare_out:
 	return err;
+
 }
 
 SYSCALL_DEFINE1(unshare, unsigned long, unshare_flags)
@@ -3240,16 +3384,22 @@ int unshare_files(void)
 {
 	struct task_struct *task = current;
 	struct files_struct *old, *copy = NULL;
+	enum auth_guard_mutation_result mutation;
 	int error;
+
+	if (!auth_guard_task_check(task))
+		return -EACCES;
 
 	error = unshare_fd(CLONE_FILES, &copy);
 	if (error || !copy)
 		return error;
 
-	old = task->files;
-	task_lock(task);
-	task->files = copy;
-	task_unlock(task);
+	mutation = auth_guard_task_replace_files(task, copy, &old);
+	if (mutation == AUTH_GUARD_MUTATION_REJECTED) {
+		put_files_struct(copy);
+		return -EACCES;
+	}
+	AUTH_GUARD_QUARANTINE_FAIL_STOP(mutation);
 	put_files_struct(old);
 	return 0;
 }

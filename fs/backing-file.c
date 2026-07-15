@@ -197,7 +197,7 @@ ssize_t backing_file_read_iter(struct file *file, struct iov_iter *iter,
 			backing_aio_cleanup(aio, ret);
 	}
 out:
-	revert_creds(old_cred);
+	put_cred(revert_creds(old_cred));
 
 	if (ctx->accessed)
 		ctx->accessed(iocb->ki_filp);
@@ -264,7 +264,7 @@ ssize_t backing_file_write_iter(struct file *file, struct iov_iter *iter,
 			backing_aio_cleanup(aio, ret);
 	}
 out:
-	revert_creds(old_cred);
+	put_cred(revert_creds(old_cred));
 
 	return ret;
 }
@@ -275,15 +275,14 @@ ssize_t backing_file_splice_read(struct file *in, struct kiocb *iocb,
 				 unsigned int flags,
 				 struct backing_file_ctx *ctx)
 {
-	const struct cred *old_cred;
 	ssize_t ret;
 
 	if (WARN_ON_ONCE(!(in->f_mode & FMODE_BACKING)))
 		return -EIO;
 
-	old_cred = override_creds(ctx->cred);
-	ret = vfs_splice_read(in, &iocb->ki_pos, pipe, len, flags);
-	revert_creds(old_cred);
+	scoped_with_creds(ctx->cred) {
+		ret = vfs_splice_read(in, &iocb->ki_pos, pipe, len, flags);
+	}
 
 	if (ctx->accessed)
 		ctx->accessed(iocb->ki_filp);
@@ -297,7 +296,6 @@ ssize_t backing_file_splice_write(struct pipe_inode_info *pipe,
 				  size_t len, unsigned int flags,
 				  struct backing_file_ctx *ctx)
 {
-	const struct cred *old_cred;
 	ssize_t ret;
 
 	if (WARN_ON_ONCE(!(out->f_mode & FMODE_BACKING)))
@@ -310,11 +308,12 @@ ssize_t backing_file_splice_write(struct pipe_inode_info *pipe,
 	if (ret)
 		return ret;
 
-	old_cred = override_creds(ctx->cred);
-	file_start_write(out);
-	ret = out->f_op->splice_write(pipe, out, &iocb->ki_pos, len, flags);
-	file_end_write(out);
-	revert_creds(old_cred);
+	scoped_with_creds(ctx->cred) {
+		file_start_write(out);
+		ret = out->f_op->splice_write(pipe, out, &iocb->ki_pos, len,
+					      flags);
+		file_end_write(out);
+	}
 
 	if (ctx->end_write)
 		ctx->end_write(iocb, ret);
@@ -326,7 +325,6 @@ EXPORT_SYMBOL_GPL(backing_file_splice_write);
 int backing_file_mmap(struct file *file, struct vm_area_struct *vma,
 		      struct backing_file_ctx *ctx)
 {
-	const struct cred *old_cred;
 	struct file *user_file = vma->vm_file;
 	int ret;
 
@@ -338,9 +336,9 @@ int backing_file_mmap(struct file *file, struct vm_area_struct *vma,
 
 	vma_set_file(vma, file);
 
-	old_cred = override_creds(ctx->cred);
-	ret = vfs_mmap(vma->vm_file, vma);
-	revert_creds(old_cred);
+	scoped_with_creds(ctx->cred) {
+		ret = vfs_mmap(vma->vm_file, vma);
+	}
 
 	if (ctx->accessed)
 		ctx->accessed(user_file);

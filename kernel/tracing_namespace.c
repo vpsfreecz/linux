@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/auth_guard.h>
 #include <linux/err.h>
 #include <linux/audit.h>
 #include <linux/cred.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/nsproxy.h>
 #include <linux/nstree.h>
 #include <linux/pid_namespace.h>
 #include <linux/proc_ns.h>
@@ -29,6 +31,22 @@ struct tracing_namespace init_tracing_ns = {
 	},
 };
 EXPORT_SYMBOL_GPL(init_tracing_ns);
+
+DEFINE_CURRENT_NSPROXY_MEMBER_GETTER(get_current_tracing_ns_checked,
+				     struct tracing_namespace, tracing_ns,
+				     get_tracing_ns, put_tracing_ns)
+EXPORT_SYMBOL_GPL(get_current_tracing_ns_checked_where);
+
+bool tracing_ns_current_is_guest(void)
+{
+	struct tracing_namespace *ns __free(put_tracing_ns) =
+		get_current_tracing_ns_checked();
+
+	if (IS_ERR(ns))
+		return true;
+	return ns != &init_tracing_ns;
+}
+EXPORT_SYMBOL_GPL(tracing_ns_current_is_guest);
 
 static void tracing_ns_audit(const char *op,
 		     const struct tracing_namespace *ns,
@@ -140,28 +158,60 @@ static bool tracing_ns_can_bind_child(const struct tracing_namespace *old_ns,
 	return true;
 }
 
-bool tracing_ns_matches_task(const struct tracing_namespace *ns,
-			    const struct task_struct *task)
+bool tracing_ns_matches_task_where(const struct tracing_namespace *ns,
+				   const struct task_struct *task,
+				   const char *where)
 {
 	struct nsproxy *nsproxy;
+	struct task_struct *checked_task;
 	const struct cred *cred;
+	enum auth_guard_check_result auth_result;
 	bool match = false;
 
 	if (!ns || !task)
 		return false;
+	checked_task = (struct task_struct *)task;
 
-	rcu_read_lock();
-	nsproxy = task->nsproxy;
-	cred = __task_cred(task);
-	if (nsproxy && cred && nsproxy->tracing_ns == ns &&
+	for (;;) {
+		cred = get_task_cred_checked_where(checked_task, where);
+		if (IS_ERR(cred))
+			return false;
+
+		task_lock(checked_task);
+		nsproxy = READ_ONCE(task->nsproxy);
+		if (nsproxy)
+			get_nsproxy(nsproxy);
+		auth_result = auth_guard_task_check_real_cred_where(checked_task,
+								    cred, where);
+		task_unlock(checked_task);
+
+		if (auth_result == AUTH_GUARD_CHECK_VALID)
+			break;
+		if (nsproxy)
+			put_nsproxy(nsproxy);
+		put_cred(cred);
+		if (auth_result != AUTH_GUARD_CHECK_BUSY)
+			return false;
+		cpu_relax();
+	}
+
+	auth_result = auth_guard_nsproxy_snapshot_begin_where(nsproxy, where);
+	if (auth_result != AUTH_GUARD_CHECK_VALID)
+		goto out;
+	if (nsproxy && nsproxy->tracing_ns == ns &&
 	    tracing_ns_syslog_contains(ns, nsproxy->syslog_ns))
 		match = tracing_ns_pid_matches(ns, task, nsproxy) &&
 			tracing_ns_user_matches(ns, cred->user_ns);
-	rcu_read_unlock();
+	if (!auth_guard_nsproxy_snapshot_end_where(nsproxy, where))
+		match = false;
+out:
+	if (nsproxy)
+		put_nsproxy(nsproxy);
+	put_cred(cred);
 
 	return match;
 }
-EXPORT_SYMBOL_GPL(tracing_ns_matches_task);
+EXPORT_SYMBOL_GPL(tracing_ns_matches_task_where);
 
 static void delayed_free_tracing_ns(struct rcu_head *head)
 {
@@ -196,17 +246,32 @@ void free_tracing_ns(struct tracing_namespace *ns)
 }
 EXPORT_SYMBOL_GPL(free_tracing_ns);
 
+DEFINE_USERNS_BOUNDARY_REPLACER(tracing_ns_replace_userns_default,
+				tracing_namespace, tracing_ns,
+				get_tracing_ns, put_tracing_ns)
+EXPORT_SYMBOL_GPL(tracing_ns_replace_userns_default_where);
+
+DEFINE_STATIC_USERNS_BOUNDARY_GETTER(tracing_ns_get_userns_checked,
+				     tracing_namespace, tracing_ns,
+				     get_tracing_ns, put_tracing_ns,
+				     &init_tracing_ns)
+
+#define tracing_ns_get_userns_checked(_user_ns) \
+	tracing_ns_get_userns_checked_where((_user_ns), __func__)
+
 int tracing_ns_check_userns_setns_from(const struct user_namespace *user_ns,
 				       const struct tracing_namespace *current_ns)
 {
-	struct tracing_namespace *target_ns;
+	struct tracing_namespace *target_ns __free(put_tracing_ns) = NULL;
 
 	if (!user_ns)
 		return -EINVAL;
 
 	if (!current_ns)
-		current_ns = current_tracing_ns();
-	target_ns = user_ns->tracing_ns ? user_ns->tracing_ns : &init_tracing_ns;
+		return -EACCES;
+	target_ns = tracing_ns_get_userns_checked(user_ns);
+	if (IS_ERR(target_ns))
+		return PTR_ERR(target_ns);
 
 	if (target_ns == current_ns)
 		return 0;
@@ -221,24 +286,19 @@ int tracing_ns_check_userns_setns_from(const struct user_namespace *user_ns,
 }
 EXPORT_SYMBOL_GPL(tracing_ns_check_userns_setns_from);
 
-int tracing_ns_check_userns_setns(const struct user_namespace *user_ns)
-{
-	return tracing_ns_check_userns_setns_from(user_ns, current_tracing_ns());
-}
-EXPORT_SYMBOL_GPL(tracing_ns_check_userns_setns);
-
 int tracing_ns_check_pidns_setns_from(const struct pid_namespace *pid_ns,
 				      const struct tracing_namespace *current_ns)
 {
-	struct tracing_namespace *target_ns;
+	struct tracing_namespace *target_ns __free(put_tracing_ns) = NULL;
 
 	if (!pid_ns)
 		return -EINVAL;
 
 	if (!current_ns)
-		current_ns = current_tracing_ns();
-	target_ns = (pid_ns->user_ns && pid_ns->user_ns->tracing_ns) ?
-		pid_ns->user_ns->tracing_ns : &init_tracing_ns;
+		return -EACCES;
+	target_ns = tracing_ns_get_userns_checked(pid_ns->user_ns);
+	if (IS_ERR(target_ns))
+		return PTR_ERR(target_ns);
 
 	if (target_ns == current_ns)
 		return 0;
@@ -253,24 +313,19 @@ int tracing_ns_check_pidns_setns_from(const struct pid_namespace *pid_ns,
 }
 EXPORT_SYMBOL_GPL(tracing_ns_check_pidns_setns_from);
 
-int tracing_ns_check_pidns_setns(const struct pid_namespace *pid_ns)
-{
-	return tracing_ns_check_pidns_setns_from(pid_ns, current_tracing_ns());
-}
-EXPORT_SYMBOL_GPL(tracing_ns_check_pidns_setns);
-
 int tracing_ns_check_syslogns_setns_from(const struct syslog_namespace *syslog_ns,
 					 const struct tracing_namespace *current_ns)
 {
-	struct tracing_namespace *target_ns;
+	struct tracing_namespace *target_ns __free(put_tracing_ns) = NULL;
 
 	if (!syslog_ns)
 		return -EINVAL;
 	if (!current_ns)
-		current_ns = &init_tracing_ns;
+		return -EACCES;
 
-	target_ns = (syslog_ns->user_ns && syslog_ns->user_ns->tracing_ns) ?
-		syslog_ns->user_ns->tracing_ns : &init_tracing_ns;
+	target_ns = tracing_ns_get_userns_checked(syslog_ns->user_ns);
+	if (IS_ERR(target_ns))
+		return PTR_ERR(target_ns);
 
 	if (target_ns == current_ns)
 		return 0;
@@ -285,11 +340,22 @@ int tracing_ns_check_syslogns_setns_from(const struct syslog_namespace *syslog_n
 }
 EXPORT_SYMBOL_GPL(tracing_ns_check_syslogns_setns_from);
 
-int tracing_ns_check_syslogns_setns(const struct syslog_namespace *syslog_ns)
-{
-	return tracing_ns_check_syslogns_setns_from(syslog_ns, current_tracing_ns());
-}
-EXPORT_SYMBOL_GPL(tracing_ns_check_syslogns_setns);
+#define DEFINE_TRACING_NS_SETNS_CHECK(_name, _type)                         \
+int tracing_ns_check_##_name##_setns(const struct _type *ns)                \
+{                                                                            \
+	struct tracing_namespace *current_ns __free(put_tracing_ns) =          \
+		get_current_tracing_ns_checked();                                \
+	if (IS_ERR(current_ns))                                                  \
+		return PTR_ERR(current_ns);                                       \
+	return tracing_ns_check_##_name##_setns_from(ns, current_ns);            \
+}                                                                            \
+EXPORT_SYMBOL_GPL(tracing_ns_check_##_name##_setns)
+
+DEFINE_TRACING_NS_SETNS_CHECK(userns, user_namespace);
+DEFINE_TRACING_NS_SETNS_CHECK(pidns, pid_namespace);
+DEFINE_TRACING_NS_SETNS_CHECK(syslogns, syslog_namespace);
+
+#undef DEFINE_TRACING_NS_SETNS_CHECK
 
 static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns,
 					  struct pid_namespace *pid_ns,
@@ -297,6 +363,7 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 					  struct tracing_namespace *old_ns)
 {
 	struct tracing_namespace *ns;
+	enum auth_guard_mutation_result mutation;
 	int err;
 
 	ns = kzalloc(sizeof(*ns), GFP_KERNEL);
@@ -319,9 +386,14 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 	 * so future userns descendants and setns checks resolve to the child
 	 * tracing boundary rather than the inherited init one.
 	 */
-	if (user_ns != current_user_ns() && user_ns->tracing_ns == old_ns) {
-		put_tracing_ns(user_ns->tracing_ns);
-		user_ns->tracing_ns = get_tracing_ns(ns);
+	if (user_ns != current_user_ns()) {
+		mutation = tracing_ns_replace_userns_default(user_ns, old_ns, ns);
+		if (mutation == AUTH_GUARD_MUTATION_QUARANTINED)
+			return ERR_PTR(-EACCES);
+		if (mutation != AUTH_GUARD_MUTATION_APPLIED) {
+			err = -EACCES;
+			goto fail_refs;
+		}
 	}
 
 	__ns_tree_add(&ns->ns, &tracing_ns_tree);
@@ -336,6 +408,12 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 
 	return ns;
 
+fail_refs:
+	put_tracing_ns(ns->parent);
+	put_pid_ns(ns->pid_ns);
+	put_syslog_ns(ns->syslog_ns);
+	put_user_ns(ns->user_ns);
+	ns_common_free(ns);
 fail_free:
 	kfree(ns);
 	return ERR_PTR(err);
@@ -378,15 +456,19 @@ EXPORT_SYMBOL_GPL(copy_tracing_ns);
 
 static struct ns_common *tracingns_get(struct task_struct *task)
 {
-	struct tracing_namespace *ns = &init_tracing_ns;
-	struct nsproxy *nsproxy;
+	struct task_nsproxy_snapshot snapshot;
+	struct tracing_namespace *ns;
 
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy && nsproxy->tracing_ns)
-		ns = nsproxy->tracing_ns;
+	if (task_nsproxy_snapshot_get(task, &snapshot))
+		return NULL;
+	ns = READ_ONCE(snapshot.nsproxy->tracing_ns);
+	if (!ns)
+		ns = &init_tracing_ns;
 	get_tracing_ns(ns);
-	task_unlock(task);
+	if (!task_nsproxy_snapshot_put(&snapshot)) {
+		put_tracing_ns(ns);
+		return NULL;
+	}
 
 	return &ns->ns;
 }
@@ -434,14 +516,19 @@ static bool tracingns_contains(const struct tracing_namespace *ancestor,
 static struct ns_common *tracingns_get_parent(struct ns_common *ns)
 {
 	struct tracing_namespace *parent = to_tracing_ns(ns)->parent;
-	struct tracing_namespace *caller_ns = current_tracing_ns();
+	struct tracing_namespace *caller_ns __free(put_tracing_ns) =
+		get_current_tracing_ns_checked();
+	struct ns_common *ret;
 
-	if (!parent)
-		return ERR_PTR(-EPERM);
-	if (!caller_ns || !tracingns_contains(caller_ns, parent))
-		return ERR_PTR(-EPERM);
+	if (IS_ERR(caller_ns))
+		return ERR_CAST(caller_ns);
 
-	return &get_tracing_ns(parent)->ns;
+	if (!parent || !tracingns_contains(caller_ns, parent))
+		ret = ERR_PTR(-EPERM);
+	else
+		ret = &get_tracing_ns(parent)->ns;
+
+	return ret;
 }
 
 const struct proc_ns_operations tracingns_operations = {

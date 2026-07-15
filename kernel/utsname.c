@@ -6,6 +6,7 @@
  */
 
 #include <linux/export.h>
+#include <linux/auth_guard.h>
 #include <linux/uts.h>
 #include <linux/utsname.h>
 #include <linux/err.h>
@@ -112,21 +113,8 @@ void free_uts_ns(struct uts_namespace *ns)
 	kfree_rcu(ns, ns.ns_rcu);
 }
 
-static struct ns_common *utsns_get(struct task_struct *task)
-{
-	struct uts_namespace *ns = NULL;
-	struct nsproxy *nsproxy;
-
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy) {
-		ns = nsproxy->uts_ns;
-		get_uts_ns(ns);
-	}
-	task_unlock(task);
-
-	return ns ? &ns->ns : NULL;
-}
+DEFINE_TASK_NSPROXY_MEMBER_GETTER(utsns_get, struct uts_namespace, uts_ns,
+				  get_uts_ns, put_uts_ns)
 
 static void utsns_put(struct ns_common *ns)
 {
@@ -142,10 +130,8 @@ static int utsns_install(struct nsset *nsset, struct ns_common *new)
 	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	get_uts_ns(ns);
-	put_uts_ns(nsproxy->uts_ns);
-	nsproxy->uts_ns = ns;
-	return 0;
+	return auth_guard_nsproxy_install_owned(nsproxy, uts_ns, ns,
+						get_uts_ns, put_uts_ns);
 }
 
 static struct user_namespace *utsns_owner(struct ns_common *ns)

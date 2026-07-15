@@ -85,6 +85,7 @@ int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 	struct file *file;
 	struct super_block *backing_sb;
 	struct fuse_backing *fb = NULL;
+	struct cred *cred;
 	int acc_mode = 0;
 	int res;
 
@@ -131,7 +132,18 @@ int fuse_backing_open(struct fuse_conn *fc, struct fuse_backing_map *map)
 		goto out_fput;
 
 	fb->file = file;
-	fb->cred = prepare_creds();
+	cred = prepare_creds();
+	if (!cred) {
+		kfree(fb);
+		goto out_fput;
+	}
+	res = commit_prepared_cred(cred);
+	if (res < 0) {
+		kfree(fb);
+		goto out_fput;
+	}
+
+	fb->cred = cred;
 	refcount_set(&fb->count, 1);
 
 	res = fuse_backing_id_alloc(fc, fb);

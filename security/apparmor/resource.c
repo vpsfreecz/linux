@@ -117,11 +117,13 @@ int aa_task_setrlimit(const struct cred *subj_cred, struct aa_label *label,
 {
 	struct aa_profile *profile;
 	struct aa_label *peer;
+	const struct cred *peer_cred __free(put_cred) =
+		get_task_cred_checked(task);
 	int error = 0;
 
-	rcu_read_lock();
-	peer = aa_get_newest_cred_label(__task_cred(task));
-	rcu_read_unlock();
+	if (IS_ERR(peer_cred))
+		return PTR_ERR(peer_cred);
+	peer = aa_get_newest_cred_label(peer_cred);
 
 	/* TODO: extend resource control to handle other (non current)
 	 * profiles.  AppArmor rules currently have the implicit assumption

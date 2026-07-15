@@ -2,6 +2,8 @@
 #ifndef _LINUX_NS_COMMON_H
 #define _LINUX_NS_COMMON_H
 
+#include <linux/cleanup.h>
+#include <linux/err.h>
 #include <linux/refcount.h>
 #include <linux/rbtree.h>
 #include <uapi/linux/sched.h>
@@ -176,5 +178,26 @@ static __always_inline __must_check bool __ns_ref_get(struct ns_common *ns)
 #define ns_ref_put(__ns) __ns_ref_put(to_ns_common((__ns)))
 #define ns_ref_put_and_lock(__ns, __lock) \
 	refcount_dec_and_lock(&to_ns_common((__ns))->__ns_ref, (__lock))
+
+#define DEFINE_NS_COMMON_REF_HELPERS(_type, _get, _put, _free) \
+static inline _type *_get(_type *ns)                              \
+{                                                                 \
+	if (ns)                                                       \
+		ns_ref_inc(ns);                                         \
+	return ns;                                                    \
+}                                                                 \
+static inline void _put(_type *ns)                                \
+{                                                                 \
+	if (ns && ns_ref_put(ns))                                    \
+		_free(ns);                                              \
+}
+
+#define DEFINE_NS_COMMON_PUT_CLEANUP(_struct, _put) \
+static inline void _put##_if_valid(struct _struct *ns) \
+{ \
+	if (!IS_ERR_OR_NULL(ns)) \
+		_put(ns); \
+} \
+DEFINE_FREE(_put, struct _struct *, _put##_if_valid(_T))
 
 #endif

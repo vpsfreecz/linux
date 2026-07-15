@@ -555,7 +555,6 @@ static int __sock_xmit(struct nbd_device *nbd, struct socket *sock, int send,
 	int result;
 	struct msghdr msg = {} ;
 	unsigned int noreclaim_flag;
-	const struct cred *old_cred;
 
 	if (unlikely(!sock)) {
 		dev_err_ratelimited(disk_to_dev(nbd->disk),
@@ -564,33 +563,31 @@ static int __sock_xmit(struct nbd_device *nbd, struct socket *sock, int send,
 		return -EINVAL;
 	}
 
-	old_cred = override_creds(nbd_cred);
+	scoped_with_creds(nbd_cred) {
+		msg.msg_iter = *iter;
 
-	msg.msg_iter = *iter;
+		noreclaim_flag = memalloc_noreclaim_save();
+		do {
+			sock->sk->sk_allocation = GFP_NOIO | __GFP_MEMALLOC;
+			sock->sk->sk_use_task_frag = false;
+			msg.msg_flags = msg_flags | MSG_NOSIGNAL;
 
-	noreclaim_flag = memalloc_noreclaim_save();
-	do {
-		sock->sk->sk_allocation = GFP_NOIO | __GFP_MEMALLOC;
-		sock->sk->sk_use_task_frag = false;
-		msg.msg_flags = msg_flags | MSG_NOSIGNAL;
+			if (send)
+				result = sock_sendmsg(sock, &msg);
+			else
+				result = sock_recvmsg(sock, &msg, msg.msg_flags);
 
-		if (send)
-			result = sock_sendmsg(sock, &msg);
-		else
-			result = sock_recvmsg(sock, &msg, msg.msg_flags);
+			if (result <= 0) {
+				if (result == 0)
+					result = -EPIPE; /* short read */
+				break;
+			}
+			if (sent)
+				*sent += result;
+		} while (msg_data_left(&msg));
 
-		if (result <= 0) {
-			if (result == 0)
-				result = -EPIPE; /* short read */
-			break;
-		}
-		if (sent)
-			*sent += result;
-	} while (msg_data_left(&msg));
-
-	memalloc_noreclaim_restore(noreclaim_flag);
-
-	revert_creds(old_cred);
+		memalloc_noreclaim_restore(noreclaim_flag);
+	}
 
 	return result;
 }
@@ -2644,7 +2641,7 @@ static void nbd_dead_link_work(struct work_struct *work)
 
 static int __init nbd_init(void)
 {
-	int i;
+	int err, i;
 
 	BUILD_BUG_ON(sizeof(struct nbd_request) != 28);
 
@@ -2688,6 +2685,13 @@ static int __init nbd_init(void)
 		destroy_workqueue(nbd_del_wq);
 		unregister_blkdev(NBD_MAJOR, "nbd");
 		return -ENOMEM;
+	}
+	err = commit_prepared_cred(nbd_cred);
+	if (err) {
+		nbd_cred = NULL;
+		destroy_workqueue(nbd_del_wq);
+		unregister_blkdev(NBD_MAJOR, "nbd");
+		return err;
 	}
 
 	if (genl_register_family(&nbd_genl_family)) {

@@ -6,6 +6,7 @@
  */
 
 #include <linux/mm.h>
+#include <linux/auth_guard.h>
 #include <linux/slab.h>
 #include <linux/sched/autogroup.h>
 #include <linux/sched/mm.h>
@@ -912,6 +913,7 @@ void __noreturn do_exit(long code)
 
 	io_uring_files_cancel();
 	exit_signals(tsk);  /* sets PF_EXITING */
+	auth_guard_task_exit(tsk);
 
 	seccomp_filter_release(tsk);
 

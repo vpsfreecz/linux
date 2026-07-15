@@ -924,11 +924,13 @@ static u64 bpf_container_delegate_attach_mask(void)
 	       BIT_ULL(BPF_LSM_MAC);
 }
 
-static int bpf_check_container_delegate_mask(int opt, u64 msk)
+static int
+bpf_check_container_delegate_mask(int opt, u64 msk,
+				  const struct bpf_current_container *container)
 {
 	u64 allowed;
 
-	if (!msk || !bpf_token_current_container_member())
+	if (!msk || container->state != BPF_CURRENT_CONTAINER_MEMBER)
 		return 0;
 
 	switch (opt) {
@@ -956,8 +958,7 @@ static int bpf_check_container_delegate_mask(int opt, u64 msk)
 
 static bool bpf_mount_capable(void)
 {
-	return capable(CAP_SYS_ADMIN) ||
-	       bpf_token_current_container_capable(CAP_SYS_ADMIN);
+	return bpf_current_container_capable(CAP_SYS_ADMIN);
 }
 
 static int bpf_parse_param(struct fs_context *fc, struct fs_parameter *param)
@@ -1070,11 +1071,16 @@ static int bpf_parse_param(struct fs_context *fc, struct fs_parameter *param)
 			}
 		}
 
-		err = bpf_check_container_delegate_mask(opt, msk);
+		BPF_CURRENT_CONTAINER(container);
+
+		err = bpf_container_status(&container);
+		if (err)
+			return err;
+		err = bpf_check_container_delegate_mask(opt, msk, &container);
 		if (err)
 			return err;
 		/* Setting delegation mount options requires privileges */
-		if (msk && !bpf_mount_capable())
+		if (msk && !bpf_container_capable(&container, CAP_SYS_ADMIN))
 			return -EPERM;
 
 		*delegate_msk |= msk;

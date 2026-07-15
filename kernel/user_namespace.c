@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/export.h>
+#include <linux/auth_guard.h>
+#include <linux/err.h>
 #include <linux/nsproxy.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
@@ -86,11 +88,16 @@ static unsigned long enforced_nproc_rlimit(void)
  */
 int create_user_ns(struct cred *new)
 {
+	struct auth_guard_userns_boundary boundary;
 	struct user_namespace *ns, *parent_ns = new->user_ns;
 	kuid_t owner = new->euid;
 	kgid_t group = new->egid;
 	struct ucounts *ucounts;
 	int ret, i;
+
+	ret = -EACCES;
+	if (!auth_guard_current())
+		goto fail;
 
 	ret = -ENOSPC;
 	if (parent_ns->level > 32)
@@ -148,12 +155,15 @@ int create_user_ns(struct cred *new)
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_SIGPENDING, rlimit(RLIMIT_SIGPENDING));
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_MEMLOCK, rlimit(RLIMIT_MEMLOCK));
 	ns->ucounts = ucounts;
-	ns->syslog_ns = get_syslog_ns(current->nsproxy->syslog_ns);
+	ret = get_current_namespace_boundary(&boundary);
+	if (ret)
+		goto fail_common;
+	ns->syslog_ns = boundary.syslog_ns;
 #ifdef CONFIG_TRACING_NS
-	ns->tracing_ns = get_tracing_ns(current_tracing_ns());
+	ns->tracing_ns = boundary.tracing_ns;
 #endif
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-	ns->lsm_ns = get_lsm_ns(current_lsm_ns());
+	ns->lsm_ns = boundary.lsm_ns;
 #endif
 
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
@@ -168,6 +178,11 @@ int create_user_ns(struct cred *new)
 	ret = -ENOMEM;
 	if (!setup_userns_sysctls(ns))
 		goto fail_put_namespaces;
+	if (!auth_guard_userns_boundary_init(ns)) {
+		ret = -EACCES;
+		retire_userns_sysctls(ns);
+		goto fail_rejected_namespaces;
+	}
 
 	/*
 	 * When a new user namespace inherits a non-init syslog namespace from
@@ -188,6 +203,15 @@ int create_user_ns(struct cred *new)
 	ns_tree_add(ns);
 	return 0;
 
+fail_rejected_namespaces:
+	(void)xchg(&ns->syslog_ns, NULL);
+#ifdef CONFIG_TRACING_NS
+	(void)xchg(&ns->tracing_ns, NULL);
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	(void)xchg(&ns->lsm_ns, NULL);
+#endif
+	goto fail_common;
 fail_put_namespaces:
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	put_lsm_ns(ns->lsm_ns);
@@ -199,6 +223,7 @@ fail_put_namespaces:
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	key_put(ns->persistent_keyring_register);
 #endif
+fail_common:
 	ns_common_free(ns);
 fail_free:
 	kmem_cache_free(user_ns_cachep, ns);
@@ -220,7 +245,7 @@ int unshare_userns(unsigned long unshare_flags, struct cred **new_cred)
 	if (cred) {
 		err = create_user_ns(cred);
 		if (err)
-			put_cred(cred);
+			abort_creds(cred);
 		else
 			*new_cred = cred;
 	}
@@ -234,7 +259,12 @@ static void free_user_ns(struct work_struct *work)
 		container_of(work, struct user_namespace, work);
 
 	do {
+		struct auth_guard_userns_boundary boundary;
 		struct ucounts *ucounts = ns->ucounts;
+		bool exact = true;
+		bool trusted;
+		bool valid;
+
 		parent = ns->parent;
 		ns_tree_remove(ns);
 		if (ns->gid_map.nr_extents > UID_GID_MAP_MAX_BASE_EXTENTS) {
@@ -252,13 +282,26 @@ static void free_user_ns(struct work_struct *work)
 #if IS_ENABLED(CONFIG_BINFMT_MISC)
 		kfree(ns->binfmt_misc);
 #endif
-		put_syslog_ns(ns->syslog_ns);
+		auth_guard_userns_boundary_read(ns, &boundary);
+		valid = auth_guard_userns_boundary_destroy_begin(ns, &boundary);
+		exact &= xchg(&ns->syslog_ns, NULL) == boundary.syslog_ns;
 #ifdef CONFIG_TRACING_NS
-		put_tracing_ns(ns->tracing_ns);
+		exact &= xchg(&ns->tracing_ns, NULL) == boundary.tracing_ns;
 #endif
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-		put_lsm_ns(ns->lsm_ns);
+		exact &= xchg(&ns->lsm_ns, NULL) == boundary.lsm_ns;
 #endif
+		trusted = auth_guard_userns_boundary_destroy_complete(ns, valid,
+								      exact);
+		if (trusted) {
+			put_syslog_ns(boundary.syslog_ns);
+#ifdef CONFIG_TRACING_NS
+			put_tracing_ns(boundary.tracing_ns);
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+			put_lsm_ns(boundary.lsm_ns);
+#endif
+		}
 		retire_userns_sysctls(ns);
 		key_free_user_ns(ns);
 		fake_sysctl_bufs_free(ns);
@@ -1406,17 +1449,50 @@ bool in_userns(const struct user_namespace *ancestor,
 
 bool current_in_userns(const struct user_namespace *target_ns)
 {
-	return in_userns(target_ns, current_user_ns());
+	struct user_namespace *current_ns;
+	bool inside;
+
+	current_ns = get_current_user_ns_checked();
+	if (IS_ERR(current_ns))
+		return false;
+	inside = in_userns(target_ns, current_ns);
+	put_user_ns(current_ns);
+
+	return inside;
 }
 EXPORT_SYMBOL(current_in_userns);
 
+struct user_namespace *get_current_user_ns_checked_where(const char *where)
+{
+	struct user_namespace *user_ns = NULL;
+	const struct cred *cred;
+	enum auth_guard_check_result result;
+
+	result = auth_guard_task_snapshot_begin_where(current, where);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		return ERR_PTR(result == AUTH_GUARD_CHECK_BUSY ? -EAGAIN : -EACCES);
+
+	cred = current_cred();
+	user_ns = get_user_ns(READ_ONCE(cred->user_ns));
+	if (!auth_guard_task_snapshot_end_where(current, where)) {
+		put_user_ns(user_ns);
+		return ERR_PTR(-EACCES);
+	}
+
+	return user_ns ?: ERR_PTR(-EACCES);
+}
+EXPORT_SYMBOL_GPL(get_current_user_ns_checked_where);
+
 static struct ns_common *userns_get(struct task_struct *task)
 {
+	const struct cred *cred;
 	struct user_namespace *user_ns;
 
-	rcu_read_lock();
-	user_ns = get_user_ns(__task_cred(task)->user_ns);
-	rcu_read_unlock();
+	cred = get_task_cred_checked(task);
+	if (IS_ERR(cred))
+		return NULL;
+	user_ns = get_user_ns(cred->user_ns);
+	put_cred(cred);
 
 	return user_ns ? &user_ns->ns : NULL;
 }
@@ -1428,41 +1504,49 @@ static void userns_put(struct ns_common *ns)
 
 static bool ns_owner_boundary_visible(const struct user_namespace *owner)
 {
-	struct syslog_namespace *syslog_ns;
+	struct auth_guard_userns_boundary boundary;
+	struct auth_guard_userns_boundary current_boundary;
+	bool visible = false;
+
+	if (get_current_namespace_boundary(&current_boundary))
+		return false;
+
+	if (auth_guard_userns_boundary_snapshot_begin(owner) ==
+	    AUTH_GUARD_CHECK_VALID) {
+		auth_guard_userns_boundary_read(owner, &boundary);
+		visible = current_boundary.syslog_ns == &init_syslog_ns ||
+			boundary.syslog_ns == current_boundary.syslog_ns;
 #ifdef CONFIG_TRACING_NS
-	struct tracing_namespace *tracing_ns;
+		if (current_boundary.tracing_ns != &init_tracing_ns &&
+		    boundary.tracing_ns != current_boundary.tracing_ns)
+			visible = false;
 #endif
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-	struct lsm_namespace *lsm_ns;
+		if (current_boundary.lsm_ns != &init_lsm_ns &&
+		    boundary.lsm_ns != current_boundary.lsm_ns)
+			visible = false;
 #endif
+		visible = auth_guard_userns_boundary_snapshot_end(owner) &&
+			visible;
+	}
 
-	syslog_ns = current_syslog_ns();
-	if (syslog_ns && syslog_ns != &init_syslog_ns &&
-	    READ_ONCE(owner->syslog_ns) != syslog_ns)
-		return false;
-
-#ifdef CONFIG_TRACING_NS
-	tracing_ns = current_tracing_ns();
-	if (tracing_ns != &init_tracing_ns &&
-	    READ_ONCE(owner->tracing_ns) != tracing_ns)
-		return false;
-#endif
-
-#ifdef CONFIG_SECURITY_LSM_NAMESPACE
-	lsm_ns = current_lsm_ns();
-	if (lsm_ns != &init_lsm_ns &&
-	    READ_ONCE(owner->lsm_ns) != lsm_ns)
-		return false;
-#endif
-
-	return true;
+	put_namespace_boundary(&current_boundary);
+	return visible;
 }
 
 bool userns_current_boundary_can_see(const struct user_namespace *target_ns)
 {
+	struct user_namespace *current_ns;
+	bool inside;
+
 	if (!target_ns)
 		return false;
-	if (!in_userns(current_user_ns(), target_ns))
+	current_ns = get_current_user_ns_checked();
+	if (IS_ERR(current_ns))
+		return false;
+	inside = in_userns(current_ns, target_ns);
+	put_user_ns(current_ns);
+	if (!inside)
 		return false;
 
 	return ns_owner_boundary_visible(target_ns);
@@ -1479,6 +1563,8 @@ static int userns_install(struct nsset *nsset, struct ns_common *ns)
 	 */
 	if (user_ns == current_user_ns())
 		return -EINVAL;
+	if (!auth_guard_userns_boundary_check(user_ns))
+		return -EACCES;
 
 	/* Tasks that share a thread group must share a user namespace */
 	if (!thread_group_empty(current))

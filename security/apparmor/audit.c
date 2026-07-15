@@ -77,25 +77,32 @@ static const char *const aa_class_names[] = {
 };
 
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-static bool aa_guest_syslog_mirror_needed(const struct apparmor_audit_data *ad)
+static struct syslog_namespace *
+aa_guest_syslog_mirror_namespace(const struct apparmor_audit_data *ad)
 {
+	struct syslog_namespace *syslog_ns;
 	struct aa_ns *current_ns;
-	bool needed = false;
 
 	if (!ad->subj_label)
-		return false;
+		return NULL;
 
-	if (!lsm_ns_current_syslog_routes_lsm(LSM_ID_APPARMOR))
-		return false;
+	syslog_ns = lsm_ns_get_current_syslog_route_lsm(LSM_ID_APPARMOR);
+	if (!syslog_ns)
+		return NULL;
 
 	/* Keep guest mirroring scoped to the current AppArmor namespace. */
 	current_ns = aa_get_current_ns();
-	if (!current_ns)
-		return false;
+	if (!current_ns) {
+		put_syslog_ns(syslog_ns);
+		return NULL;
+	}
 
-	needed = labels_ns(ad->subj_label) == current_ns;
+	if (labels_ns(ad->subj_label) != current_ns) {
+		put_syslog_ns(syslog_ns);
+		syslog_ns = NULL;
+	}
 	aa_put_ns(current_ns);
-	return needed;
+	return syslog_ns;
 }
 
 static void aa_guest_syslog_mirror(struct apparmor_audit_data *ad)
@@ -112,7 +119,8 @@ static void aa_guest_syslog_mirror(struct apparmor_audit_data *ad)
 	char *label = NULL;
 	int len;
 
-	if (!aa_guest_syslog_mirror_needed(ad))
+	syslog_ns = aa_guest_syslog_mirror_namespace(ad);
+	if (!syslog_ns)
 		return;
 
 	if (ad->type >= 0 && ad->type < ARRAY_SIZE(aa_audit_type))
@@ -132,7 +140,6 @@ static void aa_guest_syslog_mirror(struct apparmor_audit_data *ad)
 		}
 	}
 
-	syslog_ns = current_syslog_ns();
 	get_task_comm(comm, current);
 	len = scnprintf(msg, sizeof(msg),
 			"AppArmor: %s operation=%s class=%s profile=%s",
@@ -147,6 +154,7 @@ static void aa_guest_syslog_mirror(struct apparmor_audit_data *ad)
 			 " error=%d info=%s",
 			 ad->error, info);
 	ns_printk(syslog_ns, KERN_WARNING "%s\n", msg);
+	put_syslog_ns(syslog_ns);
 	kfree(label);
 }
 #else

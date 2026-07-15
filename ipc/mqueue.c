@@ -29,6 +29,7 @@
 #include <linux/netlink.h>
 #include <linux/syscalls.h>
 #include <linux/audit.h>
+#include <linux/auth_guard.h>
 #include <linux/signal.h>
 #include <linux/mutex.h>
 #include <linux/nsproxy.h>
@@ -450,6 +451,9 @@ static void mqueue_fs_context_free(struct fs_context *fc)
 static int mqueue_init_fs_context(struct fs_context *fc)
 {
 	struct mqueue_fs_context *ctx;
+
+	if (!auth_guard_current())
+		return -EACCES;
 
 	ctx = kzalloc(sizeof(struct mqueue_fs_context), GFP_KERNEL);
 	if (!ctx)
@@ -896,12 +900,17 @@ static int prepare_open(struct dentry *dentry, int oflag, int ro,
 static int do_mq_open(const char __user *u_name, int oflag, umode_t mode,
 		      struct mq_attr *attr)
 {
-	struct vfsmount *mnt = current->nsproxy->ipc_ns->mq_mnt;
-	struct dentry *root = mnt->mnt_root;
+	struct vfsmount *mnt;
+	struct dentry *root;
 	struct filename *name;
 	struct path path;
 	int fd, error;
 	int ro;
+
+	if (!auth_guard_current())
+		return -EACCES;
+	mnt = current->nsproxy->ipc_ns->mq_mnt;
+	root = mnt->mnt_root;
 
 	audit_mq_open(oflag, mode, attr);
 
@@ -959,8 +968,13 @@ SYSCALL_DEFINE1(mq_unlink, const char __user *, u_name)
 	struct filename *name;
 	struct dentry *dentry;
 	struct inode *inode = NULL;
-	struct ipc_namespace *ipc_ns = current->nsproxy->ipc_ns;
-	struct vfsmount *mnt = ipc_ns->mq_mnt;
+	struct ipc_namespace *ipc_ns;
+	struct vfsmount *mnt;
+
+	if (!auth_guard_current())
+		return -EACCES;
+	ipc_ns = current->nsproxy->ipc_ns;
+	mnt = ipc_ns->mq_mnt;
 
 	name = getname(u_name);
 	if (IS_ERR(name))
@@ -1074,6 +1088,9 @@ static int do_mq_timedsend(mqd_t mqdes, const char __user *u_msg_ptr,
 	int ret = 0;
 	DEFINE_WAKE_Q(wake_q);
 
+	if (!auth_guard_current())
+		return -EACCES;
+
 	if (unlikely(msg_prio >= (unsigned long) MQ_PRIO_MAX))
 		return -EINVAL;
 
@@ -1096,6 +1113,10 @@ static int do_mq_timedsend(mqd_t mqdes, const char __user *u_msg_ptr,
 
 	if (unlikely(!(fd_file(f)->f_mode & FMODE_WRITE)))
 		return -EBADF;
+
+	ret = security_file_use(fd_file(f));
+	if (ret)
+		return ret;
 
 	ret = security_file_permission(fd_file(f), MAY_WRITE);
 	if (ret)
@@ -1181,6 +1202,9 @@ static int do_mq_timedreceive(mqd_t mqdes, char __user *u_msg_ptr,
 	ktime_t expires, *timeout = NULL;
 	struct posix_msg_tree_node *new_leaf = NULL;
 
+	if (!auth_guard_current())
+		return -EACCES;
+
 	if (ts) {
 		expires = timespec64_to_ktime(*ts);
 		timeout = &expires;
@@ -1200,6 +1224,10 @@ static int do_mq_timedreceive(mqd_t mqdes, char __user *u_msg_ptr,
 
 	if (unlikely(!(fd_file(f)->f_mode & FMODE_READ)))
 		return -EBADF;
+
+	ret = security_file_use(fd_file(f));
+	if (ret)
+		return ret;
 
 	ret = security_file_permission(fd_file(f), MAY_READ);
 	if (ret)
@@ -1305,6 +1333,9 @@ static int do_mq_notify(mqd_t mqdes, const struct sigevent *notification)
 	struct mqueue_inode_info *info;
 	struct sk_buff *nc;
 
+	if (!auth_guard_current())
+		return -EACCES;
+
 	audit_mq_notify(mqdes, notification);
 
 	nc = NULL;
@@ -1363,6 +1394,10 @@ retry:
 		ret = -EBADF;
 		goto out;
 	}
+
+	ret = security_file_use(fd_file(f));
+	if (ret)
+		goto out;
 
 	ret = security_file_permission(fd_file(f), MAY_WRITE);
 	if (ret)
@@ -1430,6 +1465,9 @@ static int do_mq_getsetattr(int mqdes, struct mq_attr *new, struct mq_attr *old)
 	int mask = 0;
 	int ret;
 
+	if (!auth_guard_current())
+		return -EACCES;
+
 	if (new && (new->mq_flags & (~O_NONBLOCK)))
 		return -EINVAL;
 
@@ -1445,6 +1483,10 @@ static int do_mq_getsetattr(int mqdes, struct mq_attr *new, struct mq_attr *old)
 	if (new)
 		mask |= MAY_WRITE;
 	if (mask) {
+		ret = security_file_use(fd_file(f));
+		if (ret)
+			return ret;
+
 		ret = security_file_permission(fd_file(f), mask);
 		if (ret)
 			return ret;

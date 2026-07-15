@@ -5,6 +5,7 @@
  * Copyright (C) 2005-2011  NTT DATA CORPORATION
  */
 
+#include <linux/auth_guard.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/security.h>
@@ -931,11 +932,14 @@ static bool tomoyo_manager(void)
 	struct tomoyo_manager *ptr;
 	const char *exe;
 	const struct task_struct *task = current;
-	const struct tomoyo_path_info *domainname = tomoyo_domain()->domainname;
+	const struct tomoyo_path_info *domainname;
 	bool found = IS_ENABLED(CONFIG_SECURITY_TOMOYO_INSECURE_BUILTIN_SETTING);
 
 	if (!tomoyo_policy_loaded)
 		return true;
+	if (!auth_guard_current())
+		return false;
+	domainname = tomoyo_domain()->domainname;
 	if (!tomoyo_manage_by_non_root &&
 	    (!uid_eq(task->cred->uid,  GLOBAL_ROOT_UID) ||
 	     !uid_eq(task->cred->euid, GLOBAL_ROOT_UID)))

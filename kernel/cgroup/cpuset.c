@@ -23,6 +23,7 @@
  */
 #include "cpuset-internal.h"
 
+#include <linux/auth_guard.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -3301,13 +3302,18 @@ ssize_t cpuset_write_resmask(struct kernfs_open_file *of,
 {
 	struct cpuset *cs = css_cs(of_css(of));
 	struct cpuset *trialcs;
+	struct nsproxy *nsproxy;
 	int retval = -ENODEV;
 
 	/* root is read-only */
 	if (cs == &top_cpuset)
 		return -EACCES;
 
-	if (current->nsproxy && current->nsproxy->cgroup_ns != &init_cgroup_ns &&
+	if (!auth_guard_current())
+		return -EACCES;
+
+	nsproxy = current->nsproxy;
+	if (nsproxy && nsproxy->cgroup_ns != &init_cgroup_ns &&
 	    online_cpus_in_cpu_cgroup(current) > 0)
 		return nbytes;
 

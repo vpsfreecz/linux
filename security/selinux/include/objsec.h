@@ -17,6 +17,7 @@
 #ifndef _SELINUX_OBJSEC_H_
 #define _SELINUX_OBJSEC_H_
 
+#include <linux/auth_guard_types.h>
 #include <linux/list.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
@@ -55,6 +56,9 @@ struct cred_security_struct {
 	u32 pending_outer_sid; /* host SID to activate on managed payload exec */
 	struct selinux_state *pending_outer_state; /* host state for pending SID */
 	bool pending_outer_active; /* pending_outer_* is valid */
+#ifdef CONFIG_SELINUX_CRED_GUARD
+	struct auth_guard_stamp guard;
+#endif
 } __randomize_layout;
 
 struct task_security_struct {
@@ -212,22 +216,62 @@ struct perf_event_security_struct {
 };
 
 extern struct lsm_blob_sizes selinux_blob_sizes;
+
+#ifdef CONFIG_SELINUX_CRED_GUARD
+bool selinux_cred_guard_check_where(const struct cred *cred,
+				    const char *where);
+#else
+static inline bool selinux_cred_guard_check_where(const struct cred *cred,
+						  const char *where)
+{
+	return cred;
+}
+#endif
+
 static inline struct cred_security_struct *selinux_cred(const struct cred *cred)
 {
 	return cred->security + selinux_blob_sizes.lbs_cred;
 }
 
-static inline struct selinux_state *cred_selinux_state(const struct cred *cred)
-{
-	struct selinux_state *state = selinux_cred(cred)->state;
+struct selinux_cred_view {
+	const struct cred *cred;
+	const struct cred_security_struct *security;
+	struct selinux_state *state;
+};
 
-	return state ?: &selinux_state;
+static inline void selinux_cred_view_init(const struct cred *cred,
+					  struct selinux_cred_view *view)
+{
+	view->cred = cred;
+	view->security = selinux_cred(cred);
+	view->state = view->security->state ?: &selinux_state;
 }
 
-static inline struct selinux_state *current_selinux_state(void)
+static inline bool selinux_cred_view_get_where(const struct cred *cred,
+					       struct selinux_cred_view *view,
+					       const char *where)
 {
-	return cred_selinux_state(current_cred());
+	if (!view || !selinux_cred_guard_check_where(cred, where))
+		return false;
+
+	selinux_cred_view_init(cred, view);
+	return true;
 }
+
+#define selinux_cred_view_get(_cred, _view) \
+	selinux_cred_view_get_where((_cred), (_view), __func__)
+
+static inline const struct cred_security_struct *
+selinux_cred_checked_where(const struct cred *cred, const char *where)
+{
+	if (!selinux_cred_guard_check_where(cred, where))
+		BUG();
+
+	return selinux_cred(cred);
+}
+
+#define selinux_cred_checked(_cred) \
+	selinux_cred_checked_where((_cred), __func__)
 
 static inline struct task_security_struct *
 selinux_task(const struct task_struct *task)
@@ -265,9 +309,7 @@ selinux_ipc(const struct kern_ipc_perm *ipc)
  */
 static inline u32 current_sid(void)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
-
-	return crsec->sid;
+	return selinux_cred_checked(current_cred())->sid;
 }
 
 static inline struct superblock_security_struct *

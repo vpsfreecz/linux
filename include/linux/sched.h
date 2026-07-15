@@ -16,6 +16,7 @@
 #include <linux/cpumask_types.h>
 
 #include <linux/cache.h>
+#include <linux/auth_guard_types.h>
 #include <linux/irqflags_types.h>
 #include <linux/smp_types.h>
 #include <linux/pid_types.h>
@@ -1165,6 +1166,11 @@ struct task_struct {
 	/* Effective (overridable) subjective task credentials (COW): */
 	const struct cred __rcu		*cred;
 
+#ifdef CONFIG_CRED_GUARD
+	struct auth_guard_stamp		cred_guard_stamp;
+	struct auth_guard_transition_state auth_guard_transition;
+#endif
+
 #ifdef CONFIG_KEYS
 	/* Cached requested key. */
 	struct key			*cached_requested_key;
@@ -1228,6 +1234,11 @@ struct task_struct {
 #endif
 	struct seccomp			seccomp;
 	struct syscall_user_dispatch	syscall_dispatch;
+
+#ifdef CONFIG_AUTH_GUARD
+	struct auth_guard_stamp		auth_guard_stamp;
+	u32				auth_guard_lifecycle;
+#endif
 
 	/* Thread group tracking: */
 	u64				parent_exec_id;
@@ -1620,11 +1631,13 @@ struct task_struct {
 
 	bool				syslog_ns_for_child;
 	char				*syslog_ns_for_child_name;
+	size_t				syslog_ns_for_child_name_len;
 	bool				tracing_ns_for_child;
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	bool				lsm_ns_for_child;
 	u64				lsm_ns_for_child_lsmid;
 	struct lsm_ctx			*lsm_ns_for_child_ctx;
+	size_t				lsm_ns_for_child_ctx_len;
 #endif
 
 #ifdef CONFIG_KSTACK_ERASE

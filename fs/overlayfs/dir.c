@@ -575,44 +575,50 @@ out_cleanup_unlocked:
 	goto out_dput;
 }
 
-static const struct cred *ovl_setup_cred_for_create(struct dentry *dentry,
-						    struct inode *inode,
-						    umode_t mode,
-						    const struct cred *old_cred)
+static int ovl_setup_cred_for_create(struct dentry *dentry,
+				     struct inode *inode, umode_t mode,
+				     const struct cred *old_cred)
 {
+	const struct cred *saved_cred;
 	int err;
 	struct cred *override_cred;
 
 	override_cred = prepare_creds();
 	if (!override_cred)
-		return ERR_PTR(-ENOMEM);
+		return -ENOMEM;
 
 	override_cred->fsuid = inode->i_uid;
 	override_cred->fsgid = inode->i_gid;
 	err = security_dentry_create_files_as(dentry, mode, &dentry->d_name,
 					      old_cred, override_cred);
 	if (err) {
-		put_cred(override_cred);
-		return ERR_PTR(err);
+		abort_creds(override_cred);
+		return err;
 	}
 
 	/*
-	 * Caller is going to match this with revert_creds() and drop
-	 * referenec on the returned creds.
+	 * Caller is going to match this with revert_creds() and drop the
+	 * replaced subjective cred returned by revert_creds().
 	 * We must be called with creator creds already, otherwise we risk
 	 * leaking creds.
 	 */
-	old_cred = override_creds(override_cred);
-	WARN_ON_ONCE(old_cred != ovl_creds(dentry->d_sb));
+	saved_cred = override_creds_from_prepared(override_cred);
+	if (!saved_cred)
+		return -EACCES;
+	if (WARN_ON_ONCE(saved_cred != ovl_creds(dentry->d_sb))) {
+		put_cred(revert_creds(saved_cred));
+		return -EACCES;
+	}
+	put_cred(saved_cred);
 
-	return override_cred;
+	return 0;
 }
 
 static int ovl_create_or_link(struct dentry *dentry, struct inode *inode,
 			      struct ovl_cattr *attr, bool origin)
 {
 	int err;
-	const struct cred *old_cred, *new_cred = NULL;
+	const struct cred *old_cred;
 	struct dentry *parent = dentry->d_parent;
 
 	old_cred = ovl_override_creds(dentry->d_sb);
@@ -641,13 +647,10 @@ static int ovl_create_or_link(struct dentry *dentry, struct inode *inode,
 		 * create a new inode, so just use the ovl mounter's
 		 * fs{u,g}id.
 		 */
-		new_cred = ovl_setup_cred_for_create(dentry, inode, attr->mode,
-						     old_cred);
-		err = PTR_ERR(new_cred);
-		if (IS_ERR(new_cred)) {
-			new_cred = NULL;
+		err = ovl_setup_cred_for_create(dentry, inode, attr->mode,
+						old_cred);
+		if (err)
 			goto out_revert_creds;
-		}
 	}
 
 	if (!ovl_dentry_is_whiteout(dentry))
@@ -657,7 +660,6 @@ static int ovl_create_or_link(struct dentry *dentry, struct inode *inode,
 
 out_revert_creds:
 	ovl_revert_creds(old_cred);
-	put_cred(new_cred);
 	return err;
 }
 
@@ -1337,7 +1339,7 @@ out_unlock:
 static int ovl_create_tmpfile(struct file *file, struct dentry *dentry,
 			      struct inode *inode, umode_t mode)
 {
-	const struct cred *old_cred, *new_cred = NULL;
+	const struct cred *old_cred;
 	struct path realparentpath;
 	struct file *realfile;
 	struct ovl_file *of;
@@ -1347,12 +1349,9 @@ static int ovl_create_tmpfile(struct file *file, struct dentry *dentry,
 	int err;
 
 	old_cred = ovl_override_creds(dentry->d_sb);
-	new_cred = ovl_setup_cred_for_create(dentry, inode, mode, old_cred);
-	err = PTR_ERR(new_cred);
-	if (IS_ERR(new_cred)) {
-		new_cred = NULL;
+	err = ovl_setup_cred_for_create(dentry, inode, mode, old_cred);
+	if (err)
 		goto out_revert_creds;
-	}
 
 	ovl_path_upper(dentry->d_parent, &realparentpath);
 	realfile = backing_tmpfile_open(&file->f_path, flags, &realparentpath,
@@ -1380,7 +1379,6 @@ static int ovl_create_tmpfile(struct file *file, struct dentry *dentry,
 	}
 out_revert_creds:
 	ovl_revert_creds(old_cred);
-	put_cred(new_cred);
 	return err;
 }
 

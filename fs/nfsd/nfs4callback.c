@@ -35,6 +35,7 @@
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/xprt.h>
 #include <linux/sunrpc/svc_xprt.h>
+#include <linux/cred.h>
 #include <linux/slab.h>
 #include "nfsd.h"
 #include "state.h"
@@ -1134,6 +1135,9 @@ static const struct cred *get_backchannel_cred(struct nfs4_client *clp, struct r
 
 		kcred->fsuid = ses->se_cb_sec.uid;
 		kcred->fsgid = ses->se_cb_sec.gid;
+		if (commit_prepared_cred(kcred) < 0)
+			return NULL;
+
 		return kcred;
 	}
 }

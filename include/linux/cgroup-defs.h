@@ -8,6 +8,7 @@
 #ifndef _LINUX_CGROUP_DEFS_H
 #define _LINUX_CGROUP_DEFS_H
 
+#include <linux/auth_guard_types.h>
 #include <linux/limits.h>
 #include <linux/list.h>
 #include <linux/idr.h>
@@ -354,6 +355,10 @@ struct css_set {
 
 	/* dead and being drained, ignore for migration */
 	bool dead;
+
+#ifdef CONFIG_AUTH_GUARD
+	struct auth_guard_stamp auth_guard_stamp;
+#endif
 
 	/* For RCU-protected deletion */
 	struct rcu_head rcu_head;
@@ -788,7 +793,7 @@ struct cgroup_subsys {
 	void (*cancel_fork)(struct task_struct *task, struct css_set *cset);
 	void (*fork)(struct task_struct *task);
 	void (*exit)(struct task_struct *task);
-	void (*release)(struct task_struct *task);
+	void (*release)(struct task_struct *task, struct css_set *cset);
 	void (*bind)(struct cgroup_subsys_state *root_css);
 
 	bool early_init:1;

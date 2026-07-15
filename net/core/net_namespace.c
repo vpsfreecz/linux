@@ -2,6 +2,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/workqueue.h>
+#include <linux/auth_guard.h>
 #include <linux/rtnetlink.h>
 #include <linux/cache.h>
 #include <linux/slab.h>
@@ -787,22 +788,29 @@ EXPORT_SYMBOL_GPL(get_net_ns_by_fd);
 
 struct net *get_net_ns_by_pid(pid_t pid)
 {
+	struct task_nsproxy_snapshot snapshot;
 	struct task_struct *tsk;
 	struct net *net;
+	int ret;
 
 	/* Lookup the network namespace */
-	net = ERR_PTR(-ESRCH);
 	rcu_read_lock();
 	tsk = find_task_by_vpid(pid);
-	if (tsk) {
-		struct nsproxy *nsproxy;
-		task_lock(tsk);
-		nsproxy = tsk->nsproxy;
-		if (nsproxy)
-			net = get_net(nsproxy->net_ns);
-		task_unlock(tsk);
+	if (!tsk) {
+		rcu_read_unlock();
+		return ERR_PTR(-ESRCH);
 	}
+	ret = task_nsproxy_snapshot_get(tsk, &snapshot);
 	rcu_read_unlock();
+	if (ret)
+		return ERR_PTR(ret);
+
+	net = get_net(READ_ONCE(snapshot.nsproxy->net_ns));
+	if (!task_nsproxy_snapshot_put(&snapshot)) {
+		put_net(net);
+		return ERR_PTR(-EACCES);
+	}
+
 	return net;
 }
 EXPORT_SYMBOL_GPL(get_net_ns_by_pid);
@@ -1509,19 +1517,8 @@ void unregister_pernet_device(struct pernet_operations *ops)
 EXPORT_SYMBOL_GPL(unregister_pernet_device);
 
 #ifdef CONFIG_NET_NS
-static struct ns_common *netns_get(struct task_struct *task)
-{
-	struct net *net = NULL;
-	struct nsproxy *nsproxy;
-
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy)
-		net = get_net(nsproxy->net_ns);
-	task_unlock(task);
-
-	return net ? &net->ns : NULL;
-}
+DEFINE_TASK_NSPROXY_MEMBER_GETTER(netns_get, struct net, net_ns,
+				  get_net, put_net)
 
 static void netns_put(struct ns_common *ns)
 {
@@ -1537,9 +1534,8 @@ static int netns_install(struct nsset *nsset, struct ns_common *ns)
 	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	put_net(nsproxy->net_ns);
-	nsproxy->net_ns = get_net(net);
-	return 0;
+	return auth_guard_nsproxy_install_owned(nsproxy, net_ns, net,
+						get_net, put_net);
 }
 
 static struct user_namespace *netns_owner(struct ns_common *ns)

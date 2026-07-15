@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/cpu.h>
+#include <linux/cred.h>
 #include <linux/smp.h>
 #include <linux/idr.h>
 #include <linux/file.h>
@@ -92,27 +93,24 @@ static bool perf_event_container_current_ok(const struct perf_event *event)
 	       bpf_token_task_match(event->token, current);
 }
 
+static bool
+perf_event_container_allowed(const struct perf_event *event,
+			     const struct bpf_current_container *container)
+{
+	return bpf_container_token_allowed(container, event->token);
+}
+
 static bool perf_event_current_container_allowed(const struct perf_event *event)
 {
-	if (!bpf_token_current_container_member())
-		return true;
+	BPF_CURRENT_CONTAINER(container);
 
-	return perf_event_token_is_container(event) &&
-	       bpf_token_task_match(event->token, current);
+	return perf_event_container_allowed(event, &container);
 }
 
 static bool perf_event_container_same_domain(const struct perf_event *event,
 					 const struct bpf_prog *prog)
 {
-	bool event_container = perf_event_token_is_container(event);
-	bool prog_container = bpf_token_is_container(prog->aux->token);
-
-	if (!event_container && !prog_container)
-		return true;
-	if (!event_container || !prog_container)
-		return false;
-
-	return bpf_token_same_container_domain(event->token, prog->aux->token);
+	return bpf_token_same_owner_domain(event->token, prog->aux->token);
 }
 
 static bool perf_event_container_bpf_output(const struct perf_event *event)
@@ -220,6 +218,13 @@ static bool perf_event_token_is_container(const struct perf_event *event)
 }
 
 static bool perf_event_container_current_ok(const struct perf_event *event)
+{
+	return true;
+}
+
+static bool
+perf_event_container_allowed(const struct perf_event *event,
+			     const struct bpf_current_container *container)
 {
 	return true;
 }
@@ -13103,7 +13108,8 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 		 struct perf_event *group_leader,
 		 struct perf_event *parent_event,
 		 perf_overflow_handler_t overflow_handler,
-		 void *context, int cgroup_fd)
+		 void *context, int cgroup_fd,
+		 const struct bpf_current_container *container)
 {
 	struct pmu *pmu;
 	struct hw_perf_event *hwc;
@@ -13178,7 +13184,12 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 		if (event->container_kprobe_btf)
 			btf_get(event->container_kprobe_btf);
 	} else if (sysctl_bpf_container_tracing_enabled) {
-		struct bpf_token *token = bpf_token_get_current_container();
+		struct bpf_token *token;
+
+		if (container)
+			token = bpf_token_get_for_container(container);
+		else
+			token = bpf_token_get_current_container();
 
 		if (IS_ERR(token))
 			return ERR_PTR(PTR_ERR(token));
@@ -13625,13 +13636,16 @@ perf_check_permission(struct perf_event_attr *attr, struct task_struct *task)
 	bool is_capable = perfmon_capable();
 
 	if (attr->sigtrap) {
+		const struct cred *task_cred __free(put_cred) =
+			get_task_cred_checked_nowait(task);
+
 		/*
 		 * perf_event_attr::sigtrap sends signals to the other task.
 		 * Require the current task to also have CAP_KILL.
 		 */
-		rcu_read_lock();
-		is_capable &= ns_capable(__task_cred(task)->user_ns, CAP_KILL);
-		rcu_read_unlock();
+		if (IS_ERR(task_cred))
+			return false;
+		is_capable &= ns_capable(task_cred->user_ns, CAP_KILL);
 
 		/*
 		 * If the required capabilities aren't available, checks for
@@ -13670,6 +13684,7 @@ SYSCALL_DEFINE5(perf_event_open,
 	struct file *event_file = NULL;
 	struct task_struct *task = NULL;
 	struct pmu *pmu;
+	bool container_perfmon_capable;
 	int event_fd;
 	int move_group = 0;
 	int err;
@@ -13689,11 +13704,18 @@ SYSCALL_DEFINE5(perf_event_open,
 	if (err)
 		return err;
 
+	BPF_CURRENT_CONTAINER(container);
+	err = bpf_container_status(&container);
+	if (err)
+		return err;
+	container_perfmon_capable =
+		bpf_container_capable(&container, CAP_PERFMON);
+
 	if (!attr.exclude_kernel) {
 		err = perf_allow_kernel();
 		if (err) {
 			if (!(sysctl_bpf_container_tracing_enabled &&
-			      bpf_token_current_container_capable(CAP_PERFMON)))
+			      container_perfmon_capable))
 				return err;
 		}
 	}
@@ -13735,11 +13757,11 @@ SYSCALL_DEFINE5(perf_event_open,
 		return -EINVAL;
 	if ((flags & PERF_FLAG_PID_CGROUP) &&
 	    sysctl_bpf_container_tracing_enabled &&
-	    bpf_token_current_container_capable(CAP_PERFMON))
+	    container_perfmon_capable)
 		return -EACCES;
 	if (attr.sigtrap &&
 	    sysctl_bpf_container_tracing_enabled &&
-	    bpf_token_current_container_capable(CAP_PERFMON))
+	    container_perfmon_capable)
 		return -EACCES;
 
 	if (flags & PERF_FLAG_FD_CLOEXEC)
@@ -13765,7 +13787,7 @@ SYSCALL_DEFINE5(perf_event_open,
 			err = -ENODEV;
 			goto err_fd;
 		}
-		if (!perf_event_current_container_allowed(group_leader)) {
+		if (!perf_event_container_allowed(group_leader, &container)) {
 			err = -EACCES;
 			goto err_fd;
 		}
@@ -13793,14 +13815,18 @@ SYSCALL_DEFINE5(perf_event_open,
 		cgroup_fd = pid;
 
 	event = perf_event_alloc(&attr, cpu, task, group_leader, NULL,
-				 NULL, NULL, cgroup_fd);
+				 NULL, NULL, cgroup_fd, &container);
 	if (IS_ERR(event)) {
 		err = PTR_ERR(event);
 		goto err_task;
 	}
 
+	if (!perf_event_container_allowed(event, &container)) {
+		err = -EACCES;
+		goto err_alloc;
+	}
 	if (task && perf_event_token_is_container(event) &&
-	    !bpf_token_current_container_task_allowed(task)) {
+	    !bpf_container_task_allowed(&container, task)) {
 		err = -EACCES;
 		goto err_alloc;
 	}
@@ -14120,7 +14146,7 @@ perf_event_create_kernel_counter(struct perf_event_attr *attr, int cpu,
 	guard(srcu)(&pmus_srcu);
 
 	event = perf_event_alloc(attr, cpu, task, NULL, NULL,
-				 overflow_handler, context, -1);
+				 overflow_handler, context, -1, NULL);
 	if (IS_ERR(event)) {
 		err = PTR_ERR(event);
 		goto err;
@@ -14639,10 +14665,10 @@ inherit_event(struct perf_event *parent_event,
 	guard(srcu)(&pmus_srcu);
 
 	child_event = perf_event_alloc(&parent_event->attr,
-					   parent_event->cpu,
-					   child,
-					   group_leader, parent_event,
-					   NULL, NULL, -1);
+				   parent_event->cpu,
+				   child,
+				   group_leader, parent_event,
+				   NULL, NULL, -1, NULL);
 	if (IS_ERR(child_event))
 		return child_event;
 

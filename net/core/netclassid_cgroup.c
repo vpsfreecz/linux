@@ -6,6 +6,7 @@
  */
 
 #include <linux/slab.h>
+#include <linux/auth_guard.h>
 #include <linux/cgroup.h>
 #include <linux/fdtable.h>
 #include <linux/sched/task.h>
@@ -88,6 +89,7 @@ static void update_classid_task(struct task_struct *p, u32 classid)
 		.classid = classid,
 		.batch = UPDATE_CLASSID_BATCH
 	};
+	enum auth_guard_check_result guard_result;
 	unsigned int fd = 0;
 
 	/* Only update the leader task, when many threads in this task,
@@ -97,7 +99,11 @@ static void update_classid_task(struct task_struct *p, u32 classid)
 		return;
 
 	do {
-		task_lock(p);
+		guard_result = cgroup_task_lock_auth_guard_wait(p);
+		if (guard_result != AUTH_GUARD_CHECK_VALID) {
+			task_unlock(p);
+			return;
+		}
 		fd = iterate_fd(p->files, fd, update_classid_sock, &ctx);
 		task_unlock(p);
 		cond_resched();

@@ -4,6 +4,7 @@
 
 #include <linux/capability.h>
 #include <linux/audit.h>
+#include <linux/cred.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/lsm_hooks.h>
@@ -19,6 +20,7 @@
 #include <linux/hugetlb.h>
 #include <linux/mount.h>
 #include <linux/sched.h>
+#include <linux/security.h>
 #include <linux/prctl.h>
 #include <linux/securebits.h>
 #include <linux/user_namespace.h>
@@ -163,26 +165,23 @@ int cap_settime(const struct timespec64 *ts, const struct timezone *tz)
  */
 int cap_ptrace_access_check(struct task_struct *child, unsigned int mode)
 {
-	int ret = 0;
-	const struct cred *cred, *child_cred;
+	const struct cred *cred = current_cred();
+	const struct cred *child_cred __free(put_cred) =
+		get_task_cred_checked_nowait(child);
 	const kernel_cap_t *caller_caps;
 
-	rcu_read_lock();
-	cred = current_cred();
-	child_cred = __task_cred(child);
+	if (IS_ERR(child_cred))
+		return PTR_ERR(child_cred);
 	if (mode & PTRACE_MODE_FSCREDS)
 		caller_caps = &cred->cap_effective;
 	else
 		caller_caps = &cred->cap_permitted;
 	if (cred->user_ns == child_cred->user_ns &&
 	    cap_issubset(child_cred->cap_permitted, *caller_caps))
-		goto out;
+		return 0;
 	if (ns_capable(child_cred->user_ns, CAP_SYS_PTRACE))
-		goto out;
-	ret = -EPERM;
-out:
-	rcu_read_unlock();
-	return ret;
+		return 0;
+	return -EPERM;
 }
 
 /**
@@ -200,21 +199,19 @@ out:
  */
 int cap_ptrace_traceme(struct task_struct *parent)
 {
-	int ret = 0;
-	const struct cred *cred, *child_cred;
+	const struct cred *cred __free(put_cred) =
+		get_task_cred_checked_nowait(parent);
+	const struct cred *child_cred = current_cred();
 
-	rcu_read_lock();
-	cred = __task_cred(parent);
-	child_cred = current_cred();
+	if (IS_ERR(cred))
+		return PTR_ERR(cred);
 	if (cred->user_ns == child_cred->user_ns &&
 	    cap_issubset(child_cred->cap_permitted, cred->cap_permitted))
-		goto out;
-	if (has_ns_capability(parent, child_cred->user_ns, CAP_SYS_PTRACE))
-		goto out;
-	ret = -EPERM;
-out:
-	rcu_read_unlock();
-	return ret;
+		return 0;
+	if (!security_capable(cred, child_cred->user_ns, CAP_SYS_PTRACE,
+			      CAP_OPT_NONE))
+		return 0;
+	return -EPERM;
 }
 
 /**
@@ -230,15 +227,15 @@ out:
 int cap_capget(const struct task_struct *target, kernel_cap_t *effective,
 	       kernel_cap_t *inheritable, kernel_cap_t *permitted)
 {
-	const struct cred *cred;
+	const struct cred *cred __free(put_cred) =
+		get_task_cred_checked((struct task_struct *)target);
 
 	/* Derived from kernel/capability.c:sys_capget. */
-	rcu_read_lock();
-	cred = __task_cred(target);
+	if (IS_ERR(cred))
+		return PTR_ERR(cred);
 	*effective   = cred->cap_effective;
 	*inheritable = cred->cap_inheritable;
 	*permitted   = cred->cap_permitted;
-	rcu_read_unlock();
 	return 0;
 }
 
@@ -1197,15 +1194,15 @@ int cap_task_fix_setuid(struct cred *new, const struct cred *old, int flags)
  */
 static int cap_safe_nice(struct task_struct *p)
 {
+	const struct cred *pcred __free(put_cred) = get_task_cred_checked(p);
 	int is_subset, ret = 0;
 
-	rcu_read_lock();
-	is_subset = cap_issubset(__task_cred(p)->cap_permitted,
+	if (IS_ERR(pcred))
+		return PTR_ERR(pcred);
+	is_subset = cap_issubset(pcred->cap_permitted,
 				 current_cred()->cap_permitted);
-	if (!is_subset && !ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
+	if (!is_subset && !ns_capable(pcred->user_ns, CAP_SYS_NICE))
 		ret = -EPERM;
-	rcu_read_unlock();
-
 	return ret;
 }
 

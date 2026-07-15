@@ -156,6 +156,76 @@ config KSTACK_ERASE_RUNTIME_DISABLE
 	  runtime to control kernel stack erasing for kernels built with
 	  CONFIG_KSTACK_ERASE.
 
+config AUTH_GUARD_CORE
+	bool
+	help
+	  Shared boot-random sealing helpers for authority guard users.
+
+config CRED_GUARD
+	bool "Seal committed task credentials"
+	depends on 64BIT
+	select AUTH_GUARD_CORE
+	help
+	  Seal committed task credentials and task credential attachments with
+	  boot-random SipHash keys. This detects direct modification of stable
+	  credential fields and simple task->cred/real_cred pointer swaps that
+	  bypass the normal credential copy-and-commit paths.
+
+	  Use auth_guard=off, auth_guard=log, or auth_guard=panic to choose the
+	  boot-time enforcement mode.
+
+	  This is a defense-in-depth check for post-corruption exploit chains,
+	  not a complete protection against an attacker with arbitrary kernel
+	  code execution.
+
+config SELINUX_CRED_GUARD
+	bool "Seal SELinux credential security state"
+	depends on SECURITY_SELINUX && CRED_GUARD
+	select AUTH_GUARD_CORE
+	help
+	  Seal the SELinux credential security blob with a boot-random SipHash
+	  key. This detects direct modification of SELinux SIDs, SID state
+	  pointers, and vpsAdminOS outer/pending host identity fields that
+	  bypasses the normal SELinux credential transition paths.
+	  CRED_GUARD supplies the prepared-credential provenance required to
+	  distinguish private mutable credentials from published credentials.
+
+	  Use auth_guard=off, auth_guard=log, or auth_guard=panic to choose the
+	  boot-time enforcement mode.
+
+	  This is a defense-in-depth check for post-corruption exploit chains,
+	  not a complete protection against an attacker with arbitrary kernel
+	  code execution.
+
+config AUTH_GUARD
+	bool "Seal task authority edges"
+	depends on CRED_GUARD && 64BIT
+	select AUTH_GUARD_CORE
+	help
+	  Seal task authority edges with a boot-random SipHash key. This
+	  detects direct task swaps of credential attachments, namespace proxy,
+	  cgroup css_set, seccomp state, and file table pointers that bypass
+	  the normal transition paths.
+
+	  Use auth_guard=off, auth_guard=log, or auth_guard=panic to choose the
+	  boot-time enforcement mode.
+
+	  This is a defense-in-depth check for post-corruption exploit chains,
+	  not a complete protection against an attacker with arbitrary kernel
+	  code execution.
+
+config AUTH_GUARD_TEST
+	bool "Authority guard corruption test hooks"
+	depends on AUTH_GUARD && SELINUX_CRED_GUARD && DEBUG_FS
+	help
+	  Build debugfs-only corruption hooks for extended vpsAdminOS
+	  authority guard validation. The hooks deliberately mutate guarded state,
+	  or inject an equivalent one-shot local check fault when live kernel state
+	  cannot safely be invalidated. They force the guard check, then restore and
+	  reseal any changed state when auth_guard=log lets execution continue.
+
+	  Do not enable this option in production kernels.
+
 config INIT_ON_ALLOC_DEFAULT_ON
 	bool "Enable heap memory zeroing on allocation by default"
 	depends on !KMSAN

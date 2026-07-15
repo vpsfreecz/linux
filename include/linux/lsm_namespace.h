@@ -2,6 +2,8 @@
 #ifndef _LINUX_LSM_NAMESPACE_H
 #define _LINUX_LSM_NAMESPACE_H
 
+#include <linux/auth_guard_types.h>
+#include <linux/cleanup.h>
 #include <linux/err.h>
 #include <linux/types.h>
 #include <linux/ns_common.h>
@@ -39,10 +41,19 @@ extern struct lsm_namespace init_lsm_ns;
 extern const struct proc_ns_operations lsmns_operations;
 
 struct lsm_namespace *current_lsm_ns(void);
+struct lsm_namespace *get_current_lsm_ns_checked_where(const char *where);
+struct lsm_namespace *
+get_lsm_ns_from_userns_checked_where(const struct user_namespace *user_ns,
+				     const char *where);
 struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns,
 				  struct task_struct *task, struct cred *new_cred,
 				  const struct lsm_ctx *ctx,
 				  struct lsm_namespace *old_ns);
+enum auth_guard_mutation_result
+lsm_ns_replace_userns_default_where(struct user_namespace *user_ns,
+				    struct lsm_namespace *old_ns,
+				    struct lsm_namespace *new_ns,
+				    const char *where);
 int setup_lsm_namespace(struct lsm_namespace *ns, struct task_struct *task,
 			struct cred *new_cred, const struct lsm_ctx *ctx);
 void free_lsm_ns(struct lsm_namespace *ns);
@@ -53,29 +64,37 @@ int register_lsm_namespace_backend(const struct lsm_namespace_backend *backend);
 int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx);
 int lsm_ns_install_userns(struct user_namespace *user_ns,
 			  struct task_struct *task, struct cred *new_cred);
-void lsm_ns_clear_pending_child_request(struct task_struct *task);
+int lsm_ns_clear_pending_child_request(struct task_struct *task);
+enum auth_guard_mutation_result
+lsm_ns_clear_pending_child_request_in_transition_where(
+	struct task_struct *task, struct auth_guard_task_lsm_request *saved,
+	const char *where);
+void lsm_ns_release_pending_child_request(struct auth_guard_task_lsm_request *saved);
 bool lsm_ns_visible_lsmid(u64 lsmid);
-bool lsm_ns_current_syslog_routes_lsm(u64 lsmid);
+struct syslog_namespace *lsm_ns_get_current_syslog_route_lsm(u64 lsmid);
 
 static inline struct lsm_namespace *to_lsm_ns(struct ns_common *ns)
 {
 	return container_of(ns, struct lsm_namespace, ns);
 }
 
-static inline struct lsm_namespace *get_lsm_ns(struct lsm_namespace *ns)
-{
-	if (ns)
-		refcount_inc(&ns->ns.__ns_ref);
-	return ns;
-}
-
-static inline void put_lsm_ns(struct lsm_namespace *ns)
-{
-	if (ns && refcount_dec_and_test(&ns->ns.__ns_ref))
-		free_lsm_ns(ns);
-}
+DEFINE_NS_COMMON_REF_HELPERS(struct lsm_namespace, get_lsm_ns,
+			     put_lsm_ns, free_lsm_ns)
 #else
 static inline struct lsm_namespace *current_lsm_ns(void)
+{
+	return NULL;
+}
+
+static inline struct lsm_namespace *
+get_current_lsm_ns_checked_where(const char *where)
+{
+	return NULL;
+}
+
+static inline struct lsm_namespace *
+get_lsm_ns_from_userns_checked_where(const struct user_namespace *user_ns,
+				     const char *where)
 {
 	return NULL;
 }
@@ -88,6 +107,15 @@ static inline struct lsm_namespace *copy_lsm_ns(bool new_child,
 						struct lsm_namespace *old_ns)
 {
 	return NULL;
+}
+
+static inline enum auth_guard_mutation_result
+lsm_ns_replace_userns_default_where(struct user_namespace *user_ns,
+				    struct lsm_namespace *old_ns,
+				    struct lsm_namespace *new_ns,
+				    const char *where)
+{
+	return AUTH_GUARD_MUTATION_APPLIED;
 }
 
 static inline int setup_lsm_namespace(struct lsm_namespace *ns,
@@ -131,7 +159,25 @@ static inline int lsm_ns_install_userns(struct user_namespace *user_ns,
 	return 0;
 }
 
-static inline void lsm_ns_clear_pending_child_request(struct task_struct *task)
+static inline int lsm_ns_clear_pending_child_request(struct task_struct *task)
+{
+	return 0;
+}
+
+static inline enum auth_guard_mutation_result
+lsm_ns_clear_pending_child_request_in_transition_where(
+	struct task_struct *task, struct auth_guard_task_lsm_request *saved,
+	const char *where)
+{
+	if (saved)
+		*saved = (struct auth_guard_task_lsm_request) {
+			.lsmid = LSM_ID_UNDEF,
+		};
+	return AUTH_GUARD_MUTATION_APPLIED;
+}
+
+static inline void
+lsm_ns_release_pending_child_request(struct auth_guard_task_lsm_request *saved)
 {
 }
 
@@ -140,9 +186,10 @@ static inline bool lsm_ns_visible_lsmid(u64 lsmid)
 	return true;
 }
 
-static inline bool lsm_ns_current_syslog_routes_lsm(u64 lsmid)
+static inline struct syslog_namespace *
+lsm_ns_get_current_syslog_route_lsm(u64 lsmid)
 {
-	return false;
+	return NULL;
 }
 
 static inline struct lsm_namespace *to_lsm_ns(struct ns_common *ns)
@@ -159,5 +206,18 @@ static inline void put_lsm_ns(struct lsm_namespace *ns)
 {
 }
 #endif /* CONFIG_SECURITY_LSM_NAMESPACE */
+
+DEFINE_NS_COMMON_PUT_CLEANUP(lsm_namespace, put_lsm_ns)
+
+#define get_current_lsm_ns_checked() \
+	get_current_lsm_ns_checked_where(__func__)
+#define get_lsm_ns_from_userns_checked(_user_ns) \
+	get_lsm_ns_from_userns_checked_where((_user_ns), __func__)
+#define lsm_ns_replace_userns_default(_user_ns, _old_ns, _new_ns) \
+	lsm_ns_replace_userns_default_where((_user_ns), (_old_ns),     \
+					      (_new_ns), __func__)
+#define lsm_ns_clear_pending_child_request_in_transition(_task, _saved) \
+	lsm_ns_clear_pending_child_request_in_transition_where(           \
+		(_task), (_saved), __func__)
 
 #endif /* _LINUX_LSM_NAMESPACE_H */

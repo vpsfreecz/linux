@@ -31,6 +31,7 @@
 #include <linux/static_call.h>
 #include <linux/memcontrol.h>
 #include <linux/cfi.h>
+#include <linux/cleanup.h>
 #include <asm/rqspinlock.h>
 
 struct bpf_verifier_env;
@@ -2425,6 +2426,32 @@ bpf_prog_run_array_uprobe(const struct bpf_prog_array *array,
 bool bpf_jit_bypass_spec_v1(void);
 bool bpf_jit_bypass_spec_v4(void);
 
+enum bpf_current_container_state {
+	BPF_CURRENT_CONTAINER_INVALID,
+	BPF_CURRENT_CONTAINER_HOST,
+	BPF_CURRENT_CONTAINER_MEMBER,
+};
+
+struct bpf_current_container {
+	struct tracing_namespace *tracing_ns;
+	enum bpf_current_container_state state;
+	int error;
+};
+
+/* INVALID is restricted, never an authenticated host caller. */
+static inline bool
+bpf_container_restricted(const struct bpf_current_container *container)
+{
+	return container->state != BPF_CURRENT_CONTAINER_HOST;
+}
+
+static inline int
+bpf_container_status(const struct bpf_current_container *container)
+{
+	return container->state == BPF_CURRENT_CONTAINER_INVALID ?
+		(container->error ?: -EACCES) : 0;
+}
+
 #ifdef CONFIG_BPF_SYSCALL
 DECLARE_PER_CPU(int, bpf_prog_active);
 extern struct mutex bpf_stats_enabled_mutex;
@@ -2493,7 +2520,20 @@ void bpf_obj_free_fields(const struct btf_record *rec, void *obj);
 void __bpf_obj_drop_impl(void *p, const struct btf_record *rec, bool percpu);
 
 struct bpf_map *bpf_map_get(u32 ufd);
+struct bpf_map *
+bpf_map_get_for_container(u32 ufd,
+			  const struct bpf_current_container *container);
 struct bpf_map *bpf_map_get_with_uref(u32 ufd);
+struct bpf_prog *
+bpf_prog_get_for_container(u32 ufd,
+			   const struct bpf_current_container *container);
+struct bpf_prog *
+bpf_prog_get_type_for_container(u32 ufd, enum bpf_prog_type type,
+				const struct bpf_current_container *container);
+bool bpf_map_container_allowed(const struct bpf_map *map,
+			       const struct bpf_current_container *container);
+bool bpf_prog_container_allowed(const struct bpf_prog *prog,
+				const struct bpf_current_container *container);
 bool bpf_map_current_container_allowed(const struct bpf_map *map);
 bool bpf_prog_current_container_allowed(const struct bpf_prog *prog);
 
@@ -2505,26 +2545,62 @@ bool bpf_prog_current_container_allowed(const struct bpf_prog *prog);
  * bpf_map_get() and btf_get_by_fd() functions.
  */
 
-static inline struct bpf_map *__bpf_map_get(struct fd f)
+static inline struct bpf_map *__bpf_map_get_raw(struct fd f)
 {
 	if (fd_empty(f))
 		return ERR_PTR(-EBADF);
 	if (unlikely(fd_file(f)->f_op != &bpf_map_fops))
 		return ERR_PTR(-EINVAL);
-	if (!bpf_map_current_container_allowed(fd_file(f)->private_data))
-		return ERR_PTR(-EACCES);
 	return fd_file(f)->private_data;
 }
 
-static inline struct btf *__btf_get_by_fd(struct fd f)
+static inline struct bpf_map *
+__bpf_map_get_for_container(struct fd f,
+			    const struct bpf_current_container *container)
+{
+	struct bpf_map *map = __bpf_map_get_raw(f);
+
+	if (!IS_ERR(map) && !bpf_map_container_allowed(map, container))
+		return ERR_PTR(-EACCES);
+	return map;
+}
+
+static inline struct bpf_map *__bpf_map_get(struct fd f)
+{
+	struct bpf_map *map = __bpf_map_get_raw(f);
+
+	if (!IS_ERR(map) && !bpf_map_current_container_allowed(map))
+		return ERR_PTR(-EACCES);
+	return map;
+}
+
+static inline struct btf *__btf_get_by_fd_raw(struct fd f)
 {
 	if (fd_empty(f))
 		return ERR_PTR(-EBADF);
 	if (unlikely(fd_file(f)->f_op != &btf_fops))
 		return ERR_PTR(-EINVAL);
-	if (!btf_current_container_allowed(fd_file(f)->private_data))
-		return ERR_PTR(-EACCES);
 	return fd_file(f)->private_data;
+}
+
+static inline struct btf *
+__btf_get_by_fd_for_container(struct fd f,
+			      const struct bpf_current_container *container)
+{
+	struct btf *btf = __btf_get_by_fd_raw(f);
+
+	if (!IS_ERR(btf) && !btf_container_allowed(btf, container))
+		return ERR_PTR(-EACCES);
+	return btf;
+}
+
+static inline struct btf *__btf_get_by_fd(struct fd f)
+{
+	struct btf *btf = __btf_get_by_fd_raw(f);
+
+	if (!IS_ERR(btf) && !btf_current_container_allowed(btf))
+		return ERR_PTR(-EACCES);
+	return btf;
 }
 
 void bpf_map_inc(struct bpf_map *map);
@@ -2549,6 +2625,12 @@ int  generic_map_delete_batch(struct bpf_map *map,
 			      union bpf_attr __user *uattr);
 struct bpf_map *bpf_map_get_curr_or_next(u32 *id);
 struct bpf_prog *bpf_prog_get_curr_or_next(u32 *id);
+struct bpf_map *
+bpf_map_get_curr_or_next_for_container(u32 *id,
+				       const struct bpf_current_container *container);
+struct bpf_prog *
+bpf_prog_get_curr_or_next_for_container(u32 *id,
+					const struct bpf_current_container *container);
 
 
 int bpf_map_alloc_pages(const struct bpf_map *map, int nid,
@@ -2617,19 +2699,39 @@ bool bpf_token_capable(const struct bpf_token *token, int cap);
 bool bpf_token_is_container(const struct bpf_token *token);
 bool bpf_token_same_container_domain(const struct bpf_token *a,
 					 const struct bpf_token *b);
+bool bpf_token_same_owner_domain(const struct bpf_token *a,
+				 const struct bpf_token *b);
 bool bpf_token_task_match(const struct bpf_token *token,
 			     const struct task_struct *task);
-bool bpf_token_current_container_capable(int cap);
-bool bpf_token_current_container_member(void);
-bool bpf_token_current_container_task_allowed(const struct task_struct *task);
-bool bpf_token_current_restrict_tracing_symbols(void);
-struct bpf_token *bpf_token_get_current_container(void);
+struct bpf_current_container
+bpf_current_container_get_where(const char *where);
+void bpf_current_container_put(struct bpf_current_container *container);
+bool bpf_container_capable(const struct bpf_current_container *container,
+			   int cap);
+bool bpf_container_token_allowed(const struct bpf_current_container *container,
+				 const struct bpf_token *token);
+bool bpf_container_task_allowed_where(const struct bpf_current_container *container,
+				      const struct task_struct *task,
+				      const char *where);
+bool bpf_current_container_capable_where(int cap, const char *where);
+int bpf_token_current_container_member_checked_where(const char *where);
+bool bpf_token_current_container_member_where(const char *where);
+bool bpf_token_current_container_allowed_where(const struct bpf_token *token,
+					       const char *where);
+bool bpf_token_current_container_task_allowed_where(const struct task_struct *task,
+						    const char *where);
+bool bpf_token_current_restrict_tracing_symbols_where(const char *where);
+struct bpf_token *
+bpf_token_get_for_container(const struct bpf_current_container *container);
+struct bpf_token *bpf_token_get_current_container_where(const char *where);
 bool bpf_token_allow_prog_helper(const struct bpf_prog *prog, enum bpf_func_id func_id);
 bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *name);
 bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_token *token,
 				      const char *name);
-bool bpf_token_current_allow_tracing_symbol(const char *name);
-bool bpf_token_current_allow_tracing_symbol_discovery(const char *name);
+bool bpf_token_current_allow_tracing_symbol_where(const char *name,
+						  const char *where);
+bool bpf_token_current_allow_tracing_symbol_discovery_where(const char *name,
+							    const char *where);
 
 static inline bool bpf_allow_ptr_leaks(const struct bpf_token *token)
 {
@@ -2657,6 +2759,10 @@ static inline bool bpf_bypass_spec_v4(const struct bpf_token *token)
 
 int bpf_map_new_fd(struct bpf_map *map, int flags);
 int bpf_prog_new_fd(struct bpf_prog *prog);
+int bpf_map_new_fd_for_container(struct bpf_map *map, int flags,
+				 const struct bpf_current_container *container);
+int bpf_prog_new_fd_for_container(struct bpf_prog *prog,
+				  const struct bpf_current_container *container);
 
 void bpf_link_init(struct bpf_link *link, enum bpf_link_type type,
 		   const struct bpf_link_ops *ops, struct bpf_prog *prog,
@@ -2670,17 +2776,30 @@ void bpf_link_cleanup(struct bpf_link_primer *primer);
 void bpf_link_inc(struct bpf_link *link);
 struct bpf_link *bpf_link_inc_not_zero(struct bpf_link *link);
 void bpf_link_put(struct bpf_link *link);
+bool bpf_link_container_allowed(const struct bpf_link *link,
+				const struct bpf_current_container *container);
 bool bpf_link_current_container_allowed(const struct bpf_link *link);
 int bpf_link_new_fd(struct bpf_link *link);
+int bpf_link_new_fd_for_container(struct bpf_link *link,
+				  const struct bpf_current_container *container);
 bool bpf_link_file(const struct file *file);
 struct bpf_prog *bpf_link_file_prog(const struct file *file);
 struct bpf_link *bpf_link_get_from_fd(u32 ufd);
+struct bpf_link *
+bpf_link_get_from_fd_for_container(u32 ufd,
+				   const struct bpf_current_container *container);
 struct bpf_link *bpf_link_get_curr_or_next(u32 *id);
+struct bpf_link *
+bpf_link_get_curr_or_next_for_container(u32 *id,
+					const struct bpf_current_container *container);
 
 void bpf_token_inc(struct bpf_token *token);
 void bpf_token_put(struct bpf_token *token);
 int bpf_token_create(union bpf_attr *attr);
 struct bpf_token *bpf_token_get_from_fd(u32 ufd);
+struct bpf_token *
+bpf_token_get_from_fd_for_container(u32 ufd,
+				    const struct bpf_current_container *container);
 int bpf_token_get_info_by_fd(struct bpf_token *token,
 			     const union bpf_attr *attr,
 			     union bpf_attr __user *uattr);
@@ -2934,6 +3053,12 @@ int btf_find_next_decl_tag(const struct btf *btf, const struct btf_type *pt,
 
 struct bpf_prog *bpf_prog_by_id(u32 id);
 struct bpf_link *bpf_link_by_id(u32 id);
+struct bpf_prog *
+bpf_prog_by_id_for_container(u32 id,
+			     const struct bpf_current_container *container);
+struct bpf_link *
+bpf_link_by_id_for_container(u32 id,
+			     const struct bpf_current_container *container);
 
 const struct bpf_func_proto *bpf_base_func_proto(enum bpf_func_id func_id,
 						 const struct bpf_prog *prog);
@@ -2986,6 +3111,8 @@ void bpf_dynptr_set_rdonly(struct bpf_dynptr_kern *ptr);
 void bpf_prog_report_arena_violation(bool write, unsigned long addr, unsigned long fault_ip);
 
 #else /* !CONFIG_BPF_SYSCALL */
+#define sysctl_bpf_container_tracing_enabled 0
+
 static inline struct bpf_prog *bpf_prog_get(u32 ufd)
 {
 	return ERR_PTR(-EOPNOTSUPP);
@@ -3091,33 +3218,98 @@ static inline bool bpf_token_same_container_domain(const struct bpf_token *a,
 	return false;
 }
 
+static inline bool bpf_token_same_owner_domain(const struct bpf_token *a,
+					       const struct bpf_token *b)
+{
+	return true;
+}
+
 static inline bool bpf_token_task_match(const struct bpf_token *token,
 			     const struct task_struct *task)
 {
 	return false;
 }
 
-static inline bool bpf_token_current_container_capable(int cap)
+static inline bool
+bpf_container_capable(const struct bpf_current_container *container, int cap)
+{
+	return container->state == BPF_CURRENT_CONTAINER_HOST && capable(cap);
+}
+
+static inline bool
+bpf_container_token_allowed(const struct bpf_current_container *container,
+			    const struct bpf_token *token)
+{
+	return container->state == BPF_CURRENT_CONTAINER_HOST;
+}
+
+static inline bool
+bpf_container_task_allowed_where(const struct bpf_current_container *container,
+				 const struct task_struct *task,
+				 const char *where)
+{
+	return container->state == BPF_CURRENT_CONTAINER_HOST;
+}
+
+static inline struct bpf_current_container
+bpf_current_container_get_where(const char *where)
+{
+	return (struct bpf_current_container) {
+		.state = BPF_CURRENT_CONTAINER_HOST,
+	};
+}
+
+static inline void
+bpf_current_container_put(struct bpf_current_container *container)
+{
+}
+
+static inline bool
+bpf_current_container_capable_where(int cap, const char *where)
+{
+	return capable(cap);
+}
+
+static inline int
+bpf_token_current_container_member_checked_where(const char *where)
+{
+	return 0;
+}
+
+static inline bool bpf_token_current_container_member_where(const char *where)
 {
 	return false;
 }
 
-static inline bool bpf_token_current_container_member(void)
-{
-	return false;
-}
-
-static inline bool bpf_token_current_container_task_allowed(const struct task_struct *task)
+static inline bool
+bpf_token_current_container_allowed_where(const struct bpf_token *token,
+					  const char *where)
 {
 	return true;
 }
 
-static inline bool bpf_token_current_restrict_tracing_symbols(void)
+static inline bool
+bpf_token_current_container_task_allowed_where(const struct task_struct *task,
+					       const char *where)
+{
+	return true;
+}
+
+static inline bool
+bpf_token_current_restrict_tracing_symbols_where(const char *where)
 {
 	return false;
 }
 
-static inline struct bpf_token *bpf_token_get_current_container(void)
+static inline struct bpf_token *
+bpf_token_get_for_container(const struct bpf_current_container *container)
+{
+	return container->state == BPF_CURRENT_CONTAINER_HOST ?
+		NULL : ERR_PTR(container->error ?: -EACCES);
+}
+
+static inline struct bpf_token *
+bpf_token_get_current_container_where(const char *where)
 {
 	return NULL;
 }
@@ -3139,12 +3331,16 @@ static inline bool bpf_token_allow_tracing_symbol_accesses(const struct bpf_toke
 	return true;
 }
 
-static inline bool bpf_token_current_allow_tracing_symbol(const char *name)
+static inline bool
+bpf_token_current_allow_tracing_symbol_where(const char *name,
+					     const char *where)
 {
 	return true;
 }
 
-static inline bool bpf_token_current_allow_tracing_symbol_discovery(const char *name)
+static inline bool
+bpf_token_current_allow_tracing_symbol_discovery_where(const char *name,
+						       const char *where)
 {
 	return true;
 }
@@ -3356,6 +3552,33 @@ static inline void bpf_prog_report_arena_violation(bool write, unsigned long add
 {
 }
 #endif /* CONFIG_BPF_SYSCALL */
+
+DEFINE_CLASS(bpf_current_container, struct bpf_current_container,
+	     bpf_current_container_put(&_T),
+	     bpf_current_container_get_where(where), const char *where)
+#define BPF_CURRENT_CONTAINER_WHERE(_name, _where) \
+	CLASS(bpf_current_container, _name)(_where)
+#define BPF_CURRENT_CONTAINER(_name) \
+	BPF_CURRENT_CONTAINER_WHERE(_name, __func__)
+
+#define bpf_current_container_capable(_cap) \
+	bpf_current_container_capable_where((_cap), __func__)
+#define bpf_container_task_allowed(_container, _task) \
+	bpf_container_task_allowed_where((_container), (_task), __func__)
+#define bpf_token_current_container_member_checked() \
+	bpf_token_current_container_member_checked_where(__func__)
+#define bpf_token_current_container_allowed(_token) \
+	bpf_token_current_container_allowed_where((_token), __func__)
+#define bpf_token_current_container_task_allowed(_task) \
+	bpf_token_current_container_task_allowed_where((_task), __func__)
+#define bpf_token_current_restrict_tracing_symbols() \
+	bpf_token_current_restrict_tracing_symbols_where(__func__)
+#define bpf_token_get_current_container() \
+	bpf_token_get_current_container_where(__func__)
+#define bpf_token_current_allow_tracing_symbol(_name) \
+	bpf_token_current_allow_tracing_symbol_where((_name), __func__)
+#define bpf_token_current_allow_tracing_symbol_discovery(_name) \
+	bpf_token_current_allow_tracing_symbol_discovery_where((_name), __func__)
 
 static __always_inline int
 bpf_probe_read_kernel_common(void *dst, u32 size, const void *unsafe_ptr)

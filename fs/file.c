@@ -22,6 +22,7 @@
 #include <linux/close_range.h>
 #include <linux/file_ref.h>
 #include <linux/security.h>
+#include <linux/auth_guard.h>
 #include <net/sock.h>
 #include <linux/init_task.h>
 
@@ -518,14 +519,53 @@ void put_files_struct(struct files_struct *files)
 
 void exit_files(struct task_struct *tsk)
 {
-	struct files_struct * files = tsk->files;
+	struct files_struct *files;
+	struct files_struct *expected;
+	enum auth_guard_mutation_result mutation;
+	enum auth_guard_task_teardown_status auth_guard_status;
+	bool exact;
+	bool old_valid;
+	bool trusted;
 
-	if (files) {
-		task_lock(tsk);
-		tsk->files = NULL;
-		task_unlock(tsk);
-		put_files_struct(files);
+	/*
+	 * Claim terminal writer exclusion before task_lock.  Normal files and
+	 * namespace writers claim the task transition first and take task_lock
+	 * afterwards, so reversing that order here can deadlock while waiting for an
+	 * already-open writer during exit.
+	 */
+	auth_guard_status = auth_guard_task_begin_teardown_transition(tsk);
+
+	task_lock(tsk);
+	expected = READ_ONCE(tsk->files);
+	old_valid = auth_guard_task_validate_teardown(tsk, auth_guard_status);
+	if (auth_guard_status == AUTH_GUARD_TASK_TEARDOWN_OPENED &&
+	    old_valid) {
+		files = NULL;
+		mutation = auth_guard_task_replace_files_in_transition(
+			tsk, NULL, &files);
+		exact = mutation == AUTH_GUARD_MUTATION_APPLIED &&
+			files == expected &&
+			auth_guard_task_validate_transition_result(tsk);
+		if (mutation != AUTH_GUARD_MUTATION_APPLIED)
+			(void)xchg(&tsk->files, NULL);
+	} else {
+		files = xchg(&tsk->files, NULL);
+		exact = files == expected;
 	}
+	/*
+	 * Keep the exiting task sealed over the remaining authority tuple.  Only
+	 * release the detached file table when both the old graph and exact pointer
+	 * identity were authenticated; log-mode rejection deliberately leaks it.
+	 */
+	trusted = auth_guard_task_complete_teardown(tsk, auth_guard_status,
+						    old_valid, exact,
+						    false);
+	if (!trusted && auth_guard_status == AUTH_GUARD_TASK_TEARDOWN_FAILED)
+		WARN_ON_ONCE(1);
+	task_unlock(tsk);
+
+	if (files && trusted)
+		put_files_struct(files);
 }
 
 struct files_struct init_files = {
@@ -792,13 +832,19 @@ SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
 		unsigned int, flags)
 {
 	struct task_struct *me = current;
-	struct files_struct *cur_fds = me->files, *fds = NULL;
+	struct files_struct *cur_fds, *fds = NULL;
 
 	if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))
 		return -EINVAL;
 
 	if (fd > max_fd)
 		return -EINVAL;
+
+	if ((flags & CLOSE_RANGE_UNSHARE) &&
+	    !auth_guard_task_check(me))
+		return -EACCES;
+
+	cur_fds = me->files;
 
 	if ((flags & CLOSE_RANGE_UNSHARE) && atomic_read(&cur_fds->count) > 1) {
 		struct fd_range range = {fd, max_fd}, *punch_hole = &range;
@@ -827,13 +873,18 @@ SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
 		__range_close(cur_fds, fd, max_fd);
 
 	if (fds) {
+		enum auth_guard_mutation_result mutation;
+
 		/*
 		 * We're done closing the files we were supposed to. Time to install
 		 * the new file descriptor table and drop the old one.
 		 */
-		task_lock(me);
-		me->files = cur_fds;
-		task_unlock(me);
+		mutation = auth_guard_task_replace_files(me, cur_fds, &fds);
+		if (mutation == AUTH_GUARD_MUTATION_REJECTED) {
+			put_files_struct(cur_fds);
+			return -EACCES;
+		}
+		AUTH_GUARD_QUARANTINE_FAIL_STOP(mutation);
 		put_files_struct(fds);
 	}
 
@@ -1097,8 +1148,11 @@ struct file *fget_task(struct task_struct *task, unsigned int fd)
 	struct file *file = NULL;
 
 	task_lock(task);
+	if (!auth_guard_task_check(task))
+		goto out_unlock;
 	if (task->files)
 		file = __fget_files(task->files, fd, 0);
+out_unlock:
 	task_unlock(task);
 
 	return file;
@@ -1112,6 +1166,8 @@ struct file *fget_task_next(struct task_struct *task, unsigned int *ret_fd)
 	struct file *file = NULL;
 
 	task_lock(task);
+	if (!auth_guard_task_check(task))
+		goto out_unlock;
 	files = task->files;
 	if (files) {
 		rcu_read_lock();
@@ -1122,6 +1178,7 @@ struct file *fget_task_next(struct task_struct *task, unsigned int *ret_fd)
 		}
 		rcu_read_unlock();
 	}
+out_unlock:
 	task_unlock(task);
 	*ret_fd = fd;
 	return file;

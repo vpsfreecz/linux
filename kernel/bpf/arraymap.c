@@ -952,20 +952,6 @@ static long fd_array_map_delete_elem(struct bpf_map *map, void *key)
 	return __fd_array_map_delete_elem(map, key, true);
 }
 
-static bool bpf_map_token_same_container_domain(const struct bpf_map *map,
-					 const struct bpf_token *token)
-{
-	bool map_container = bpf_token_is_container(map->token);
-	bool token_container = bpf_token_is_container(token);
-
-	if (!map_container && !token_container)
-		return true;
-	if (!map_container || !token_container)
-		return false;
-
-	return bpf_token_same_container_domain(map->token, token);
-}
-
 static void *prog_fd_array_get_ptr(struct bpf_map *map,
 				   struct file *map_file, int fd)
 {
@@ -984,7 +970,7 @@ static void *prog_fd_array_get_ptr(struct bpf_map *map,
 		bpf_prog_put(prog);
 		return ERR_PTR(-EPERM);
 	}
-	if (!bpf_map_token_same_container_domain(map, prog->aux->token)) {
+	if (!bpf_token_same_owner_domain(map->token, prog->aux->token)) {
 		bpf_prog_put(prog);
 		return ERR_PTR(-EACCES);
 	}
@@ -1289,7 +1275,7 @@ static void *perf_event_fd_array_get_ptr(struct bpf_map *map,
 
 	ee = ERR_PTR(-EOPNOTSUPP);
 	event = perf_file->private_data;
-	if (!bpf_map_token_same_container_domain(map, event->token)) {
+	if (!bpf_token_same_owner_domain(map->token, event->token)) {
 		ee = ERR_PTR(-EACCES);
 		goto err_out;
 	}
@@ -1364,19 +1350,19 @@ static void *cgroup_fd_array_get_ptr(struct bpf_map *map,
 				     struct file *map_file /* not used */,
 				     int fd)
 {
+	BPF_CURRENT_CONTAINER(container);
 	struct cgroup *cgrp;
 
 	cgrp = cgroup_get_from_fd(fd);
 	if (IS_ERR(cgrp))
 		return cgrp;
 
-	if (bpf_token_is_container(map->token) &&
-	    !bpf_token_task_match(map->token, current)) {
+	if (!bpf_map_container_allowed(map, &container)) {
 		cgroup_put(cgrp);
 		return ERR_PTR(-EACCES);
 	}
 
-	if (bpf_token_current_container_member() &&
+	if (container.state == BPF_CURRENT_CONTAINER_MEMBER &&
 	    !cgroup_is_descendant_of_current_cgns(cgrp)) {
 		cgroup_put(cgrp);
 		return ERR_PTR(-EACCES);

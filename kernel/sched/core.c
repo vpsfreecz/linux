@@ -10406,17 +10406,69 @@ static u64 cpu_shares_read_u64(struct cgroup_subsys_state *css,
 
 LIST_HEAD(cgns_avenrun_list);
 static DEFINE_MUTEX(cgns_avenrun_lock);
-
+static DEFINE_MUTEX(cgns_avenrund_state_lock);
 static struct task_struct *cgns_avenrund_task;
+
+/*
+ * Return the cgroup namespace only when the caller already prevents @p from
+ * running a namespace transition. Fork/release callers hold tasklist_lock for
+ * write; blocked-task accounting holds @p's rq lock. This deliberately avoids
+ * task_lock(), which must not nest with write_lock(&tasklist_lock) and is not a
+ * scheduler-rq locking primitive.
+ */
+static struct cgroup_namespace *
+cgns_task_ns_checked_stable_where(struct task_struct *p, const char *where)
+{
+	struct cgroup_namespace *ns;
+	struct nsproxy *nsproxy;
+
+	if (!auth_guard_task_check_where(p, where))
+		return NULL;
+
+	nsproxy = READ_ONCE(p->nsproxy);
+	if (!nsproxy)
+		return NULL;
+
+	ns = READ_ONCE(nsproxy->cgroup_ns);
+	if (!cgroup_ns_root_cset_checked_where(ns, where))
+		return NULL;
+	if (READ_ONCE(p->nsproxy) != nsproxy ||
+	    READ_ONCE(nsproxy->cgroup_ns) != ns) {
+		(void)auth_guard_task_check_where(p, where);
+		return NULL;
+	}
+
+	return ns;
+}
+
+#define cgns_task_ns_checked_stable(_task) \
+	cgns_task_ns_checked_stable_where((_task), __func__)
+
+static struct cgroup_namespace *
+cgns_loadavg_root(struct cgroup_namespace *ns)
+{
+	if (!ns || ns == &init_cgroup_ns)
+		return ns;
+	while (ns->parent != &init_cgroup_ns)
+		ns = ns->parent;
+	return ns;
+}
 
 static unsigned long cgns_nr_running(struct cgroup_namespace *ns)
 {
 	unsigned long nr_active = 0;
+	struct css_set *root_cset;
 	struct task_group *tg;
 	int i;
 
 	rcu_read_lock();
-	tg = css_tg(ns->root_cset->subsys[cpu_cgrp_id]);
+	root_cset = cgroup_ns_root_cset_checked(ns);
+	if (!root_cset || !root_cset->subsys[cpu_cgrp_id]) {
+		rcu_read_unlock();
+		return 0;
+	}
+
+	tg = css_tg(root_cset->subsys[cpu_cgrp_id]);
 	for_each_possible_cpu(i) {
 #ifdef CONFIG_FAIR_GROUP_SCHED
 		if (tg->cfs_rq[i])
@@ -10434,88 +10486,84 @@ static unsigned long cgns_nr_running(struct cgroup_namespace *ns)
 	return nr_active;
 }
 
-unsigned long cgroup_ns_nr_running(struct task_struct *p)
+static enum auth_guard_check_result
+cgns_loadavg_snapshot_get(struct task_struct *task,
+			  struct cgroup_task_auth_snapshot *snapshot,
+			  struct cgroup_namespace **ns)
+{
+	enum auth_guard_check_result result;
+
+	result = cgroup_task_auth_snapshot_get(task, -1, snapshot);
+	if (result == AUTH_GUARD_CHECK_VALID)
+		*ns = cgns_loadavg_root(snapshot->cgroup_ns);
+	return result;
+}
+
+#define DEFINE_CGROUP_NS_LOADAVG_READER(_name, _host_value, _ns_value) \
+unsigned long _name(struct task_struct *task) \
+{ \
+	struct cgroup_task_auth_snapshot snapshot \
+		__free(cgroup_task_auth_snapshot) = {}; \
+	struct cgroup_namespace *ns; \
+	enum auth_guard_check_result result; \
+	\
+	result = cgns_loadavg_snapshot_get(task, &snapshot, &ns); \
+	if (result != AUTH_GUARD_CHECK_VALID) { \
+		if (result != AUTH_GUARD_CHECK_UNAVAILABLE) \
+			return 0; \
+	} else if (ns->loadavg_virt_enabled) { \
+		return _ns_value; \
+	} \
+	return _host_value; \
+}
+
+DEFINE_CGROUP_NS_LOADAVG_READER(cgroup_ns_nr_running, nr_running(),
+				cgns_nr_running(ns))
+
+static void cgns_adjust_nr_threads(struct task_struct *p, long delta)
 {
 	struct cgroup_namespace *ns;
 
-	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
-		return nr_running();
-
-	ns = p->nsproxy->cgroup_ns;
-	while (ns->parent != &init_cgroup_ns)
-		ns = ns->parent;
-
+	lockdep_assert_held_write(&tasklist_lock);
+	ns = cgns_task_ns_checked_stable(p);
+	if (!ns)
+		return;
+	ns = cgns_loadavg_root(ns);
 	if (!ns->loadavg_virt_enabled)
-		return nr_running();
-
-	return cgns_nr_running(ns);
+		return;
+	ns->nr_threads += delta;
 }
 
 void inc_cgns_nr_threads(struct task_struct *p)
 {
-	struct cgroup_namespace *ns;
-
-	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
-		return;
-
-	ns = p->nsproxy->cgroup_ns;
-	while (ns->parent != &init_cgroup_ns)
-		ns = ns->parent;
-
-	if (!ns->loadavg_virt_enabled)
-		return;
-
-	ns->nr_threads++;
+	cgns_adjust_nr_threads(p, 1);
 }
 
 void dec_cgns_nr_threads(struct task_struct *p)
 {
-	struct cgroup_namespace *ns;
-
-	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
-		return;
-
-	ns = p->nsproxy->cgroup_ns;
-	while (ns->parent != &init_cgroup_ns)
-		ns = ns->parent;
-
-	if (!ns->loadavg_virt_enabled)
-		return;
-
-	ns->nr_threads--;
+	cgns_adjust_nr_threads(p, -1);
 }
 
-unsigned long cgroup_ns_nr_threads(struct task_struct *p)
+DEFINE_CGROUP_NS_LOADAVG_READER(cgroup_ns_nr_threads, nr_threads,
+				ns->nr_threads)
+
+#undef DEFINE_CGROUP_NS_LOADAVG_READER
+
+void inc_cgns_nr_uninterruptible(struct rq *rq, struct task_struct *p)
 {
 	struct cgroup_namespace *ns;
 
-	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
-		return nr_threads;
-
-	ns = p->nsproxy->cgroup_ns;
-	while (ns->parent != &init_cgroup_ns)
-		ns = ns->parent;
-
-	if (!ns->loadavg_virt_enabled)
-		return nr_threads;
-
-	return ns->nr_threads;
-}
-
-void inc_cgns_nr_uninterruptible(struct task_struct *p)
-{
-	struct cgroup_namespace *ns;
-
-	if (p->nsproxy && p->nsproxy->cgroup_ns)
-		ns = p->nsproxy->cgroup_ns;
-	else
+	lockdep_assert_rq_held(rq);
+	if (WARN_ON_ONCE(task_rq(p) != rq))
 		return;
 
+	ns = cgns_task_ns_checked_stable(p);
+	if (!ns)
+		return;
+
+	ns = cgns_loadavg_root(ns);
 	if (ns == &init_cgroup_ns)
 		return;
-
-	while (ns->parent != &init_cgroup_ns)
-		ns = ns->parent;
 
 	if (ns->loadavg_virt_enabled) {
 		atomic_inc(&ns->nr_uninterruptible);
@@ -10570,12 +10618,16 @@ static int cgns_avenrund(void *data)
 
 static int cgns_avenrund_start(void)
 {
+	struct task_struct *task;
+
+	lockdep_assert_held(&cgns_avenrund_state_lock);
 	if (cgns_avenrund_task)
 		return 0;
 
-	cgns_avenrund_task = kthread_run(cgns_avenrund, NULL, "cgns_avenrund");
-	if (IS_ERR(cgns_avenrund_task))
-		return PTR_ERR(cgns_avenrund_task);
+	task = kthread_run(cgns_avenrund, NULL, "cgns_avenrund");
+	if (IS_ERR(task))
+		return PTR_ERR(task);
+	cgns_avenrund_task = task;
 
 	pr_info("cgroup namespace loadavg tracking started\n");
 	return 0;
@@ -10583,6 +10635,7 @@ static int cgns_avenrund_start(void)
 
 static void cgns_avenrund_stop(void)
 {
+	lockdep_assert_held(&cgns_avenrund_state_lock);
 	if (cgns_avenrund_task)
 		kthread_stop(cgns_avenrund_task);
 	cgns_avenrund_task = NULL;
@@ -10591,22 +10644,32 @@ static void cgns_avenrund_stop(void)
 
 void cgroup_ns_track_loadavg(struct cgroup_namespace *ns)
 {
+	int ret;
+
 	if (ns == &init_cgroup_ns)
 		return;
+	ns = cgns_loadavg_root(ns);
 
-	while (ns->parent != &init_cgroup_ns)
-		ns = ns->parent;
+	mutex_lock(&cgns_avenrund_state_lock);
+	mutex_lock(&cgns_avenrun_lock);
+	if (ns->loadavg_virt_enabled) {
+		mutex_unlock(&cgns_avenrun_lock);
+		goto out_unlock_state;
+	}
+	mutex_unlock(&cgns_avenrun_lock);
 
-	if (ns->loadavg_virt_enabled)
-		return;
-
-	cgns_avenrund_start();
+	ret = cgns_avenrund_start();
+	if (ret) {
+		pr_warn("cgroup namespace loadavg tracking unavailable: %d\n", ret);
+		goto out_unlock_state;
+	}
 
 	mutex_lock(&cgns_avenrun_lock);
-	get_cgroup_ns(ns);
 	list_add(&ns->cgns_avenrun_list, &cgns_avenrun_list);
 	ns->loadavg_virt_enabled = 1;
 	mutex_unlock(&cgns_avenrun_lock);
+out_unlock_state:
+	mutex_unlock(&cgns_avenrund_state_lock);
 }
 
 void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns)
@@ -10616,19 +10679,22 @@ void cgroup_ns_untrack_loadavg(struct cgroup_namespace *ns)
 	if (ns == &init_cgroup_ns)
 		return;
 
-	if (!ns->loadavg_virt_enabled)
-		return;
-
+	mutex_lock(&cgns_avenrund_state_lock);
 	mutex_lock(&cgns_avenrun_lock);
+	if (!ns->loadavg_virt_enabled) {
+		mutex_unlock(&cgns_avenrun_lock);
+		goto out_unlock_state;
+	}
 	list_del_init(&ns->cgns_avenrun_list);
 	ns->loadavg_virt_enabled = 0;
-	put_cgroup_ns(ns);
 	if (list_empty(&cgns_avenrun_list))
 		stop_avenrund = true;
 	mutex_unlock(&cgns_avenrun_lock);
 
 	if (stop_avenrund)
 		cgns_avenrund_stop();
+out_unlock_state:
+	mutex_unlock(&cgns_avenrund_state_lock);
 }
 
 static void get_avenrun_fake_ns(struct cgroup_namespace *ns,
@@ -10644,14 +10710,20 @@ static void get_avenrun_fake_ns(struct cgroup_namespace *ns,
 
 int get_avenrun_fake(struct task_struct *p, unsigned long *loads, unsigned long offset, int shift)
 {
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
 	struct cgroup_namespace *ns;
+	enum auth_guard_check_result result;
 
-	if (!p->nsproxy || !p->nsproxy->cgroup_ns)
-		return 0;
-
-	ns = p->nsproxy->cgroup_ns;
-	while (ns->parent != &init_cgroup_ns)
-		ns = ns->parent;
+	result = cgns_loadavg_snapshot_get(p, &snapshot, &ns);
+	if (result != AUTH_GUARD_CHECK_VALID) {
+		if (result == AUTH_GUARD_CHECK_UNAVAILABLE)
+			return 0;
+		loads[0] = 0;
+		loads[1] = 0;
+		loads[2] = 0;
+		return 1;
+	}
 
 	if (!ns->loadavg_virt_enabled)
 		return 0;

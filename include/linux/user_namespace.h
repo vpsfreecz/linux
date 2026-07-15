@@ -2,6 +2,7 @@
 #ifndef _LINUX_USER_NAMESPACE_H
 #define _LINUX_USER_NAMESPACE_H
 
+#include <linux/auth_guard.h>
 #include <linux/kref.h>
 #include <linux/nsproxy.h>
 #include <linux/ns_common.h>
@@ -110,6 +111,11 @@ struct user_namespace {
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
 	struct lsm_namespace	*lsm_ns;
 #endif
+#ifdef CONFIG_AUTH_GUARD
+	struct auth_guard_stamp	auth_guard_boundary_stamp;
+	struct auth_guard_unanchored_transition_state
+				auth_guard_boundary_transition;
+#endif
 	/* Register of per-UID persistent keyrings for this namespace */
 #ifdef CONFIG_PERSISTENT_KEYRINGS
 	struct key		*persistent_keyring_register;
@@ -129,6 +135,95 @@ struct user_namespace {
 
 	struct xarray		fake_sysctl_bufs;
 } __randomize_layout;
+
+static inline void
+auth_guard_userns_boundary_read(const struct user_namespace *user_ns,
+				struct auth_guard_userns_boundary *boundary)
+{
+	boundary->syslog_ns = READ_ONCE(user_ns->syslog_ns);
+#ifdef CONFIG_TRACING_NS
+	boundary->tracing_ns = READ_ONCE(user_ns->tracing_ns);
+#else
+	boundary->tracing_ns = NULL;
+#endif
+#ifdef CONFIG_SECURITY_LSM_NAMESPACE
+	boundary->lsm_ns = READ_ONCE(user_ns->lsm_ns);
+#else
+	boundary->lsm_ns = NULL;
+#endif
+}
+
+#define __DEFINE_USERNS_BOUNDARY_GETTER(storage, name, type, member, get,    \
+					put, fallback)                         \
+storage struct type *name##_where(const struct user_namespace *user_ns,       \
+				  const char *where)                          \
+{                                                                              \
+	struct auth_guard_userns_boundary boundary;                            \
+	enum auth_guard_check_result result;                                   \
+	struct type *ns;                                                       \
+	\
+	/* Keep the reservation across endpoint pinning and revalidation. */   \
+	result = auth_guard_userns_boundary_snapshot_begin_where(user_ns,      \
+								 where);         \
+	if (result != AUTH_GUARD_CHECK_VALID)                                  \
+		return ERR_PTR(result == AUTH_GUARD_CHECK_BUSY ? -EAGAIN :      \
+								      -EACCES); \
+	auth_guard_userns_boundary_read(user_ns, &boundary);                   \
+	ns = get(boundary.member ?: (fallback));                               \
+	if (!auth_guard_userns_boundary_snapshot_end_where(user_ns, where)) {  \
+		put(ns);                                                         \
+		return ERR_PTR(-EACCES);                                         \
+	}                                                                      \
+	return ns;                                                             \
+}
+
+#define DEFINE_USERNS_BOUNDARY_GETTER(name, type, member, get, put, fallback) \
+	__DEFINE_USERNS_BOUNDARY_GETTER(, name, type, member, get, put, fallback)
+
+#define DEFINE_STATIC_USERNS_BOUNDARY_GETTER(name, type, member, get, put,   \
+					     fallback)                       \
+	__DEFINE_USERNS_BOUNDARY_GETTER(static, name, type, member, get, put,     \
+					  fallback)
+
+/* Define a typed, ownership-explicit replacement for one boundary member. */
+#define DEFINE_USERNS_BOUNDARY_REPLACER(name, type, member, get, put)       \
+enum auth_guard_mutation_result name##_where(                               \
+	struct user_namespace *user_ns, struct type *old_ns,                   \
+	struct type *new_ns, const char *where)                                 \
+{                                                                            \
+	struct auth_guard_userns_boundary old_boundary;                         \
+	struct auth_guard_userns_boundary proposed;                             \
+	struct type *replacement = NULL;                                        \
+	if (!user_ns || !old_ns || !new_ns)                                    \
+		return AUTH_GUARD_MUTATION_REJECTED;                              \
+	auth_guard_userns_boundary_read(user_ns, &old_boundary);                \
+	if (!auth_guard_userns_boundary_begin_transition_where(                 \
+			user_ns, &old_boundary, where))                             \
+		return AUTH_GUARD_MUTATION_REJECTED;                              \
+	if (old_boundary.member != old_ns)                                     \
+		goto abort_transition;                                           \
+	replacement = get(new_ns);                                              \
+	proposed = old_boundary;                                               \
+	proposed.member = replacement;                                         \
+	if (cmpxchg(&user_ns->member, old_ns, replacement) != old_ns)           \
+		goto abort_transition;                                           \
+	if (auth_guard_userns_boundary_finish_transition_where(                 \
+			user_ns, &proposed, where)) {                              \
+		put(old_ns);                                                      \
+		return AUTH_GUARD_MUTATION_APPLIED;                               \
+	}                                                                        \
+	/* The write was published before proof failed: retain both refs. */     \
+	if (cmpxchg(&user_ns->member, replacement, old_ns) == replacement)      \
+		(void)auth_guard_userns_boundary_abort_transition_where(          \
+			user_ns, &old_boundary, where);                             \
+	return AUTH_GUARD_MUTATION_QUARANTINED;                                 \
+abort_transition:                                                         \
+	(void)auth_guard_userns_boundary_abort_transition_where(                \
+		user_ns, &old_boundary, where);                                   \
+	if (replacement)                                                       \
+		put(replacement);                                                \
+	return AUTH_GUARD_MUTATION_REJECTED;                                    \
+}
 
 struct ucounts {
 	struct hlist_nulls_node node;
@@ -197,6 +292,7 @@ static inline struct user_namespace *get_user_ns(struct user_namespace *ns)
 extern int create_user_ns(struct cred *new);
 extern int unshare_userns(unsigned long unshare_flags, struct cred **new_cred);
 extern void __put_user_ns(struct user_namespace *ns);
+struct user_namespace *get_current_user_ns_checked_where(const char *where);
 
 static inline void put_user_ns(struct user_namespace *ns)
 {
@@ -243,6 +339,12 @@ static inline void put_user_ns(struct user_namespace *ns)
 {
 }
 
+static inline struct user_namespace *
+get_current_user_ns_checked_where(const char *where)
+{
+	return &init_user_ns;
+}
+
 static inline bool userns_may_setgroups(const struct user_namespace *ns)
 {
 	return true;
@@ -269,5 +371,8 @@ static inline struct ns_common *ns_get_owner(struct ns_common *ns)
 	return ERR_PTR(-EPERM);
 }
 #endif
+
+#define get_current_user_ns_checked() \
+	get_current_user_ns_checked_where(__func__)
 
 #endif /* _LINUX_USER_H */

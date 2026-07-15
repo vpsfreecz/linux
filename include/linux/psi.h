@@ -4,6 +4,7 @@
 
 #include <linux/jump_label.h>
 #include <linux/psi_types.h>
+#include <linux/auth_guard.h>
 #include <linux/sched.h>
 #include <linux/poll.h>
 #include <linux/cgroup-defs.h>
@@ -11,6 +12,36 @@
 
 struct seq_file;
 struct css_set;
+
+#ifdef CONFIG_CGROUPS
+static inline void
+cgroup_move_task_auth_guard_check_where(struct task_struct *task,
+					bool allow_unpublished_task,
+					const char *where)
+{
+	AUTH_GUARD_FAIL_STOP_UNLESS(allow_unpublished_task ?
+		auth_guard_task_unpublished_where(task, where) :
+		auth_guard_task_transition_open_where(task, where));
+}
+
+static inline void
+cgroup_move_task_auth_guard_validate_where(struct task_struct *task,
+					   bool allow_unpublished_task,
+					   const char *where)
+{
+	if (!allow_unpublished_task)
+		AUTH_GUARD_FAIL_STOP_UNLESS(
+			auth_guard_task_validate_transition_result_where(
+				task, where));
+}
+
+#define cgroup_move_task_auth_guard_check(_task, _allow_unpublished) \
+	cgroup_move_task_auth_guard_check_where(                       \
+		(_task), (_allow_unpublished), __func__)
+#define cgroup_move_task_auth_guard_validate(_task, _allow_unpublished) \
+	cgroup_move_task_auth_guard_validate_where(                       \
+		(_task), (_allow_unpublished), __func__)
+#endif
 
 #ifdef CONFIG_PSI
 
@@ -39,7 +70,8 @@ static inline struct psi_group *cgroup_psi(struct cgroup *cgrp)
 
 int psi_cgroup_alloc(struct cgroup *cgrp);
 void psi_cgroup_free(struct cgroup *cgrp);
-void cgroup_move_task(struct task_struct *p, struct css_set *to);
+void cgroup_move_task(struct task_struct *p, struct css_set *to,
+		      bool allow_unpublished_task);
 void psi_cgroup_restart(struct psi_group *group);
 #endif
 
@@ -58,9 +90,13 @@ static inline int psi_cgroup_alloc(struct cgroup *cgrp)
 static inline void psi_cgroup_free(struct cgroup *cgrp)
 {
 }
-static inline void cgroup_move_task(struct task_struct *p, struct css_set *to)
+
+static inline void cgroup_move_task(struct task_struct *p, struct css_set *to,
+				    bool allow_unpublished_task)
 {
+	cgroup_move_task_auth_guard_check(p, allow_unpublished_task);
 	rcu_assign_pointer(p->cgroups, to);
+	cgroup_move_task_auth_guard_validate(p, allow_unpublished_task);
 }
 static inline void psi_cgroup_restart(struct psi_group *group) {}
 #endif

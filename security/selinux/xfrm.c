@@ -75,15 +75,17 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 				   struct xfrm_user_sec_ctx *uctx,
 				   gfp_t gfp)
 {
+	struct selinux_cred_view actor;
 	int rc;
 	struct xfrm_sec_ctx *ctx = NULL;
-	struct selinux_state *state = current_selinux_state();
 	u32 str_len;
 
 	if (ctxp == NULL || uctx == NULL ||
 	    uctx->ctx_doi != XFRM_SC_DOI_LSM ||
 	    uctx->ctx_alg != XFRM_SC_ALG_SELINUX)
 		return -EINVAL;
+	if (!selinux_cred_view_get(current_cred(), &actor))
+		return -EACCES;
 
 	str_len = uctx->ctx_len;
 	if (str_len >= PAGE_SIZE)
@@ -105,19 +107,19 @@ static int selinux_xfrm_alloc_user(struct xfrm_sec_ctx **ctxp,
 	 * still have no state carrier.  Keep child-state import frozen while that
 	 * raw network labeling path remains host-global.
 	 */
-	if (selinux_state_freezes_raw_network_sid_carriers(state)) {
+	if (selinux_state_freezes_raw_network_sid_carriers(actor.state)) {
 		rc = -EOPNOTSUPP;
 		goto err;
 	}
 
-	rc = security_context_to_sid_state(state, ctx->ctx_str, str_len,
+	rc = security_context_to_sid_state(actor.state, ctx->ctx_str, str_len,
 					   &ctx->ctx_sid, gfp);
 	if (rc)
 		goto err;
 
-	rc = avc_has_perm_state(state, current_sid(), ctx->ctx_sid,
-				SECCLASS_ASSOCIATION,
-				ASSOCIATION__SETCONTEXT, NULL);
+	rc = avc_has_perm_state(actor.state, actor.security->sid, ctx->ctx_sid,
+				SECCLASS_ASSOCIATION, ASSOCIATION__SETCONTEXT,
+				NULL);
 	if (rc)
 		goto err;
 
@@ -147,15 +149,17 @@ static void selinux_xfrm_free(struct xfrm_sec_ctx *ctx)
  */
 static int selinux_xfrm_delete(struct xfrm_sec_ctx *ctx)
 {
-	struct selinux_state *state = current_selinux_state();
+	struct selinux_cred_view actor;
 
 	if (!ctx)
 		return 0;
+	if (!selinux_cred_view_get(current_cred(), &actor))
+		return -EACCES;
 
-	if (selinux_state_freezes_raw_network_sid_carriers(state))
+	if (selinux_state_freezes_raw_network_sid_carriers(actor.state))
 		return -EOPNOTSUPP;
 
-	return avc_has_perm_state(state, current_sid(), ctx->ctx_sid,
+	return avc_has_perm_state(actor.state, actor.security->sid, ctx->ctx_sid,
 				  SECCLASS_ASSOCIATION,
 				  ASSOCIATION__SETCONTEXT, NULL);
 }
@@ -357,10 +361,10 @@ int selinux_xfrm_state_alloc(struct xfrm_state *x,
 int selinux_xfrm_state_alloc_acquire(struct xfrm_state *x,
 				     struct xfrm_sec_ctx *polsec, u32 secid)
 {
+	struct selinux_cred_view actor;
 	int rc;
 	struct xfrm_sec_ctx *ctx;
 	char *ctx_str = NULL;
-	struct selinux_state *state = current_selinux_state();
 	u32 str_len;
 
 	if (!polsec)
@@ -368,16 +372,19 @@ int selinux_xfrm_state_alloc_acquire(struct xfrm_state *x,
 
 	if (secid == 0)
 		return -EINVAL;
+	if (!selinux_cred_view_get(current_cred(), &actor))
+		return -EACCES;
 
 	/*
 	 * Child states cannot safely export raw XFRM object secctx yet because the
 	 * XFRM object and flow/peer secid paths still lack attached SELinux state
 	 * identity and remain anchored to the host-global raw network SID model.
 	 */
-	if (selinux_state_freezes_raw_network_sid_carriers(state))
+	if (selinux_state_freezes_raw_network_sid_carriers(actor.state))
 		return -EOPNOTSUPP;
 
-	rc = security_sid_to_context_state(state, secid, &ctx_str, &str_len);
+	rc = security_sid_to_context_state(actor.state, secid, &ctx_str,
+					   &str_len);
 	if (rc)
 		return rc;
 

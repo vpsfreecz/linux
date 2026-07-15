@@ -34,6 +34,20 @@ bool bpf_token_same_container_domain(const struct bpf_token *a,
 	return a->tracing_ns && a->tracing_ns == b->tracing_ns;
 }
 
+bool bpf_token_same_owner_domain(const struct bpf_token *a,
+				 const struct bpf_token *b)
+{
+	bool a_container = bpf_token_is_container(a);
+	bool b_container = bpf_token_is_container(b);
+
+	if (!a_container && !b_container)
+		return true;
+	if (!a_container || !b_container)
+		return false;
+
+	return bpf_token_same_container_domain(a, b);
+}
+
 bool bpf_token_task_match(const struct bpf_token *token,
 			     const struct task_struct *task)
 {
@@ -45,42 +59,138 @@ bool bpf_token_task_match(const struct bpf_token *token,
 	return tracing_ns_matches_task(token->tracing_ns, task);
 }
 
-bool bpf_token_current_container_member(void)
+/*
+ * Return a referenced current container tracing domain. A valid host caller is
+ * represented by NULL, while an unauthenticated or inconsistent current
+ * authority graph is represented by ERR_PTR().
+ */
+static struct tracing_namespace *
+bpf_token_current_container_ns_where(const char *where)
 {
 #ifdef CONFIG_TRACING_NS
-	struct tracing_namespace *tns = current_tracing_ns();
+	struct tracing_namespace *tns;
 
-	if (!tns || tns == &init_tracing_ns)
-		return false;
+	tns = get_current_tracing_ns_checked_where(where);
+	if (IS_ERR(tns))
+		return tns;
+	if (tns == &init_tracing_ns) {
+		put_tracing_ns(tns);
+		return NULL;
+	}
+	if (!tracing_ns_matches_task_where(tns, current, where)) {
+		put_tracing_ns(tns);
+		return ERR_PTR(-EACCES);
+	}
 
-	return tracing_ns_matches_task(tns, current);
+	return tns;
 #else
-	return false;
+	return NULL;
 #endif
 }
 
-bool bpf_token_current_container_task_allowed(const struct task_struct *task)
+struct bpf_current_container
+bpf_current_container_get_where(const char *where)
 {
-#ifdef CONFIG_TRACING_NS
-	struct tracing_namespace *tns = current_tracing_ns();
+	struct bpf_current_container container = {
+		.state = BPF_CURRENT_CONTAINER_INVALID,
+		.error = -EACCES,
+	};
+	struct tracing_namespace *tns;
 
-	if (!bpf_token_current_container_member())
-		return true;
+	tns = bpf_token_current_container_ns_where(where);
+	if (IS_ERR(tns)) {
+		container.error = PTR_ERR(tns);
+		return container;
+	}
+	if (!tns) {
+		container.state = BPF_CURRENT_CONTAINER_HOST;
+		container.error = 0;
+		return container;
+	}
 
-	return tracing_ns_matches_task(tns, task);
-#else
-	return true;
-#endif
+	container.tracing_ns = tns;
+	container.state = BPF_CURRENT_CONTAINER_MEMBER;
+	container.error = 0;
+	return container;
 }
 
-static bool bpf_token_current_container_allowed(const struct bpf_token *token)
+void bpf_current_container_put(struct bpf_current_container *container)
 {
-	if (!bpf_token_current_container_member())
-		return true;
-	if (!bpf_token_is_container(token))
-		return false;
+	if (container->tracing_ns)
+		put_tracing_ns(container->tracing_ns);
+	container->tracing_ns = NULL;
+}
 
-	return bpf_token_task_match(token, current);
+bool bpf_container_capable(const struct bpf_current_container *container,
+			   int cap)
+{
+	if (container->state == BPF_CURRENT_CONTAINER_INVALID)
+		return false;
+	if (container->state == BPF_CURRENT_CONTAINER_HOST)
+		return capable(cap);
+
+	return container->tracing_ns &&
+	       bpf_ns_capable(container->tracing_ns->user_ns, cap);
+}
+
+bool bpf_container_token_allowed(const struct bpf_current_container *container,
+				 const struct bpf_token *token)
+{
+	if (container->state == BPF_CURRENT_CONTAINER_INVALID)
+		return false;
+	if (container->state == BPF_CURRENT_CONTAINER_HOST)
+		return true;
+
+	return bpf_token_is_container(token) &&
+	       token->tracing_ns == container->tracing_ns;
+}
+
+bool bpf_container_task_allowed_where(const struct bpf_current_container *container,
+				      const struct task_struct *task,
+				      const char *where)
+{
+	if (container->state == BPF_CURRENT_CONTAINER_INVALID)
+		return false;
+	if (container->state == BPF_CURRENT_CONTAINER_HOST)
+		return true;
+
+	return tracing_ns_matches_task_where(container->tracing_ns, task, where);
+}
+
+int bpf_token_current_container_member_checked_where(const char *where)
+{
+	BPF_CURRENT_CONTAINER_WHERE(container, where);
+
+	if (container.state == BPF_CURRENT_CONTAINER_INVALID)
+		return container.error;
+	if (container.state == BPF_CURRENT_CONTAINER_HOST)
+		return 0;
+
+	return 1;
+}
+
+bool bpf_token_current_container_member_where(const char *where)
+{
+	BPF_CURRENT_CONTAINER_WHERE(container, where);
+
+	/* Restriction-only callers must not fall back to host authority. */
+	return bpf_container_restricted(&container);
+}
+
+bool bpf_token_current_container_task_allowed_where(const struct task_struct *task,
+						    const char *where)
+{
+	BPF_CURRENT_CONTAINER_WHERE(container, where);
+
+	return bpf_container_task_allowed_where(&container, task, where);
+}
+
+bool bpf_token_current_container_allowed_where(const struct bpf_token *token,
+					       const char *where)
+{
+	BPF_CURRENT_CONTAINER_WHERE(container, where);
+
+	return bpf_container_token_allowed(&container, token);
 }
 
 /*
@@ -89,29 +199,11 @@ static bool bpf_token_current_container_allowed(const struct bpf_token *token)
  * not regain tracing privileges solely by becoming capable in that nested
  * namespace.
  */
-static struct user_namespace *bpf_token_current_container_userns(void)
+bool bpf_current_container_capable_where(int cap, const char *where)
 {
-#ifdef CONFIG_TRACING_NS
-	struct tracing_namespace *tns = current_tracing_ns();
+	BPF_CURRENT_CONTAINER_WHERE(container, where);
 
-	if (!bpf_token_current_container_member())
-		return NULL;
-
-	return tns->user_ns;
-#else
-	return NULL;
-#endif
-}
-
-bool bpf_token_current_container_capable(int cap)
-{
-	struct user_namespace *userns;
-
-	userns = bpf_token_current_container_userns();
-	if (!userns)
-		return false;
-
-	return bpf_ns_capable(userns, cap);
+	return bpf_container_capable(&container, cap);
 }
 
 /*
@@ -120,12 +212,12 @@ bool bpf_token_current_container_capable(int cap)
  * discovery surfaces merely because they dropped tracing caps or entered a
  * nested user namespace.
  */
-bool bpf_token_current_restrict_tracing_symbols(void)
+bool bpf_token_current_restrict_tracing_symbols_where(const char *where)
 {
 	if (!sysctl_bpf_container_tracing_enabled)
 		return false;
 
-	return bpf_token_current_container_member();
+	return bpf_token_current_container_member_where(where);
 }
 
 static bool bpf_token_allow_syscall_symbol(const char *name, const char *syscall)
@@ -224,23 +316,22 @@ static bool bpf_token_allow_container_symbol_access_name(const char *name)
 	return false;
 }
 
-static struct bpf_token *bpf_token_alloc_current_container(void)
+struct bpf_token *
+bpf_token_get_for_container(const struct bpf_current_container *container)
 {
 	struct bpf_token *token;
-	struct user_namespace *userns;
-#ifdef CONFIG_TRACING_NS
-	struct tracing_namespace *tns = current_tracing_ns();
-#else
-	struct tracing_namespace *tns = NULL;
-#endif
+	struct tracing_namespace *tns = container->tracing_ns;
 
-	if (!bpf_token_current_container_capable(CAP_BPF) &&
-	    !bpf_token_current_container_capable(CAP_PERFMON) &&
-	    !bpf_token_current_container_capable(CAP_SYS_ADMIN) &&
-	    !bpf_token_current_container_capable(CAP_NET_ADMIN))
+	if (container->state == BPF_CURRENT_CONTAINER_INVALID)
+		return ERR_PTR(container->error ?: -EACCES);
+	if (container->state == BPF_CURRENT_CONTAINER_HOST)
 		return NULL;
-	userns = bpf_token_current_container_userns();
-	if (!tns || !userns)
+	if (WARN_ON_ONCE(!tns))
+		return ERR_PTR(-EACCES);
+	if (!bpf_ns_capable(tns->user_ns, CAP_BPF) &&
+	    !bpf_ns_capable(tns->user_ns, CAP_PERFMON) &&
+	    !bpf_ns_capable(tns->user_ns, CAP_SYS_ADMIN) &&
+	    !bpf_ns_capable(tns->user_ns, CAP_NET_ADMIN))
 		return NULL;
 
 	token = kzalloc(sizeof(*token), GFP_KERNEL);
@@ -249,15 +340,17 @@ static struct bpf_token *bpf_token_alloc_current_container(void)
 
 	atomic64_set(&token->refcnt, 1);
 	token->flags = BPF_TOKEN_F_CONTAINER | BPF_TOKEN_F_INTERNAL;
-	token->userns = get_user_ns(userns);
+	token->userns = get_user_ns(tns->user_ns);
 	token->tracing_ns = get_tracing_ns(tns);
 
 	return token;
 }
 
-struct bpf_token *bpf_token_get_current_container(void)
+struct bpf_token *bpf_token_get_current_container_where(const char *where)
 {
-	return bpf_token_alloc_current_container();
+	BPF_CURRENT_CONTAINER_WHERE(container, where);
+
+	return bpf_token_get_for_container(&container);
 }
 
 bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *name)
@@ -268,9 +361,10 @@ bool bpf_token_allow_tracing_symbol(const struct bpf_token *token, const char *n
 	return bpf_token_allow_container_symbol_access_name(name);
 }
 
-bool bpf_token_current_allow_tracing_symbol(const char *name)
+bool bpf_token_current_allow_tracing_symbol_where(const char *name,
+						  const char *where)
 {
-	if (!bpf_token_current_restrict_tracing_symbols())
+	if (!bpf_token_current_restrict_tracing_symbols_where(where))
 		return true;
 
 	return bpf_token_allow_container_symbol_access_name(name);
@@ -282,9 +376,10 @@ bool bpf_token_current_allow_tracing_symbol(const char *name)
  * bounded allowlist so bpftrace cannot bypass listing with a manually typed
  * BTF-shaped host symbol.
  */
-bool bpf_token_current_allow_tracing_symbol_discovery(const char *name)
+bool bpf_token_current_allow_tracing_symbol_discovery_where(const char *name,
+							    const char *where)
 {
-	if (!bpf_token_current_restrict_tracing_symbols())
+	if (!bpf_token_current_restrict_tracing_symbols_where(where))
 		return true;
 
 	return bpf_token_allow_container_symbol_access_name(name);
@@ -529,6 +624,11 @@ int bpf_token_create(union bpf_attr *attr)
 	    mnt_opts->delegate_attachs == 0)
 		return -ENOENT; /* no BPF token delegation is set up */
 
+	BPF_CURRENT_CONTAINER(container);
+	err = bpf_container_status(&container);
+	if (err)
+		return err;
+
 	mode = S_IFREG | ((S_IRUSR | S_IWUSR) & ~current_umask());
 	inode = bpf_get_inode(sb, NULL, mode);
 	if (IS_ERR(inode))
@@ -555,13 +655,11 @@ int bpf_token_create(union bpf_attr *attr)
 	/* remember bpffs owning userns for future ns_capable() checks */
 	token->userns = get_user_ns(userns);
 
-	if (bpf_token_current_container_member()) {
-		struct tracing_namespace *tns = current_tracing_ns();
-
+	if (container.state == BPF_CURRENT_CONTAINER_MEMBER) {
 		token->flags = BPF_TOKEN_F_CONTAINER;
 		put_user_ns(token->userns);
-		token->userns = get_user_ns(tns->user_ns);
-		token->tracing_ns = get_tracing_ns(tns);
+		token->userns = get_user_ns(container.tracing_ns->user_ns);
+		token->tracing_ns = get_tracing_ns(container.tracing_ns);
 	}
 
 	token->allowed_cmds = mnt_opts->delegate_cmds;
@@ -617,7 +715,20 @@ int bpf_token_get_info_by_fd(struct bpf_token *token,
 	return 0;
 }
 
-struct bpf_token *bpf_token_get_from_fd(u32 ufd)
+static struct bpf_token *
+bpf_token_ref_for_container(struct bpf_token *token,
+			    const struct bpf_current_container *container)
+{
+	if (!bpf_container_token_allowed(container, token))
+		return ERR_PTR(-EACCES);
+	bpf_token_inc(token);
+
+	return token;
+}
+
+static struct bpf_token *
+__bpf_token_get_from_fd(u32 ufd,
+			const struct bpf_current_container *container)
 {
 	CLASS(fd, f)(ufd);
 	struct bpf_token *token;
@@ -628,11 +739,21 @@ struct bpf_token *bpf_token_get_from_fd(u32 ufd)
 		return ERR_PTR(-EINVAL);
 
 	token = fd_file(f)->private_data;
-	if (!bpf_token_current_container_allowed(token))
-		return ERR_PTR(-EACCES);
-	bpf_token_inc(token);
+	return bpf_token_ref_for_container(token, container);
+}
 
-	return token;
+struct bpf_token *
+bpf_token_get_from_fd_for_container(u32 ufd,
+				    const struct bpf_current_container *container)
+{
+	return __bpf_token_get_from_fd(ufd, container);
+}
+
+struct bpf_token *bpf_token_get_from_fd(u32 ufd)
+{
+	BPF_CURRENT_CONTAINER(container);
+
+	return __bpf_token_get_from_fd(ufd, &container);
 }
 
 bool bpf_token_allow_cmd(const struct bpf_token *token, enum bpf_cmd cmd)

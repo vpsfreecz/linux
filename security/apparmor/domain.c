@@ -57,10 +57,17 @@ static int may_change_ptraced_domain(const struct cred *to_cred,
 
 	rcu_read_lock();
 	tracer = ptrace_parent(current);
+	if (tracer)
+		get_task_struct(tracer);
+	rcu_read_unlock();
 	if (tracer) {
-		/* released below */
-		tracerl = aa_get_task_label(tracer);
-		tracer_cred = get_task_cred(tracer);
+		tracer_cred = get_task_cred_checked(tracer);
+		if (IS_ERR(tracer_cred)) {
+			error = PTR_ERR(tracer_cred);
+			tracer_cred = NULL;
+			goto out;
+		}
+		tracerl = aa_get_newest_cred_label(tracer_cred);
 	}
 	/* not ptraced */
 	if (!tracer || unconfined(tracerl))
@@ -70,9 +77,10 @@ static int may_change_ptraced_domain(const struct cred *to_cred,
 			      PTRACE_MODE_ATTACH);
 
 out:
-	rcu_read_unlock();
 	aa_put_label(tracerl);
 	put_cred(tracer_cred);
+	if (tracer)
+		put_task_struct(tracer);
 
 	if (error)
 		*info = "ptrace prevents transition";

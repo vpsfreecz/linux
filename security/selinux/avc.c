@@ -815,17 +815,32 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
 }
 
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-static bool avc_guest_syslog_mirror_needed(const struct selinux_state *state)
+static struct syslog_namespace *
+avc_guest_syslog_mirror_namespace(const struct selinux_state *state)
 {
+	const struct cred *cred = current_cred();
+	struct selinux_cred_view actor;
+	struct syslog_namespace *syslog_ns;
+
 	if (!state || state == &selinux_state)
-		return false;
+		return NULL;
+	if (!selinux_cred_view_get(cred, &actor))
+		return NULL;
 
 	/*
 	 * Mirror only denials audited in the current guest-managed state. Host
 	 * state denials and foreign-state object checks remain host-only.
 	 */
-	return state == current_selinux_state() &&
-		lsm_ns_current_syslog_routes_lsm(LSM_ID_SELINUX);
+	syslog_ns = lsm_ns_get_current_syslog_route_lsm(LSM_ID_SELINUX);
+	if (!syslog_ns)
+		return NULL;
+
+	if (state != actor.state) {
+		put_syslog_ns(syslog_ns);
+		return NULL;
+	}
+
+	return syslog_ns;
 }
 
 static void avc_guest_syslog_mirror(struct selinux_audit_data *sad)
@@ -850,13 +865,16 @@ static void avc_guest_syslog_mirror(struct selinux_audit_data *sad)
 	int len = 0;
 	int msg_len;
 
-	if (!sad->denied || !avc_guest_syslog_mirror_needed(sad->state))
+	if (!sad->denied)
 		return;
 
 	if (WARN_ON(!sad->tclass || sad->tclass >= ARRAY_SIZE(secclass_map)))
 		return;
 
-	syslog_ns = current_syslog_ns();
+	syslog_ns = avc_guest_syslog_mirror_namespace(sad->state);
+	if (!syslog_ns)
+		return;
+
 	perms = secclass_map[sad->tclass - 1].perms;
 	tclass = secclass_map[sad->tclass - 1].name;
 
@@ -902,6 +920,7 @@ static void avc_guest_syslog_mirror(struct selinux_audit_data *sad)
 			     tclass, sad->result ? 0 : 1);
 
 	ns_printk(syslog_ns, KERN_WARNING "%s\n", msg);
+	put_syslog_ns(syslog_ns);
 
 	kfree(tcontext);
 	kfree(scontext);

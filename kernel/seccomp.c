@@ -15,6 +15,7 @@
  */
 #define pr_fmt(fmt) "seccomp: " fmt
 
+#include <linux/auth_guard.h>
 #include <linux/refcount.h>
 #include <linux/audit.h>
 #include <linux/compat.h>
@@ -30,9 +31,6 @@
 #include <linux/sysctl.h>
 
 #include <asm/syscall.h>
-
-/* Not exposed in headers: strictly internal use only. */
-#define SECCOMP_MODE_DEAD	(SECCOMP_MODE_FILTER + 1)
 
 #ifdef CONFIG_SECCOMP_FILTER
 #include <linux/file.h>
@@ -445,16 +443,26 @@ static inline bool seccomp_may_assign_mode(unsigned long seccomp_mode)
 
 void __weak arch_seccomp_spec_mitigate(struct task_struct *task) { }
 
-static inline void seccomp_assign_mode(struct task_struct *task,
-				       unsigned long seccomp_mode,
-				       unsigned long flags)
+static inline void seccomp_assign_mode_state(struct task_struct *task,
+					     unsigned long seccomp_mode)
 {
 	assert_spin_locked(&task->sighand->siglock);
 
 	task->seccomp.mode = seccomp_mode;
+}
+
+static inline void seccomp_activate_mode(struct task_struct *task,
+					 unsigned long flags)
+{
+	assert_spin_locked(&task->sighand->siglock);
+
 	/*
 	 * Make sure SYSCALL_WORK_SECCOMP cannot be set before the mode (and
-	 * filter) is set.
+	 * filter) is set.  In the remote TSYNC path this must immediately
+	 * follow publication of that state: a running target does not take
+	 * siglock on syscall entry and must not pass an unfiltered entry while
+	 * the authority seal is being recomputed.  Syscall work is monotonic
+	 * execution plumbing and is intentionally outside the task digest.
 	 */
 	smp_mb__before_atomic();
 	/* Assume default seccomp processes want spec flaw mitigation. */
@@ -462,6 +470,82 @@ static inline void seccomp_assign_mode(struct task_struct *task,
 		arch_seccomp_spec_mitigate(task);
 	set_task_syscall_work(task, SECCOMP);
 }
+
+static inline struct auth_guard_task_seccomp_state
+seccomp_guard_task_state(struct task_struct *task)
+{
+	struct auth_guard_task_seccomp_state state = {
+		.mode = READ_ONCE(task->seccomp.mode),
+		.no_new_privs = task_no_new_privs(task),
+	};
+
+#ifdef CONFIG_SECCOMP_FILTER
+	state.filter_count = atomic_read(&task->seccomp.filter_count);
+	state.filter = READ_ONCE(task->seccomp.filter);
+#endif
+	return state;
+}
+
+static bool
+seccomp_guard_expect_where(struct task_struct *task,
+			   enum auth_guard_task_seccomp_change change,
+			   const struct auth_guard_task_seccomp_state *expected,
+			   const char *where)
+{
+	return auth_guard_task_expect_seccomp_in_transition_where(task, change,
+								  expected, where);
+}
+
+static bool
+seccomp_guard_expect_mode_where(struct task_struct *task,
+				enum auth_guard_task_seccomp_change change,
+				unsigned long mode, const char *where)
+{
+	struct auth_guard_task_seccomp_state expected =
+		seccomp_guard_task_state(task);
+
+	expected.mode = mode;
+	return seccomp_guard_expect_where(task, change, &expected, where);
+}
+
+static bool
+seccomp_guard_validate_finish_transition_where(struct task_struct *task,
+					       const char *where)
+{
+	return auth_guard_task_validate_transition_result_where(task, where) &&
+		auth_guard_task_finish_transition_where(task, where);
+}
+
+static void seccomp_mark_current_dead_where(const char *where)
+{
+	if (!auth_guard_task_begin_transition_wait_where(current, where)) {
+		/* Log mode is diagnostic; this terminal restriction must proceed. */
+		auth_guard_task_transition_quarantine(current);
+		current->seccomp.mode = SECCOMP_MODE_DEAD;
+		return;
+	}
+	if (!seccomp_guard_expect_mode_where(current,
+					     AUTH_GUARD_TASK_SECCOMP_DEAD,
+					     SECCOMP_MODE_DEAD, where)) {
+		auth_guard_task_transition_quarantine(current);
+		current->seccomp.mode = SECCOMP_MODE_DEAD;
+		return;
+	}
+	current->seccomp.mode = SECCOMP_MODE_DEAD;
+	(void)seccomp_guard_validate_finish_transition_where(current, where);
+}
+
+#define seccomp_guard_expect_mode(_task, _change, _mode) \
+	seccomp_guard_expect_mode_where((_task), (_change), (_mode), __func__)
+#define seccomp_guard_expect(_task, _change, _expected) \
+	seccomp_guard_expect_where((_task), (_change), (_expected), __func__)
+#define seccomp_mark_current_dead() \
+	seccomp_mark_current_dead_where(__func__)
+#define seccomp_guard_fail_stop_current() \
+	do { \
+		spin_unlock_irq(&current->sighand->siglock); \
+		AUTH_GUARD_FAIL_STOP(); \
+	} while (0)
 
 #ifdef CONFIG_SECCOMP_FILTER
 /* Returns 1 if the parent is an ancestor of the child. */
@@ -504,6 +588,9 @@ static inline pid_t seccomp_can_sync_threads(void)
 		/* Skip exited threads. */
 		if (thread->flags & PF_EXITING)
 			continue;
+
+		if (!auth_guard_task_check(thread))
+			return -EACCES;
 
 		if (thread->seccomp.mode == SECCOMP_MODE_DISABLED ||
 		    (thread->seccomp.mode == SECCOMP_MODE_FILTER &&
@@ -570,7 +657,14 @@ static void __seccomp_filter_release(struct seccomp_filter *orig)
  */
 void seccomp_filter_release(struct task_struct *tsk)
 {
+	struct auth_guard_task_seccomp_state expected_state;
 	struct seccomp_filter *orig;
+	struct seccomp_filter *expected;
+	enum auth_guard_task_teardown_status auth_guard_status;
+	bool declared = false;
+	bool exact;
+	bool old_valid;
+	bool trusted;
 
 	if (WARN_ON((tsk->flags & PF_EXITING) == 0))
 		return;
@@ -579,24 +673,147 @@ void seccomp_filter_release(struct task_struct *tsk)
 		return;
 
 	spin_lock_irq(&tsk->sighand->siglock);
-	orig = tsk->seccomp.filter;
+	auth_guard_status = auth_guard_task_begin_teardown_transition(tsk);
+	expected = READ_ONCE(tsk->seccomp.filter);
+	old_valid = auth_guard_task_validate_teardown(tsk, auth_guard_status);
+	if (auth_guard_status == AUTH_GUARD_TASK_TEARDOWN_OPENED && old_valid) {
+		expected_state = seccomp_guard_task_state(tsk);
+		expected = expected_state.filter;
+		expected_state.filter = NULL;
+		declared = seccomp_guard_expect(tsk,
+						AUTH_GUARD_TASK_SECCOMP_DETACH,
+						&expected_state);
+		old_valid = declared;
+	}
 	/* Detach task from its filter tree. */
-	tsk->seccomp.filter = NULL;
+	orig = xchg(&tsk->seccomp.filter, NULL);
+	exact = orig == expected;
+	if (auth_guard_status == AUTH_GUARD_TASK_TEARDOWN_OPENED && declared)
+		old_valid =
+			auth_guard_task_validate_transition_result(tsk) && old_valid;
+	/*
+	 * Keep the remaining exit tuple sealed and release only an exactly captured
+	 * authenticated filter.  Rejected filter trees remain deliberately leaked.
+	 */
+	trusted = auth_guard_task_complete_teardown(tsk, auth_guard_status,
+						   old_valid, exact,
+						   false);
+	if (!trusted && auth_guard_status == AUTH_GUARD_TASK_TEARDOWN_FAILED)
+		WARN_ON_ONCE(1);
 	spin_unlock_irq(&tsk->sighand->siglock);
-	__seccomp_filter_release(orig);
+	if (trusted)
+		__seccomp_filter_release(orig);
+}
+
+static void
+seccomp_guard_abort_sync_threads_where(struct task_struct *stop,
+					const char *where)
+{
+	struct task_struct *thread, *caller = current;
+
+	BUG_ON(!mutex_is_locked(&current->signal->cred_guard_mutex));
+	assert_spin_locked(&current->sighand->siglock);
+
+	for_each_thread(caller, thread) {
+		if (thread == caller || (thread->flags & PF_EXITING))
+			continue;
+		if (thread == stop)
+			return;
+		auth_guard_task_abort_transition_where(thread, where);
+	}
+}
+
+static void
+seccomp_guard_abort_sync_threads_after_where(struct task_struct *start,
+					     const char *where)
+{
+	struct task_struct *thread, *caller = current;
+	bool found = false;
+
+	assert_spin_locked(&current->sighand->siglock);
+
+	for_each_thread(caller, thread) {
+		if (thread == caller || (thread->flags & PF_EXITING))
+			continue;
+		if (!found) {
+			found = thread == start;
+			continue;
+		}
+		auth_guard_task_abort_transition_where(thread, where);
+	}
+}
+
+static inline int
+seccomp_guard_begin_sync_threads_where(bool *opened,
+				       const struct auth_guard_task_seccomp_state *caller_expected,
+				       const char *where)
+{
+	struct task_struct *thread, *caller = current;
+
+	BUG_ON(!mutex_is_locked(&current->signal->cred_guard_mutex));
+	assert_spin_locked(&current->sighand->siglock);
+
+	*opened = false;
+
+	/*
+	 * Match seccomp_sync_threads(): group exit is a no-op for peer tasks, so
+	 * there are no peer transitions to open.
+	 */
+	if (current->signal->flags & SIGNAL_GROUP_EXIT)
+		return 0;
+
+	for_each_thread(caller, thread) {
+		if (thread == caller || (thread->flags & PF_EXITING))
+			continue;
+		if (!auth_guard_task_begin_transition_where(thread, where)) {
+			seccomp_guard_abort_sync_threads_where(thread, where);
+			return -EACCES;
+		}
+		*opened = true;
+	}
+
+	/*
+	 * Declare every peer's exact endpoint before current's filter is attached,
+	 * so TSYNC remains an all-or-none authenticated transaction.
+	 */
+	for_each_thread(caller, thread) {
+		struct auth_guard_task_seccomp_state expected;
+
+		if (thread == caller || (thread->flags & PF_EXITING))
+			continue;
+		expected = seccomp_guard_task_state(thread);
+		expected.mode = SECCOMP_MODE_FILTER;
+		expected.no_new_privs =
+			expected.no_new_privs || caller_expected->no_new_privs;
+		expected.filter_count = caller_expected->filter_count;
+		expected.filter = caller_expected->filter;
+		if (!seccomp_guard_expect_where(thread,
+						AUTH_GUARD_TASK_SECCOMP_SYNC,
+						&expected, where)) {
+			seccomp_guard_abort_sync_threads_where(NULL, where);
+			*opened = false;
+			return -EACCES;
+		}
+	}
+
+	return 0;
 }
 
 /**
- * seccomp_sync_threads: sets all threads to use current's filter
+ * seccomp_sync_threads_where: sets all threads to use current's filter
  *
  * @flags: SECCOMP_FILTER_FLAG_* flags to set during sync.
+ * @auth_guarded: whether peer task transitions were opened during preflight
+ * @where: guard diagnostic origin shared by the whole peer transaction
  *
  * Expects sighand and cred_guard_mutex locks to be held, and for
  * seccomp_can_sync_threads() to have returned success already
  * without dropping the locks.
  *
  */
-static inline void seccomp_sync_threads(unsigned long flags)
+static inline void seccomp_sync_threads_where(unsigned long flags,
+					      bool auth_guarded,
+					      const char *where)
 {
 	struct task_struct *thread, *caller;
 
@@ -605,7 +822,10 @@ static inline void seccomp_sync_threads(unsigned long flags)
 
 	/*
 	 * Don't touch any of the threads if the process is being killed.
-	 * This allows for a lockless check in seccomp_filter_release.
+	 * This allows for a lockless check in seccomp_filter_release.  The
+	 * caller's filter has already been attached and no peer transitions have
+	 * been opened yet, so guarded TSYNC still treats this as a successful
+	 * synchronization no-op.
 	 */
 	if (current->signal->flags & SIGNAL_GROUP_EXIT)
 		return;
@@ -613,6 +833,8 @@ static inline void seccomp_sync_threads(unsigned long flags)
 	/* Synchronize all threads. */
 	caller = current;
 	for_each_thread(caller, thread) {
+		struct seccomp_filter *old_filter;
+
 		/* Skip current, since it needs no changes. */
 		if (thread == caller)
 			continue;
@@ -624,42 +846,72 @@ static inline void seccomp_sync_threads(unsigned long flags)
 		if (thread->flags & PF_EXITING)
 			continue;
 
-		/* Get a task reference for the new leaf node. */
-		get_seccomp_filter(caller);
+		old_filter = thread->seccomp.filter;
 
 		/*
-		 * Drop the task reference to the shared ancestor since
-		 * current's path will hold a reference.  (This also
-		 * allows a put before the assignment.)
-		 */
-		__seccomp_filter_release(thread->seccomp.filter);
-
-		/* Make our new filter tree visible. */
-		smp_store_release(&thread->seccomp.filter,
-				  caller->seccomp.filter);
-		atomic_set(&thread->seccomp.filter_count,
-			   atomic_read(&caller->seccomp.filter_count));
-
-		/*
-		 * Don't let an unprivileged task work around
-		 * the no_new_privs restriction by creating
-		 * a thread that sets it up, enters seccomp,
-		 * then dies.
+		 * Don't let an unprivileged task work around the no_new_privs
+		 * restriction by creating a thread that sets it up, enters seccomp,
+		 * then dies.  Publish this monotonic restriction before the filter so
+		 * it does not extend the unfiltered activation window below.
 		 */
 		if (task_no_new_privs(caller))
 			task_set_no_new_privs(thread);
 
+		/* Get a task reference for the new leaf node. */
+		get_seccomp_filter(caller);
+
+		/* Make our new filter tree visible. */
+		smp_store_release(&thread->seccomp.filter,
+				  caller->seccomp.filter);
+
 		/*
-		 * Opt the other thread into seccomp if needed.
-		 * As threads are considered to be trust-realm
-		 * equivalent (see ptrace_may_access), it is safe to
-		 * allow one thread to transition the other.
+		 * Opt the other thread into seccomp immediately after filter
+		 * publication if needed.  As threads are considered to be
+		 * trust-realm equivalent (see ptrace_may_access), it is safe to allow
+		 * one thread to transition the other.
 		 */
-		if (thread->seccomp.mode == SECCOMP_MODE_DISABLED)
-			seccomp_assign_mode(thread, SECCOMP_MODE_FILTER,
-					    flags);
+		if (thread->seccomp.mode == SECCOMP_MODE_DISABLED) {
+			seccomp_assign_mode_state(thread, SECCOMP_MODE_FILTER);
+			seccomp_activate_mode(thread, flags);
+		}
+		atomic_set(&thread->seccomp.filter_count,
+			   atomic_read(&caller->seccomp.filter_count));
+		/*
+		 * All peer transitions were opened before current's filter was
+		 * attached.  Mode activation is already committed so a finish failure
+		 * here is an integrity violation, not a normal syscall failure path.
+		 * Close still-unmodified peers before stopping this context.
+		 */
+		if (auth_guarded &&
+		    !seccomp_guard_validate_finish_transition_where(thread, where)) {
+			seccomp_guard_abort_sync_threads_after_where(thread, where);
+			AUTH_GUARD_FAIL_STOP();
+		}
+
+		/*
+		 * Drop the task reference to the shared ancestor after the
+		 * synchronized thread is attached to current's filter tree.
+		 */
+		__seccomp_filter_release(old_filter);
 	}
+
 }
+
+#define seccomp_guard_begin_sync_threads(_opened, _expected) \
+	seccomp_guard_begin_sync_threads_where((_opened), (_expected), __func__)
+#define seccomp_guard_abort_sync_threads(_stop) \
+	seccomp_guard_abort_sync_threads_where((_stop), __func__)
+#define seccomp_sync_threads(_flags, _auth_guarded) \
+	seccomp_sync_threads_where((_flags), (_auth_guarded), __func__)
+#define seccomp_guard_abort_sync_fail_stop(_opened) \
+	do { \
+		bool *__opened = &(_opened); \
+		if (*__opened) { \
+			seccomp_guard_abort_sync_threads(NULL); \
+			*__opened = false; \
+		} \
+		seccomp_guard_fail_stop_current(); \
+	} while (0)
 
 /**
  * seccomp_prepare_filter: Prepares a seccomp filter for use.
@@ -919,8 +1171,7 @@ static void seccomp_cache_prepare(struct seccomp_filter *sfilter)
  *     seccomp mode or did not have an ancestral seccomp filter
  *   - in NEW_LISTENER mode: the fd of the new listener
  */
-static long seccomp_attach_filter(unsigned int flags,
-				  struct seccomp_filter *filter)
+static long seccomp_validate_filter_path(struct seccomp_filter *filter)
 {
 	unsigned long total_insns;
 	struct seccomp_filter *walker;
@@ -934,18 +1185,13 @@ static long seccomp_attach_filter(unsigned int flags,
 	if (total_insns > MAX_INSNS_PER_PATH)
 		return -ENOMEM;
 
-	/* If thread sync has been requested, check that it is possible. */
-	if (flags & SECCOMP_FILTER_FLAG_TSYNC) {
-		int ret;
+	return 0;
+}
 
-		ret = seccomp_can_sync_threads();
-		if (ret) {
-			if (flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH)
-				return -ESRCH;
-			else
-				return ret;
-		}
-	}
+static void seccomp_attach_filter(unsigned int flags,
+				  struct seccomp_filter *filter)
+{
+	assert_spin_locked(&current->sighand->siglock);
 
 	/* Set log flag, if present. */
 	if (flags & SECCOMP_FILTER_FLAG_LOG)
@@ -963,12 +1209,6 @@ static long seccomp_attach_filter(unsigned int flags,
 	seccomp_cache_prepare(filter);
 	current->seccomp.filter = filter;
 	atomic_inc(&current->seccomp.filter_count);
-
-	/* Now that the new filter is in place, synchronize to all threads. */
-	if (flags & SECCOMP_FILTER_FLAG_TSYNC)
-		seccomp_sync_threads(flags);
-
-	return 0;
 }
 
 static void __get_seccomp_filter(struct seccomp_filter *filter)
@@ -1080,7 +1320,7 @@ static void __secure_computing_strict(int this_syscall)
 #ifdef SECCOMP_DEBUG
 	dump_stack();
 #endif
-	current->seccomp.mode = SECCOMP_MODE_DEAD;
+	seccomp_mark_current_dead();
 	seccomp_log(this_syscall, SIGKILL, SECCOMP_RET_KILL_THREAD, true);
 	do_exit(SIGKILL);
 }
@@ -1356,7 +1596,7 @@ static int __seccomp_filter(int this_syscall, const bool recheck_after_trace)
 	case SECCOMP_RET_KILL_THREAD:
 	case SECCOMP_RET_KILL_PROCESS:
 	default:
-		current->seccomp.mode = SECCOMP_MODE_DEAD;
+		seccomp_mark_current_dead();
 		seccomp_log(this_syscall, SIGSYS, action, true);
 		/* Dump core only if this is the last remaining thread. */
 		if (action != SECCOMP_RET_KILL_THREAD ||
@@ -1429,19 +1669,43 @@ long prctl_get_seccomp(void)
 static long seccomp_set_mode_strict(void)
 {
 	const unsigned long seccomp_mode = SECCOMP_MODE_STRICT;
+	bool auth_guarded = false;
 	long ret = -EINVAL;
 
 	spin_lock_irq(&current->sighand->siglock);
 
-	if (!seccomp_may_assign_mode(seccomp_mode))
+	auth_guarded = auth_guard_task_begin_transition(current);
+	if (!auth_guarded) {
+		ret = -EACCES;
 		goto out;
+	}
+
+	if (!seccomp_may_assign_mode(seccomp_mode))
+		goto out_abort;
+
+	if (!seccomp_guard_expect_mode(current, AUTH_GUARD_TASK_SECCOMP_STRICT,
+				       seccomp_mode)) {
+		ret = -EACCES;
+		goto out_abort;
+	}
 
 #ifdef TIF_NOTSC
 	disable_TSC();
 #endif
-	seccomp_assign_mode(current, seccomp_mode, 0);
+	seccomp_assign_mode_state(current, seccomp_mode);
+	if (!auth_guard_task_validate_transition_result(current))
+		seccomp_guard_fail_stop_current();
+	seccomp_activate_mode(current, 0);
+	if (!auth_guard_task_finish_transition(current))
+		seccomp_guard_fail_stop_current();
+	auth_guarded = false;
 	ret = 0;
 
+out_abort:
+	if (auth_guarded) {
+		auth_guard_task_abort_transition(current);
+		auth_guarded = false;
+	}
 out:
 	spin_unlock_irq(&current->sighand->siglock);
 
@@ -1984,10 +2248,13 @@ static long seccomp_set_mode_filter(unsigned int flags,
 				    const char __user *filter)
 {
 	const unsigned long seccomp_mode = SECCOMP_MODE_FILTER;
+	struct auth_guard_task_seccomp_state expected_state;
 	struct seccomp_filter *prepared = NULL;
 	long ret = -EINVAL;
 	int listener = -1;
 	struct file *listener_f = NULL;
+	bool auth_guarded = false;
+	bool sync_auth_guarded = false;
 
 	/* Validate flags. */
 	if (flags & ~SECCOMP_FILTER_FLAG_MASK)
@@ -2043,21 +2310,80 @@ static long seccomp_set_mode_filter(unsigned int flags,
 
 	spin_lock_irq(&current->sighand->siglock);
 
-	if (!seccomp_may_assign_mode(seccomp_mode))
-		goto out;
-
-	if (has_duplicate_listener(prepared)) {
-		ret = -EBUSY;
+	auth_guarded = auth_guard_task_begin_transition(current);
+	if (!auth_guarded) {
+		ret = -EACCES;
 		goto out;
 	}
 
-	ret = seccomp_attach_filter(flags, prepared);
+	if (!seccomp_may_assign_mode(seccomp_mode))
+		goto out_abort_current;
+
+	if (has_duplicate_listener(prepared)) {
+		ret = -EBUSY;
+		goto out_abort_current;
+	}
+
+	expected_state = seccomp_guard_task_state(current);
+	expected_state.mode = seccomp_mode;
+	if (expected_state.filter_count < INT_MAX)
+		expected_state.filter_count++;
+	expected_state.filter = prepared;
+
+	if (flags & SECCOMP_FILTER_FLAG_TSYNC) {
+		ret = seccomp_can_sync_threads();
+		if (ret) {
+			if (flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH)
+				ret = -ESRCH;
+			goto out_abort_current;
+		}
+	}
+
+	ret = seccomp_validate_filter_path(prepared);
 	if (ret)
-		goto out;
+		goto out_abort_current;
+
+	if (flags & SECCOMP_FILTER_FLAG_TSYNC) {
+		ret = seccomp_guard_begin_sync_threads(&sync_auth_guarded,
+						       &expected_state);
+		if (ret)
+			goto out_abort_current;
+	}
+
+	if (!seccomp_guard_expect(current, AUTH_GUARD_TASK_SECCOMP_FILTER,
+				  &expected_state)) {
+		ret = -EACCES;
+		goto out_abort_sync;
+	}
+
+	seccomp_attach_filter(flags, prepared);
+	seccomp_assign_mode_state(current, seccomp_mode);
+	if (!auth_guard_task_validate_transition_result(current))
+		seccomp_guard_abort_sync_fail_stop(sync_auth_guarded);
+	seccomp_activate_mode(current, flags);
+	if (!auth_guard_task_finish_transition(current))
+		seccomp_guard_abort_sync_fail_stop(sync_auth_guarded);
+
 	/* Do not free the successfully attached filter. */
 	prepared = NULL;
 
-	seccomp_assign_mode(current, seccomp_mode, flags);
+	if (flags & SECCOMP_FILTER_FLAG_TSYNC) {
+		seccomp_sync_threads(flags, sync_auth_guarded);
+		sync_auth_guarded = false;
+	}
+	auth_guarded = false;
+
+	ret = 0;
+out_abort_sync:
+	if (sync_auth_guarded) {
+		seccomp_guard_abort_sync_threads(NULL);
+		sync_auth_guarded = false;
+	}
+out_abort_current:
+	if (auth_guarded) {
+		auth_guard_task_abort_transition(current);
+		auth_guarded = false;
+	}
 out:
 	spin_unlock_irq(&current->sighand->siglock);
 	if (flags & SECCOMP_FILTER_FLAG_TSYNC)
@@ -2202,6 +2528,10 @@ static struct seccomp_filter *get_nth_filter(struct task_struct *task,
 	 * tracer of the task, otherwise lock_task_sighand is needed.
 	 */
 	spin_lock_irq(&task->sighand->siglock);
+	if (!auth_guard_task_check(task)) {
+		spin_unlock_irq(&task->sighand->siglock);
+		return ERR_PTR(-EACCES);
+	}
 
 	if (task->seccomp.mode != SECCOMP_MODE_FILTER) {
 		spin_unlock_irq(&task->sighand->siglock);
@@ -2569,6 +2899,10 @@ int proc_pid_seccomp_cache(struct seq_file *m, struct pid_namespace *ns,
 
 	if (!lock_task_sighand(task, &flags))
 		return -ESRCH;
+	if (!auth_guard_task_check(task)) {
+		unlock_task_sighand(task, &flags);
+		return -EACCES;
+	}
 
 	f = READ_ONCE(task->seccomp.filter);
 	if (!f) {

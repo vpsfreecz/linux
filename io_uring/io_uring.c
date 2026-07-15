@@ -1832,7 +1832,7 @@ static inline int __io_issue_sqe(struct io_kiocb *req,
 
 	if (unlikely(creds || link)) {
 		if (creds)
-			revert_creds(creds);
+			put_cred(revert_creds(creds));
 		if (link)
 			io_queue_linked_timeout(link);
 	}

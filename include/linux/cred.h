@@ -8,7 +8,9 @@
 #ifndef _LINUX_CRED_H
 #define _LINUX_CRED_H
 
+#include <linux/auth_guard.h>
 #include <linux/capability.h>
+#include <linux/cleanup.h>
 #include <linux/init.h>
 #include <linux/key.h>
 #include <linux/atomic.h>
@@ -139,6 +141,12 @@ struct cred {
 	struct user_namespace *user_ns; /* user_ns the caps and keyrings are relative to. */
 	struct ucounts *ucounts;
 	struct group_info *group_info;	/* supplementary groups for euid/fsgid */
+#ifdef CONFIG_CRED_GUARD
+	struct auth_guard_stamp guard_prepared_stamp;
+	const struct cred *guard_prepared_source_cred;
+	struct auth_guard_stamp guard_prepared_source_stamp;
+	struct auth_guard_stamp guard_stamp;
+#endif
 	/* RCU deletion */
 	union {
 		int non_rcu;			/* Can we skip RCU deletion? */
@@ -149,11 +157,29 @@ struct cred {
 extern void __put_cred(struct cred *);
 extern void exit_creds(struct task_struct *);
 extern int copy_creds(struct task_struct *, u64);
+enum auth_guard_check_result
+cred_guard_check_task_cred_where(const struct task_struct *task,
+				 const struct cred *expected,
+				 const char *where);
+enum auth_guard_check_result
+cred_guard_check_task_cred_reserved_where(const struct task_struct *task,
+					  const struct cred *expected,
+					  const char *where);
+const struct cred *
+get_task_cred_checked_where(struct task_struct *task, const char *where);
+const struct cred *
+get_task_cred_checked_nowait_where(struct task_struct *task,
+				   const char *where);
 extern const struct cred *get_task_cred(struct task_struct *);
 extern struct cred *cred_alloc_blank(void);
 extern struct cred *prepare_creds(void);
 extern struct cred *prepare_exec_creds(void);
 extern int commit_creds(struct cred *);
+int commit_creds_where(struct cred *new, const char *where);
+int commit_creds_in_task_transition_where(
+	struct cred *new, struct auth_guard_task_lsm_request *detached_lsm,
+	const char *where);
+int commit_prepared_cred(struct cred *new);
 extern void abort_creds(struct cred *);
 extern struct cred *prepare_kernel_cred(struct task_struct *);
 extern int set_security_override(struct cred *, u32);
@@ -162,6 +188,93 @@ extern int set_create_files_as(struct cred *, struct inode *);
 extern int cred_fscmp(const struct cred *, const struct cred *);
 extern void __init cred_init(void);
 extern int set_cred_ucounts(struct cred *);
+#ifdef CONFIG_CRED_GUARD
+void __init cred_guard_enable(void);
+bool cred_guard_prepare_transfer_where(struct cred *new,
+				       const struct cred *old,
+				       const char *where);
+bool cred_guard_verify_prepared_cred_where(const struct cred *cred,
+					   const char *where);
+bool cred_guard_verify_committed_cred_where(const struct cred *cred,
+					    const char *where);
+int cred_guard_preflight_commit_creds_where(const struct cred *cred,
+					    const char *where);
+void cred_guard_task_invalidate_reserved_where(struct task_struct *task,
+					       const char *where);
+#else
+static inline void cred_guard_enable(void)
+{
+}
+
+static inline bool cred_guard_prepare_transfer_where(struct cred *new,
+						     const struct cred *old,
+						     const char *where)
+{
+	return true;
+}
+
+static inline bool
+cred_guard_verify_committed_cred_where(const struct cred *cred,
+				       const char *where)
+{
+	return true;
+}
+
+static inline bool
+cred_guard_verify_prepared_cred_where(const struct cred *cred,
+				      const char *where)
+{
+	return true;
+}
+
+static inline int
+cred_guard_preflight_commit_creds_where(const struct cred *cred,
+					const char *where)
+{
+	return 0;
+}
+
+static inline void
+cred_guard_task_invalidate_reserved_where(struct task_struct *task,
+					  const char *where)
+{
+}
+#endif
+
+/*
+ * Full authority readers can span external locks, so a consuming credential
+ * writer must reject them rather than wait.  In a CRED-only build, the shared
+ * coordinator has only short credential readers and retains the original
+ * wait-for-reader contract.
+ */
+static inline bool
+cred_guard_task_begin_consuming_transition_where(struct task_struct *task,
+						 const char *where)
+{
+	if (IS_ENABLED(CONFIG_AUTH_GUARD))
+		return auth_guard_task_begin_transition_where(task, where);
+
+	return auth_guard_task_begin_transition_wait_where(task, where);
+}
+
+#define get_task_cred_checked(_task) \
+	get_task_cred_checked_where((_task), __func__)
+#define get_task_cred_checked_nowait(_task) \
+	get_task_cred_checked_nowait_where((_task), __func__)
+#define commit_creds(_new) commit_creds_where((_new), __func__)
+#define commit_creds_in_task_transition(_new, _detached_lsm) \
+	commit_creds_in_task_transition_where(                \
+		(_new), (_detached_lsm), __func__)
+#define cred_guard_prepare_transfer(_new, _old) \
+	cred_guard_prepare_transfer_where((_new), (_old), __func__)
+#define cred_guard_verify_committed_cred(_cred) \
+	cred_guard_verify_committed_cred_where((_cred), __func__)
+#define cred_guard_verify_prepared_cred(_cred) \
+	cred_guard_verify_prepared_cred_where((_cred), __func__)
+#define cred_guard_preflight_commit_creds(_cred) \
+	cred_guard_preflight_commit_creds_where((_cred), __func__)
+#define cred_guard_task_begin_consuming_transition(_task) \
+	cred_guard_task_begin_consuming_transition_where((_task), __func__)
 
 static inline bool cap_ambient_invariant_ok(const struct cred *cred)
 {
@@ -170,15 +283,9 @@ static inline bool cap_ambient_invariant_ok(const struct cred *cred)
 					  cred->cap_inheritable));
 }
 
-static inline const struct cred *override_creds(const struct cred *override_cred)
-{
-	return rcu_replace_pointer(current->cred, override_cred, 1);
-}
-
-static inline const struct cred *revert_creds(const struct cred *revert_cred)
-{
-	return rcu_replace_pointer(current->cred, revert_cred, 1);
-}
+const struct cred *override_creds(const struct cred *override_cred);
+const struct cred *override_creds_from_prepared(struct cred *override_cred);
+const struct cred *revert_creds(const struct cred *revert_cred);
 
 /**
  * get_cred_many - Get references on a set of credentials
@@ -263,7 +370,29 @@ static inline void put_cred(const struct cred *cred)
 	put_cred_many(cred, 1);
 }
 
-DEFINE_FREE(put_cred, struct cred *, if (!IS_ERR_OR_NULL(_T)) put_cred(_T))
+static inline void put_cred_if_valid(const struct cred *cred)
+{
+	if (!IS_ERR_OR_NULL(cred))
+		put_cred(cred);
+}
+
+DEFINE_FREE(put_cred, const struct cred *,
+	    put_cred_if_valid(_T))
+
+/* Revert the subjective override and release the credential it replaced. */
+static inline void revert_creds_and_put(const struct cred *cred)
+{
+	if (cred)
+		put_cred(revert_creds(cred));
+}
+
+DEFINE_CLASS(override_creds, const struct cred *,
+	     revert_creds_and_put(_T),
+	     override_creds(override),
+	     const struct cred *override)
+DEFINE_CLASS_IS_GUARD(override_creds);
+
+#define scoped_with_creds(_override) scoped_guard(override_creds, _override)
 
 /**
  * current_cred - Access the current task's subjective credentials

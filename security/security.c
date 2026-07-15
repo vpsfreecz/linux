@@ -11,8 +11,10 @@
 
 #define pr_fmt(fmt) "LSM: " fmt
 
+#include <linux/auth_guard.h>
 #include <linux/bpf.h>
 #include <linux/capability.h>
+#include <linux/cred.h>
 #include <linux/dcache.h>
 #include <linux/export.h>
 #include <linux/init.h>
@@ -32,6 +34,152 @@
 #include <linux/fs.h>
 #include <net/flow.h>
 #include <net/sock.h>
+
+static enum auth_guard_check_result
+security_current_guard_result_where(const char *where)
+{
+	const struct cred *cred;
+	enum auth_guard_check_result result;
+
+	rcu_read_lock();
+	cred = __task_cred(current);
+	result = auth_guard_task_check_real_cred_where(current, cred, where);
+	rcu_read_unlock();
+
+	return result;
+}
+
+static bool security_current_guard_check_where(const char *where)
+{
+	return security_current_guard_result_where(where) ==
+		AUTH_GUARD_CHECK_VALID;
+}
+
+static bool security_current_guard_check_wait_where(const char *where)
+{
+	enum auth_guard_check_result result;
+
+	result = AUTH_GUARD_RETRY_BUSY(security_current_guard_result_where(where));
+	return result == AUTH_GUARD_CHECK_VALID;
+}
+
+static bool security_cred_is_current(const struct cred *cred)
+{
+	return cred == current_cred() || cred == current_real_cred();
+}
+
+struct security_task_guard_snapshot {
+	struct task_struct *task;
+	bool current_held;
+	bool task_held;
+};
+
+static enum auth_guard_check_result
+security_task_pair_try_begin_where(const struct task_struct *task,
+				   struct security_task_guard_snapshot *snapshot,
+				   const char *where)
+{
+	enum auth_guard_check_result result;
+
+	snapshot->task = (struct task_struct *)task;
+	snapshot->current_held = false;
+	snapshot->task_held = false;
+
+	result = auth_guard_task_snapshot_begin_where(current, where);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		return result;
+	snapshot->current_held = true;
+	if (task == current)
+		return AUTH_GUARD_CHECK_VALID;
+
+	result = auth_guard_task_snapshot_begin_where(snapshot->task, where);
+	if (result == AUTH_GUARD_CHECK_VALID) {
+		snapshot->task_held = true;
+		return AUTH_GUARD_CHECK_VALID;
+	}
+
+	if (!auth_guard_task_snapshot_end_where(current, where))
+		result = AUTH_GUARD_CHECK_INVALID;
+	snapshot->current_held = false;
+	return result;
+}
+
+static bool
+security_task_snapshots_begin_where(const struct task_struct *task,
+				    struct security_task_guard_snapshot *snapshot,
+				    const char *where)
+{
+	return security_task_pair_try_begin_where(task, snapshot, where) ==
+		AUTH_GUARD_CHECK_VALID;
+}
+
+static bool
+security_task_snapshots_begin_wait_where(const struct task_struct *task,
+					 struct security_task_guard_snapshot *snapshot,
+					 const char *where)
+{
+	enum auth_guard_check_result result;
+
+	/* Drop a partial current reservation before retrying the whole pair. */
+	result = AUTH_GUARD_RETRY_BUSY(security_task_pair_try_begin_where(task, snapshot, where));
+	return result == AUTH_GUARD_CHECK_VALID;
+}
+
+static bool
+security_task_snapshots_end_where(struct security_task_guard_snapshot *snapshot,
+				  const char *where)
+{
+	bool valid = true;
+
+	if (snapshot->task_held &&
+	    !auth_guard_task_snapshot_end_where(snapshot->task, where))
+		valid = false;
+	if (snapshot->current_held &&
+	    !auth_guard_task_snapshot_end_where(current, where))
+		valid = false;
+	snapshot->task_held = false;
+	snapshot->current_held = false;
+	return valid;
+}
+
+static bool security_cred_guard_check_where(const struct cred *cred,
+					    const char *where)
+{
+	if (security_cred_is_current(cred))
+		return security_current_guard_check_where(where);
+
+	return cred_guard_verify_committed_cred_where(cred, where);
+}
+
+static bool
+security_cred_guard_check_pair_where(const struct cred *first,
+				     const struct cred *second,
+				     const char *where)
+{
+	if (first != second && security_cred_is_current(first) &&
+	    security_cred_is_current(second))
+		return security_current_guard_check_where(where);
+	if (!security_cred_guard_check_where(first, where))
+		return false;
+
+	return first == second ||
+		security_cred_guard_check_where(second, where);
+}
+
+#define security_current_guard_check() \
+	security_current_guard_check_where(__func__)
+#define security_current_guard_check_wait() \
+	security_current_guard_check_wait_where(__func__)
+#define security_task_snapshots_begin(task, snapshot) \
+	security_task_snapshots_begin_where((task), (snapshot), __func__)
+#define security_task_snapshots_begin_wait(task, snapshot) \
+	security_task_snapshots_begin_wait_where((task), (snapshot), __func__)
+#define security_task_snapshots_end(snapshot) \
+	security_task_snapshots_end_where((snapshot), __func__)
+#define security_cred_guard_check(cred) \
+	security_cred_guard_check_where((cred), __func__)
+#define security_cred_guard_check_pair(first, second) \
+	security_cred_guard_check_pair_where((first), (second), __func__)
 
 #define SECURITY_HOOK_ACTIVE_KEY(HOOK, IDX) security_hook_active_##HOOK##_##IDX
 
@@ -523,6 +671,7 @@ static void __init ordered_lsm_init(void)
 	lsm_early_task(current);
 	for (lsm = ordered_lsms; *lsm; lsm++)
 		initialize_lsm(*lsm);
+	cred_guard_enable();
 }
 
 int __init early_security_init(void)
@@ -1036,6 +1185,59 @@ OUT:									\
 	RC;								\
 })
 
+#define call_int_hook_guarded(GUARD, HOOK, ...)			\
+({								\
+	int RC = -EACCES;						\
+									\
+	if (GUARD)							\
+		RC = call_int_hook(HOOK, ##__VA_ARGS__);		\
+	RC;								\
+})
+
+#define call_int_hook_current_guarded(HOOK, ...)			\
+	call_int_hook_guarded(security_current_guard_check(), HOOK,	\
+			      ##__VA_ARGS__)
+
+#define call_int_hook_cred_guarded(CRED, HOOK, ...)			\
+	call_int_hook_guarded(security_cred_guard_check(CRED), HOOK,	\
+			      ##__VA_ARGS__)
+
+#define call_int_hook_cred_pair_guarded(FIRST, SECOND, HOOK, ...)	\
+({								\
+	const struct cred *__first = (FIRST);				\
+	const struct cred *__second = (SECOND);			\
+									\
+	call_int_hook_guarded(security_cred_guard_check_pair(__first, __second), \
+			      HOOK, __first, __second, ##__VA_ARGS__); \
+})
+
+#define call_int_hook_task_guarded(TASK, HOOK, ...)			\
+({								\
+	struct task_struct *__task = (TASK);				\
+	int RC = -EACCES;						\
+									\
+	if (auth_guard_task_snapshot_begin(__task) ==			\
+	    AUTH_GUARD_CHECK_VALID) {					\
+		RC = call_int_hook(HOOK, ##__VA_ARGS__);			\
+		if (!auth_guard_task_snapshot_end(__task))			\
+			RC = -EACCES;					\
+	}								\
+	RC;								\
+})
+
+#define call_int_hook_current_task_guarded(TASK, HOOK, ...)		\
+({								\
+	struct security_task_guard_snapshot __snapshot;			\
+	int RC = -EACCES;						\
+									\
+	if (security_task_snapshots_begin((TASK), &__snapshot)) {	\
+		RC = call_int_hook(HOOK, ##__VA_ARGS__);			\
+		if (!security_task_snapshots_end(&__snapshot))		\
+			RC = -EACCES;					\
+	}								\
+	RC;								\
+})
+
 #define lsm_for_each_hook(scall, NAME)					\
 	for (scall = static_calls_table.NAME;				\
 	     scall - static_calls_table.NAME < MAX_LSM_COUNT; scall++)  \
@@ -1053,7 +1255,7 @@ OUT:									\
  */
 int security_binder_set_context_mgr(const struct cred *mgr)
 {
-	return call_int_hook(binder_set_context_mgr, mgr);
+	return call_int_hook_cred_guarded(mgr, binder_set_context_mgr, mgr);
 }
 
 /**
@@ -1068,7 +1270,7 @@ int security_binder_set_context_mgr(const struct cred *mgr)
 int security_binder_transaction(const struct cred *from,
 				const struct cred *to)
 {
-	return call_int_hook(binder_transaction, from, to);
+	return call_int_hook_cred_pair_guarded(from, to, binder_transaction);
 }
 
 /**
@@ -1083,7 +1285,8 @@ int security_binder_transaction(const struct cred *from,
 int security_binder_transfer_binder(const struct cred *from,
 				    const struct cred *to)
 {
-	return call_int_hook(binder_transfer_binder, from, to);
+	return call_int_hook_cred_pair_guarded(from, to,
+					       binder_transfer_binder);
 }
 
 /**
@@ -1099,7 +1302,8 @@ int security_binder_transfer_binder(const struct cred *from,
 int security_binder_transfer_file(const struct cred *from,
 				  const struct cred *to, const struct file *file)
 {
-	return call_int_hook(binder_transfer_file, from, to, file);
+	return call_int_hook_cred_pair_guarded(from, to, binder_transfer_file,
+					       file);
 }
 
 /**
@@ -1118,7 +1322,8 @@ int security_binder_transfer_file(const struct cred *from,
  */
 int security_ptrace_access_check(struct task_struct *child, unsigned int mode)
 {
-	return call_int_hook(ptrace_access_check, child, mode);
+	return call_int_hook_current_task_guarded(child, ptrace_access_check,
+						  child, mode);
 }
 
 /**
@@ -1133,7 +1338,8 @@ int security_ptrace_access_check(struct task_struct *child, unsigned int mode)
  */
 int security_ptrace_traceme(struct task_struct *parent)
 {
-	return call_int_hook(ptrace_traceme, parent);
+	return call_int_hook_current_task_guarded(parent, ptrace_traceme,
+						  parent);
 }
 
 /**
@@ -1155,7 +1361,9 @@ int security_capget(const struct task_struct *target,
 		    kernel_cap_t *inheritable,
 		    kernel_cap_t *permitted)
 {
-	return call_int_hook(capget, target, effective, inheritable, permitted);
+	return call_int_hook_current_task_guarded(target, capget, target,
+						  effective, inheritable,
+						  permitted);
 }
 
 /**
@@ -1198,7 +1406,7 @@ int security_capable(const struct cred *cred,
 		     int cap,
 		     unsigned int opts)
 {
-	return call_int_hook(capable, cred, ns, cap, opts);
+	return call_int_hook_cred_guarded(cred, capable, cred, ns, cap, opts);
 }
 
 /**
@@ -1359,7 +1567,7 @@ int security_bprm_creds_from_file(struct linux_binprm *bprm, const struct file *
  */
 int security_bprm_check(struct linux_binprm *bprm)
 {
-	return call_int_hook(bprm_check_security, bprm);
+	return call_int_hook_current_guarded(bprm_check_security, bprm);
 }
 
 /**
@@ -1376,6 +1584,8 @@ int security_bprm_check(struct linux_binprm *bprm)
  */
 void security_bprm_committing_creds(const struct linux_binprm *bprm)
 {
+	BUG_ON(!security_current_guard_check_wait());
+
 	call_void_hook(bprm_committing_creds, bprm);
 }
 
@@ -1393,6 +1603,7 @@ void security_bprm_committing_creds(const struct linux_binprm *bprm)
 void security_bprm_committed_creds(const struct linux_binprm *bprm)
 {
 	call_void_hook(bprm_committed_creds, bprm);
+	BUG_ON(!security_current_guard_check_wait());
 }
 
 /**
@@ -1562,7 +1773,7 @@ EXPORT_SYMBOL(security_sb_mnt_opts_compat);
 int security_sb_remount(struct super_block *sb,
 			void *mnt_opts)
 {
-	return call_int_hook(sb_remount, sb, mnt_opts);
+	return call_int_hook_current_guarded(sb_remount, sb, mnt_opts);
 }
 EXPORT_SYMBOL(security_sb_remount);
 
@@ -1576,7 +1787,7 @@ EXPORT_SYMBOL(security_sb_remount);
  */
 int security_sb_kern_mount(const struct super_block *sb)
 {
-	return call_int_hook(sb_kern_mount, sb);
+	return call_int_hook_current_guarded(sb_kern_mount, sb);
 }
 
 /**
@@ -1627,7 +1838,8 @@ int security_sb_statfs(struct dentry *dentry)
 int security_sb_mount(const char *dev_name, const struct path *path,
 		      const char *type, unsigned long flags, void *data)
 {
-	return call_int_hook(sb_mount, dev_name, path, type, flags, data);
+	return call_int_hook_current_guarded(sb_mount, dev_name, path, type,
+					     flags, data);
 }
 
 /**
@@ -1641,7 +1853,7 @@ int security_sb_mount(const char *dev_name, const struct path *path,
  */
 int security_sb_umount(struct vfsmount *mnt, int flags)
 {
-	return call_int_hook(sb_umount, mnt, flags);
+	return call_int_hook_current_guarded(sb_umount, mnt, flags);
 }
 
 /**
@@ -1656,7 +1868,7 @@ int security_sb_umount(struct vfsmount *mnt, int flags)
 int security_sb_pivotroot(const struct path *old_path,
 			  const struct path *new_path)
 {
-	return call_int_hook(sb_pivotroot, old_path, new_path);
+	return call_int_hook_current_guarded(sb_pivotroot, old_path, new_path);
 }
 
 /**
@@ -1677,6 +1889,9 @@ int security_sb_set_mnt_opts(struct super_block *sb,
 {
 	struct lsm_static_call *scall;
 	int rc = mnt_opts ? -EOPNOTSUPP : LSM_RET_DEFAULT(sb_set_mnt_opts);
+
+	if (!security_current_guard_check())
+		return -EACCES;
 
 	lsm_for_each_hook(scall, sb_set_mnt_opts) {
 		rc = scall->hl->hook.sb_set_mnt_opts(sb, mnt_opts, kern_flags,
@@ -1701,7 +1916,8 @@ EXPORT_SYMBOL(security_sb_set_mnt_opts);
 int security_sb_set_overlayfs_context(struct super_block *sb,
 				      const struct path *layer)
 {
-	return call_int_hook(sb_set_overlayfs_context, sb, layer);
+	return call_int_hook_current_guarded(sb_set_overlayfs_context, sb,
+					     layer);
 }
 EXPORT_SYMBOL(security_sb_set_overlayfs_context);
 
@@ -1738,7 +1954,7 @@ EXPORT_SYMBOL(security_sb_clone_mnt_opts);
 int security_move_mount(const struct path *from_path,
 			const struct path *to_path)
 {
-	return call_int_hook(move_mount, from_path, to_path);
+	return call_int_hook_current_guarded(move_mount, from_path, to_path);
 }
 
 /**
@@ -2968,7 +3184,7 @@ EXPORT_SYMBOL_GPL(security_file_permission);
  */
 int security_file_use(struct file *file)
 {
-	return call_int_hook(file_use, file);
+	return call_int_hook_current_guarded(file_use, file);
 }
 EXPORT_SYMBOL_GPL(security_file_use);
 
@@ -3207,7 +3423,8 @@ void security_file_set_fowner(struct file *file)
 int security_file_send_sigiotask(struct task_struct *tsk,
 				 struct fown_struct *fown, int sig)
 {
-	return call_int_hook(file_send_sigiotask, tsk, fown, sig);
+	return call_int_hook_task_guarded(tsk, file_send_sigiotask, tsk, fown,
+					  sig);
 }
 
 /**
@@ -3223,7 +3440,7 @@ int security_file_send_sigiotask(struct task_struct *tsk,
  */
 int security_file_receive_cred(const struct cred *cred, struct file *file)
 {
-	return call_int_hook(file_receive, cred, file);
+	return call_int_hook_cred_guarded(cred, file_receive, cred, file);
 }
 EXPORT_SYMBOL_GPL(security_file_receive_cred);
 
@@ -3495,7 +3712,7 @@ int security_kernel_create_files_as(struct cred *new, struct inode *inode)
  */
 int security_kernel_module_request(char *kmod_name)
 {
-	return call_int_hook(kernel_module_request, kmod_name);
+	return call_int_hook_current_guarded(kernel_module_request, kmod_name);
 }
 
 /**
@@ -3511,7 +3728,8 @@ int security_kernel_module_request(char *kmod_name)
 int security_kernel_read_file(struct file *file, enum kernel_read_file_id id,
 			      bool contents)
 {
-	return call_int_hook(kernel_read_file, file, id, contents);
+	return call_int_hook_current_guarded(kernel_read_file, file, id,
+					     contents);
 }
 EXPORT_SYMBOL_GPL(security_kernel_read_file);
 
@@ -3531,7 +3749,8 @@ EXPORT_SYMBOL_GPL(security_kernel_read_file);
 int security_kernel_post_read_file(struct file *file, char *buf, loff_t size,
 				   enum kernel_read_file_id id)
 {
-	return call_int_hook(kernel_post_read_file, file, buf, size, id);
+	return call_int_hook_current_guarded(kernel_post_read_file, file, buf,
+					     size, id);
 }
 EXPORT_SYMBOL_GPL(security_kernel_post_read_file);
 
@@ -3546,7 +3765,7 @@ EXPORT_SYMBOL_GPL(security_kernel_post_read_file);
  */
 int security_kernel_load_data(enum kernel_load_data_id id, bool contents)
 {
-	return call_int_hook(kernel_load_data, id, contents);
+	return call_int_hook_current_guarded(kernel_load_data, id, contents);
 }
 EXPORT_SYMBOL_GPL(security_kernel_load_data);
 
@@ -3568,7 +3787,8 @@ int security_kernel_post_load_data(char *buf, loff_t size,
 				   enum kernel_load_data_id id,
 				   char *description)
 {
-	return call_int_hook(kernel_post_load_data, buf, size, id, description);
+	return call_int_hook_current_guarded(kernel_post_load_data, buf, size,
+					     id, description);
 }
 EXPORT_SYMBOL_GPL(security_kernel_post_load_data);
 
@@ -3701,8 +3921,15 @@ EXPORT_SYMBOL(security_current_getlsmprop_subj);
  */
 void security_task_getlsmprop_obj(struct task_struct *p, struct lsm_prop *prop)
 {
+	struct security_task_guard_snapshot snapshot;
+
 	lsmprop_init(prop);
+	if (!security_task_snapshots_begin_wait(p, &snapshot))
+		return;
+
 	call_void_hook(task_getlsmprop_obj, p, prop);
+	if (!security_task_snapshots_end(&snapshot))
+		security_release_lsmprop(prop);
 }
 EXPORT_SYMBOL(security_task_getlsmprop_obj);
 
@@ -3737,7 +3964,7 @@ EXPORT_SYMBOL(security_task_getlsmprop_obj_held);
  */
 int security_task_setnice(struct task_struct *p, int nice)
 {
-	return call_int_hook(task_setnice, p, nice);
+	return call_int_hook_current_task_guarded(p, task_setnice, p, nice);
 }
 
 /**
@@ -3751,7 +3978,8 @@ int security_task_setnice(struct task_struct *p, int nice)
  */
 int security_task_setioprio(struct task_struct *p, int ioprio)
 {
-	return call_int_hook(task_setioprio, p, ioprio);
+	return call_int_hook_current_task_guarded(p, task_setioprio, p,
+						  ioprio);
 }
 
 /**
@@ -3781,7 +4009,8 @@ int security_task_getioprio(struct task_struct *p)
 int security_task_prlimit(const struct cred *cred, const struct cred *tcred,
 			  unsigned int flags)
 {
-	return call_int_hook(task_prlimit, cred, tcred, flags);
+	return call_int_hook_cred_pair_guarded(cred, tcred, task_prlimit,
+					       flags);
 }
 
 /**
@@ -3799,7 +4028,8 @@ int security_task_prlimit(const struct cred *cred, const struct cred *tcred,
 int security_task_setrlimit(struct task_struct *p, unsigned int resource,
 			    struct rlimit *new_rlim)
 {
-	return call_int_hook(task_setrlimit, p, resource, new_rlim);
+	return call_int_hook_current_task_guarded(p, task_setrlimit, p,
+						  resource, new_rlim);
 }
 
 /**
@@ -3813,7 +4043,7 @@ int security_task_setrlimit(struct task_struct *p, unsigned int resource,
  */
 int security_task_setscheduler(struct task_struct *p)
 {
-	return call_int_hook(task_setscheduler, p);
+	return call_int_hook_current_task_guarded(p, task_setscheduler, p);
 }
 
 /**
@@ -3839,7 +4069,7 @@ int security_task_getscheduler(struct task_struct *p)
  */
 int security_task_movememory(struct task_struct *p)
 {
-	return call_int_hook(task_movememory, p);
+	return call_int_hook_current_task_guarded(p, task_movememory, p);
 }
 
 /**
@@ -3860,7 +4090,15 @@ int security_task_movememory(struct task_struct *p)
 int security_task_kill(struct task_struct *p, struct kernel_siginfo *info,
 		       int sig, const struct cred *cred)
 {
-	return call_int_hook(task_kill, p, info, sig, cred);
+	if (cred) {
+		if (!security_cred_guard_check(cred))
+			return -EACCES;
+		return call_int_hook_task_guarded(p, task_kill, p, info, sig,
+						  cred);
+	}
+
+	return call_int_hook_current_task_guarded(p, task_kill, p, info, sig,
+						  cred);
 }
 
 /**
@@ -3905,7 +4143,13 @@ int security_task_prctl(int option, unsigned long arg2, unsigned long arg3,
  */
 void security_task_to_inode(struct task_struct *p, struct inode *inode)
 {
+	struct security_task_guard_snapshot snapshot;
+
+	if (!security_task_snapshots_begin_wait(p, &snapshot))
+		return;
+
 	call_void_hook(task_to_inode, p, inode);
+	BUG_ON(!security_task_snapshots_end(&snapshot));
 }
 
 /**
@@ -3957,7 +4201,7 @@ int security_create_user_ns(const struct cred *cred)
  */
 int security_ipc_permission(struct kern_ipc_perm *ipcp, short flag)
 {
-	return call_int_hook(ipc_permission, ipcp, flag);
+	return call_int_hook_current_guarded(ipc_permission, ipcp, flag);
 }
 
 /**
@@ -3991,7 +4235,7 @@ int security_msg_msg_alloc(struct msg_msg *msg)
 
 	if (unlikely(rc))
 		return rc;
-	rc = call_int_hook(msg_msg_alloc_security, msg);
+	rc = call_int_hook_current_guarded(msg_msg_alloc_security, msg);
 	if (unlikely(rc))
 		security_msg_msg_free(msg);
 	return rc;
@@ -4025,7 +4269,7 @@ int security_msg_queue_alloc(struct kern_ipc_perm *msq)
 
 	if (unlikely(rc))
 		return rc;
-	rc = call_int_hook(msg_queue_alloc_security, msq);
+	rc = call_int_hook_current_guarded(msg_queue_alloc_security, msq);
 	if (unlikely(rc))
 		security_msg_queue_free(msq);
 	return rc;
@@ -4057,7 +4301,7 @@ void security_msg_queue_free(struct kern_ipc_perm *msq)
  */
 int security_msg_queue_associate(struct kern_ipc_perm *msq, int msqflg)
 {
-	return call_int_hook(msg_queue_associate, msq, msqflg);
+	return call_int_hook_current_guarded(msg_queue_associate, msq, msqflg);
 }
 
 /**
@@ -4072,7 +4316,7 @@ int security_msg_queue_associate(struct kern_ipc_perm *msq, int msqflg)
  */
 int security_msg_queue_msgctl(struct kern_ipc_perm *msq, int cmd)
 {
-	return call_int_hook(msg_queue_msgctl, msq, cmd);
+	return call_int_hook_current_guarded(msg_queue_msgctl, msq, cmd);
 }
 
 /**
@@ -4089,7 +4333,8 @@ int security_msg_queue_msgctl(struct kern_ipc_perm *msq, int cmd)
 int security_msg_queue_msgsnd(struct kern_ipc_perm *msq,
 			      struct msg_msg *msg, int msqflg)
 {
-	return call_int_hook(msg_queue_msgsnd, msq, msg, msqflg);
+	return call_int_hook_current_guarded(msg_queue_msgsnd, msq, msg,
+					     msqflg);
 }
 
 /**
@@ -4110,7 +4355,9 @@ int security_msg_queue_msgsnd(struct kern_ipc_perm *msq,
 int security_msg_queue_msgrcv(struct kern_ipc_perm *msq, struct msg_msg *msg,
 			      struct task_struct *target, long type, int mode)
 {
-	return call_int_hook(msg_queue_msgrcv, msq, msg, target, type, mode);
+	return call_int_hook_current_task_guarded(target, msg_queue_msgrcv,
+						  msq, msg, target, type,
+						  mode);
 }
 
 /**
@@ -4128,7 +4375,7 @@ int security_shm_alloc(struct kern_ipc_perm *shp)
 
 	if (unlikely(rc))
 		return rc;
-	rc = call_int_hook(shm_alloc_security, shp);
+	rc = call_int_hook_current_guarded(shm_alloc_security, shp);
 	if (unlikely(rc))
 		security_shm_free(shp);
 	return rc;
@@ -4161,7 +4408,7 @@ void security_shm_free(struct kern_ipc_perm *shp)
  */
 int security_shm_associate(struct kern_ipc_perm *shp, int shmflg)
 {
-	return call_int_hook(shm_associate, shp, shmflg);
+	return call_int_hook_current_guarded(shm_associate, shp, shmflg);
 }
 
 /**
@@ -4176,7 +4423,7 @@ int security_shm_associate(struct kern_ipc_perm *shp, int shmflg)
  */
 int security_shm_shmctl(struct kern_ipc_perm *shp, int cmd)
 {
-	return call_int_hook(shm_shmctl, shp, cmd);
+	return call_int_hook_current_guarded(shm_shmctl, shp, cmd);
 }
 
 /**
@@ -4194,7 +4441,7 @@ int security_shm_shmctl(struct kern_ipc_perm *shp, int cmd)
 int security_shm_shmat(struct kern_ipc_perm *shp,
 		       char __user *shmaddr, int shmflg)
 {
-	return call_int_hook(shm_shmat, shp, shmaddr, shmflg);
+	return call_int_hook_current_guarded(shm_shmat, shp, shmaddr, shmflg);
 }
 
 /**
@@ -4212,7 +4459,7 @@ int security_sem_alloc(struct kern_ipc_perm *sma)
 
 	if (unlikely(rc))
 		return rc;
-	rc = call_int_hook(sem_alloc_security, sma);
+	rc = call_int_hook_current_guarded(sem_alloc_security, sma);
 	if (unlikely(rc))
 		security_sem_free(sma);
 	return rc;
@@ -4244,7 +4491,7 @@ void security_sem_free(struct kern_ipc_perm *sma)
  */
 int security_sem_associate(struct kern_ipc_perm *sma, int semflg)
 {
-	return call_int_hook(sem_associate, sma, semflg);
+	return call_int_hook_current_guarded(sem_associate, sma, semflg);
 }
 
 /**
@@ -4259,7 +4506,7 @@ int security_sem_associate(struct kern_ipc_perm *sma, int semflg)
  */
 int security_sem_semctl(struct kern_ipc_perm *sma, int cmd)
 {
-	return call_int_hook(sem_semctl, sma, cmd);
+	return call_int_hook_current_guarded(sem_semctl, sma, cmd);
 }
 
 /**
@@ -4277,7 +4524,8 @@ int security_sem_semctl(struct kern_ipc_perm *sma, int cmd)
 int security_sem_semop(struct kern_ipc_perm *sma, struct sembuf *sops,
 		       unsigned nsops, int alter)
 {
-	return call_int_hook(sem_semop, sma, sops, nsops, alter);
+	return call_int_hook_current_guarded(sem_semop, sma, sops, nsops,
+					     alter);
 }
 
 /**
@@ -4471,7 +4719,13 @@ free_out:
 int security_getprocattr(struct task_struct *p, int lsmid, const char *name,
 			 char **value)
 {
+	struct security_task_guard_snapshot snapshot;
 	struct lsm_static_call *scall;
+	int ret = LSM_RET_DEFAULT(getprocattr);
+
+	*value = NULL;
+	if (!security_task_snapshots_begin(p, &snapshot))
+		return -EACCES;
 
 	lsm_for_each_hook(scall, getprocattr) {
 		if (lsmid != 0 && lsmid != scall->hl->lsmid->id)
@@ -4479,9 +4733,15 @@ int security_getprocattr(struct task_struct *p, int lsmid, const char *name,
 		if (!lsm_ns_visible_lsmid(scall->hl->lsmid->id) &&
 		    (lsmid == 0 || lsmid != LSM_ID_SELINUX))
 			continue;
-		return scall->hl->hook.getprocattr(p, name, value);
+		ret = scall->hl->hook.getprocattr(p, name, value);
+		break;
 	}
-	return LSM_RET_DEFAULT(getprocattr);
+	if (!security_task_snapshots_end(&snapshot)) {
+		kfree(*value);
+		*value = NULL;
+		return -EACCES;
+	}
+	return ret;
 }
 
 /**
@@ -4845,7 +5105,8 @@ EXPORT_SYMBOL(security_unix_may_send);
  */
 int security_socket_create(int family, int type, int protocol, int kern)
 {
-	return call_int_hook(socket_create, family, type, protocol, kern);
+	return call_int_hook_guarded(kern || security_current_guard_check(),
+				     socket_create, family, type, protocol, kern);
 }
 
 /**
@@ -5833,7 +6094,8 @@ void security_key_free(struct key *key)
 int security_key_permission(key_ref_t key_ref, const struct cred *cred,
 			    enum key_need_perm need_perm)
 {
-	return call_int_hook(key_permission, key_ref, cred, need_perm);
+	return call_int_hook_cred_guarded(cred, key_permission, key_ref, cred,
+					  need_perm);
 }
 
 /**
@@ -5957,7 +6219,7 @@ int security_audit_rule_match(struct lsm_prop *prop, u32 field, u32 op,
  */
 int security_bpf(int cmd, union bpf_attr *attr, unsigned int size, bool kernel)
 {
-	return call_int_hook(bpf, cmd, attr, size, kernel);
+	return call_int_hook_current_guarded(bpf, cmd, attr, size, kernel);
 }
 
 /**
@@ -5972,7 +6234,7 @@ int security_bpf(int cmd, union bpf_attr *attr, unsigned int size, bool kernel)
  */
 int security_bpf_map(struct bpf_map *map, fmode_t fmode)
 {
-	return call_int_hook(bpf_map, map, fmode);
+	return call_int_hook_current_guarded(bpf_map, map, fmode);
 }
 
 /**
@@ -5986,7 +6248,7 @@ int security_bpf_map(struct bpf_map *map, fmode_t fmode)
  */
 int security_bpf_prog(struct bpf_prog *prog)
 {
-	return call_int_hook(bpf_prog, prog);
+	return call_int_hook_current_guarded(bpf_prog, prog);
 }
 
 /**
@@ -6005,6 +6267,9 @@ int security_bpf_map_create(struct bpf_map *map, union bpf_attr *attr,
 			    struct bpf_token *token, bool kernel)
 {
 	int rc;
+
+	if (!security_current_guard_check())
+		return -EACCES;
 
 	rc = lsm_bpf_map_alloc(map);
 	if (unlikely(rc))
@@ -6034,6 +6299,9 @@ int security_bpf_prog_load(struct bpf_prog *prog, union bpf_attr *attr,
 {
 	int rc;
 
+	if (!security_current_guard_check())
+		return -EACCES;
+
 	rc = lsm_bpf_prog_alloc(prog);
 	if (unlikely(rc))
 		return rc;
@@ -6060,6 +6328,9 @@ int security_bpf_token_create(struct bpf_token *token, union bpf_attr *attr,
 {
 	int rc;
 
+	if (!security_current_guard_check())
+		return -EACCES;
+
 	rc = lsm_bpf_token_alloc(token);
 	if (unlikely(rc))
 		return rc;
@@ -6083,7 +6354,7 @@ int security_bpf_token_create(struct bpf_token *token, union bpf_attr *attr,
  */
 int security_bpf_token_cmd(const struct bpf_token *token, enum bpf_cmd cmd)
 {
-	return call_int_hook(bpf_token_cmd, token, cmd);
+	return call_int_hook_current_guarded(bpf_token_cmd, token, cmd);
 }
 
 /**
@@ -6099,7 +6370,7 @@ int security_bpf_token_cmd(const struct bpf_token *token, enum bpf_cmd cmd)
  */
 int security_bpf_token_capable(const struct bpf_token *token, int cap)
 {
-	return call_int_hook(bpf_token_capable, token, cap);
+	return call_int_hook_current_guarded(bpf_token_capable, token, cap);
 }
 
 /**
@@ -6247,7 +6518,7 @@ EXPORT_SYMBOL(security_bdev_setintegrity);
  */
 int security_perf_event_open(int type)
 {
-	return call_int_hook(perf_event_open, type);
+	return call_int_hook_current_guarded(perf_event_open, type);
 }
 
 /**
@@ -6261,6 +6532,9 @@ int security_perf_event_open(int type)
 int security_perf_event_alloc(struct perf_event *event)
 {
 	int rc;
+
+	if (!security_current_guard_check())
+		return -EACCES;
 
 	rc = lsm_blob_alloc(&event->security, blob_sizes.lbs_perf_event,
 			    GFP_KERNEL);
@@ -6299,7 +6573,7 @@ void security_perf_event_free(struct perf_event *event)
  */
 int security_perf_event_read(struct perf_event *event)
 {
-	return call_int_hook(perf_event_read, event);
+	return call_int_hook_current_guarded(perf_event_read, event);
 }
 
 /**
@@ -6312,7 +6586,7 @@ int security_perf_event_read(struct perf_event *event)
  */
 int security_perf_event_write(struct perf_event *event)
 {
-	return call_int_hook(perf_event_write, event);
+	return call_int_hook_current_guarded(perf_event_write, event);
 }
 #endif /* CONFIG_PERF_EVENTS */
 
@@ -6328,7 +6602,9 @@ int security_perf_event_write(struct perf_event *event)
  */
 int security_uring_override_creds(const struct cred *new)
 {
-	return call_int_hook(uring_override_creds, new);
+	bool valid = security_cred_guard_check_pair(current_cred(), new);
+
+	return call_int_hook_guarded(valid, uring_override_creds, new);
 }
 
 /**
@@ -6341,7 +6617,7 @@ int security_uring_override_creds(const struct cred *new)
  */
 int security_uring_sqpoll(void)
 {
-	return call_int_hook(uring_sqpoll);
+	return call_int_hook_current_guarded(uring_sqpoll);
 }
 
 /**
@@ -6354,7 +6630,7 @@ int security_uring_sqpoll(void)
  */
 int security_uring_cmd(struct io_uring_cmd *ioucmd)
 {
-	return call_int_hook(uring_cmd, ioucmd);
+	return call_int_hook_current_guarded(uring_cmd, ioucmd);
 }
 
 /**
@@ -6366,7 +6642,7 @@ int security_uring_cmd(struct io_uring_cmd *ioucmd)
  */
 int security_uring_allowed(void)
 {
-	return call_int_hook(uring_allowed);
+	return call_int_hook_current_guarded(uring_allowed);
 }
 #endif /* CONFIG_IO_URING */
 

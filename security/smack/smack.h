@@ -10,6 +10,7 @@
 #define _SECURITY_SMACK_H
 
 #include <linux/capability.h>
+#include <linux/cred.h>
 #include <linux/spinlock.h>
 #include <linux/lsm_hooks.h>
 #include <linux/in.h>
@@ -401,20 +402,35 @@ static inline struct smack_known *smk_of_task(const struct task_smack *tsp)
 }
 
 static inline struct smack_known *smk_of_task_struct_obj(
-						const struct task_struct *t)
+							const struct task_struct *t)
 {
 	struct smack_known *skp;
 	const struct cred *cred;
 
-	rcu_read_lock();
-
-	cred = __task_cred(t);
+	cred = get_task_cred((struct task_struct *)t);
 	skp = smk_of_task(smack_cred(cred));
-
-	rcu_read_unlock();
+	put_cred(cred);
 
 	return skp;
 }
+
+static inline int
+smk_of_task_struct_obj_checked_where(struct task_struct *t,
+				     struct smack_known **skpp,
+				     const char *where)
+{
+	const struct cred *cred;
+
+	cred = get_task_cred_checked_nowait_where(t, where);
+	if (IS_ERR(cred))
+		return PTR_ERR(cred);
+	*skpp = smk_of_task(smack_cred(cred));
+	put_cred(cred);
+	return 0;
+}
+
+#define smk_of_task_struct_obj_checked(_task, _skpp) \
+	smk_of_task_struct_obj_checked_where((_task), (_skpp), __func__)
 
 /*
  * Present a pointer to the forked smack label entry in an task blob.

@@ -21,6 +21,7 @@
 #include <linux/netfilter_bridge.h>
 #include <linux/netfilter_ipv6.h>
 #include <linux/netfilter/xt_LOG.h>
+#include <linux/syslog_namespace.h>
 #include <net/netfilter/nf_log.h>
 
 static const struct nf_loginfo default_loginfo = {
@@ -45,6 +46,10 @@ static bool nf_log_allowed(const struct net *net)
 {
 	return net_eq(net, &init_net) || sysctl_nf_log_all_netns;
 }
+
+#define NF_LOG_SYSLOG_NS(_name, _net)                                    \
+	struct syslog_namespace *_name __free(put_syslog_ns) =             \
+		get_syslog_ns_from_userns_checked((_net)->user_ns)
 
 static void nf_log_dump_vlan(struct nf_log_buf *m, const struct sk_buff *skb)
 {
@@ -142,6 +147,9 @@ static void nf_log_arp_packet(struct net *net, u_int8_t pf,
 
 	if (!nf_log_allowed(net))
 		return;
+	NF_LOG_SYSLOG_NS(syslog_ns, net);
+	if (IS_ERR(syslog_ns))
+		return;
 
 	m = nf_log_buf_open();
 
@@ -152,7 +160,7 @@ static void nf_log_arp_packet(struct net *net, u_int8_t pf,
 				  prefix, net);
 	dump_arp_packet(m, loginfo, skb, skb_network_offset(skb));
 
-	nf_log_buf_close(m, net->user_ns->syslog_ns);
+	nf_log_buf_close(m, syslog_ns);
 }
 
 static struct nf_logger nf_arp_logger __read_mostly = {
@@ -841,6 +849,9 @@ static void nf_log_ip_packet(struct net *net, u_int8_t pf,
 
 	if (!nf_log_allowed(net))
 		return;
+	NF_LOG_SYSLOG_NS(syslog_ns, net);
+	if (IS_ERR(syslog_ns))
+		return;
 
 	m = nf_log_buf_open();
 
@@ -855,7 +866,7 @@ static void nf_log_ip_packet(struct net *net, u_int8_t pf,
 
 	dump_ipv4_packet(net, m, loginfo, skb, skb_network_offset(skb));
 
-	nf_log_buf_close(m, net->user_ns->syslog_ns);
+	nf_log_buf_close(m, syslog_ns);
 }
 
 static struct nf_logger nf_ip_logger __read_mostly = {
@@ -876,6 +887,9 @@ static void nf_log_ip6_packet(struct net *net, u_int8_t pf,
 
 	if (!nf_log_allowed(net))
 		return;
+	NF_LOG_SYSLOG_NS(syslog_ns, net);
+	if (IS_ERR(syslog_ns))
+		return;
 
 	m = nf_log_buf_open();
 
@@ -890,7 +904,7 @@ static void nf_log_ip6_packet(struct net *net, u_int8_t pf,
 
 	dump_ipv6_packet(net, m, loginfo, skb, skb_network_offset(skb), 1);
 
-	nf_log_buf_close(m, net->user_ns->syslog_ns);
+	nf_log_buf_close(m, syslog_ns);
 }
 
 static struct nf_logger nf_ip6_logger __read_mostly = {
@@ -912,6 +926,9 @@ static void nf_log_unknown_packet(struct net *net, u_int8_t pf,
 
 	if (!nf_log_allowed(net))
 		return;
+	NF_LOG_SYSLOG_NS(syslog_ns, net);
+	if (IS_ERR(syslog_ns))
+		return;
 
 	m = nf_log_buf_open();
 
@@ -923,8 +940,10 @@ static void nf_log_unknown_packet(struct net *net, u_int8_t pf,
 
 	dump_mac_header(m, loginfo, skb);
 
-	nf_log_buf_close(m, net->user_ns->syslog_ns);
+	nf_log_buf_close(m, syslog_ns);
 }
+
+#undef NF_LOG_SYSLOG_NS
 
 static void nf_log_netdev_packet(struct net *net, u_int8_t pf,
 				 unsigned int hooknum,

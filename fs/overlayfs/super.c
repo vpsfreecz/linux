@@ -1424,12 +1424,22 @@ int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 	ovl_set_d_op(sb);
 
 	err = -ENOMEM;
-	if (!ofs->creator_cred)
-		ofs->creator_cred = cred = prepare_creds();
-	else
+	if (!ofs->creator_cred) {
+		cred = prepare_creds();
+		if (!cred)
+			goto out_err;
+
+		/* Never override disk quota limits or use reserved space. */
+		cap_lower(cred->cap_effective, CAP_SYS_RESOURCE);
+
+		err = commit_prepared_cred(cred);
+		if (err)
+			goto out_err;
+
+		ofs->creator_cred = cred;
+	} else {
 		cred = (struct cred *)ofs->creator_cred;
-	if (!cred)
-		goto out_err;
+	}
 
 	old_cred = ovl_override_creds(sb);
 
@@ -1570,9 +1580,6 @@ int ovl_fill_super(struct super_block *sb, struct fs_context *fc)
 		sb->s_export_op = &ovl_export_operations;
 	else if (!ofs->nofh)
 		sb->s_export_op = &ovl_export_fid_operations;
-
-	/* Never override disk quota limits or use reserved space */
-	cap_lower(cred->cap_effective, CAP_SYS_RESOURCE);
 
 	sb->s_magic = OVERLAYFS_SUPER_MAGIC;
 	sb->s_xattr = ovl_xattr_handlers(ofs);

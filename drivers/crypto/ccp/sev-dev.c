@@ -270,10 +270,16 @@ static struct file *open_file_as_root(const char *filename, int flags, umode_t m
 	task_unlock(&init_task);
 
 	cred = prepare_creds();
-	if (!cred)
+	if (!cred) {
+		path_put(&root);
 		return ERR_PTR(-ENOMEM);
+	}
 	cred->fsuid = GLOBAL_ROOT_UID;
-	old_cred = override_creds(cred);
+	old_cred = override_creds_from_prepared(cred);
+	if (!old_cred) {
+		path_put(&root);
+		return ERR_PTR(-EACCES);
+	}
 
 	fp = file_open_root(&root, filename, flags, mode);
 	path_put(&root);

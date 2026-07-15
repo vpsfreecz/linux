@@ -413,14 +413,16 @@ static inline bool cgroup_bpf_sock_enabled(struct sock *sk,
 })
 
 int cgroup_bpf_prog_attach(const union bpf_attr *attr,
-			   enum bpf_prog_type ptype, struct bpf_prog *prog);
+			   enum bpf_prog_type ptype, struct bpf_prog *prog,
+			   const struct bpf_current_container *container);
 int cgroup_bpf_prog_detach(const union bpf_attr *attr,
 			   enum bpf_prog_type ptype,
-			   bool restrict_cgroupns);
-int cgroup_bpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog);
+			   const struct bpf_current_container *container);
+int cgroup_bpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog,
+			   const struct bpf_current_container *container);
 int cgroup_bpf_prog_query(const union bpf_attr *attr,
 			  union bpf_attr __user *uattr,
-			  bool restrict_cgroupns);
+			  const struct bpf_current_container *container);
 
 const struct bpf_func_proto *
 cgroup_common_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog);
@@ -433,26 +435,29 @@ static inline void cgroup_bpf_lifetime_notifier_init(void)
 
 static inline int cgroup_bpf_prog_attach(const union bpf_attr *attr,
 					 enum bpf_prog_type ptype,
-					 struct bpf_prog *prog)
+					 struct bpf_prog *prog,
+					 const struct bpf_current_container *container)
 {
 	return -EINVAL;
 }
 
 static inline int cgroup_bpf_prog_detach(const union bpf_attr *attr,
-					 enum bpf_prog_type ptype)
+					 enum bpf_prog_type ptype,
+					 const struct bpf_current_container *container)
 {
 	return -EINVAL;
 }
 
 static inline int cgroup_bpf_link_attach(const union bpf_attr *attr,
-					 struct bpf_prog *prog)
+					 struct bpf_prog *prog,
+					 const struct bpf_current_container *container)
 {
 	return -EINVAL;
 }
 
 static inline int cgroup_bpf_prog_query(const union bpf_attr *attr,
 					union bpf_attr __user *uattr,
-					bool restrict_cgroupns)
+					const struct bpf_current_container *container)
 {
 	return -EINVAL;
 }

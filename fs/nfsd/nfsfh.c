@@ -216,6 +216,8 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 		 * fix that case easily.
 		 */
 		struct cred *new = prepare_creds();
+		const struct cred *old;
+
 		if (!new) {
 			error =  nfserrno(-ENOMEM);
 			goto out;
@@ -223,7 +225,12 @@ static __be32 nfsd_set_fh_dentry(struct svc_rqst *rqstp, struct net *net,
 		new->cap_effective =
 			cap_raise_nfsd_set(new->cap_effective,
 					   new->cap_permitted);
-		put_cred(override_creds(new));
+		old = override_creds_from_prepared(new);
+		if (!old) {
+			error = nfserrno(-EACCES);
+			goto out;
+		}
+		put_cred(old);
 	} else {
 		error = nfsd_setuser_and_check_port(rqstp, cred, exp);
 		if (error)

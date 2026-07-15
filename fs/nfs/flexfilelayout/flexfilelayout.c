@@ -597,6 +597,11 @@ ff_layout_alloc_lseg(struct pnfs_layout_hdr *lh,
 				goto out_err_free;
 			kcred->fsuid = uid;
 			kcred->fsgid = gid;
+			rc = commit_prepared_cred(kcred);
+			if (rc) {
+				kcred = NULL;
+				goto out_err_free;
+			}
 			cred = RCU_INITIALIZER(kcred);
 
 			if (lgr->range.iomode == IOMODE_READ)

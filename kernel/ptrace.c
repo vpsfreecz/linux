@@ -9,6 +9,8 @@
  */
 
 #include <linux/capability.h>
+#include <linux/auth_guard.h>
+#include <linux/cred.h>
 #include <linux/export.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
@@ -279,12 +281,19 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 	struct mm_struct *mm;
 	kuid_t caller_uid;
 	kgid_t caller_gid;
-	int rc;
+	int rc = 0;
 
 	if (!(mode & PTRACE_MODE_FSCREDS) == !(mode & PTRACE_MODE_REALCREDS)) {
 		WARN(1, "denying ptrace access check without PTRACE_MODE_*CREDS\n");
 		return -EPERM;
 	}
+	if (auth_guard_task_check_real_cred(current, current_real_cred()) !=
+	    AUTH_GUARD_CHECK_VALID)
+		return -EACCES;
+
+	tcred = get_task_cred_checked_nowait(task);
+	if (IS_ERR(tcred))
+		return PTR_ERR(tcred);
 
 	/* May we inspect the given task?
 	 * This check is used both for attaching with ptrace
@@ -297,8 +306,7 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 
 	/* Don't let security modules deny introspection */
 	if (same_thread_group(task, current))
-		return 0;
-	rcu_read_lock();
+		goto out;
 	if (mode & PTRACE_MODE_FSCREDS) {
 		caller_uid = cred->fsuid;
 		caller_gid = cred->fsgid;
@@ -314,7 +322,6 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 		caller_uid = cred->uid;
 		caller_gid = cred->gid;
 	}
-	tcred = __task_cred(task);
 	if (uid_eq(caller_uid, tcred->euid) &&
 	    uid_eq(caller_uid, tcred->suid) &&
 	    uid_eq(caller_uid, tcred->uid)  &&
@@ -330,10 +337,9 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 		__kuid_val(caller_uid), __kgid_val(caller_gid),
 		__kuid_val(tcred->uid), __kgid_val(tcred->gid),
 		tcred->user_ns ? tcred->user_ns->ns.inum : 0);
-	rcu_read_unlock();
-	return -EPERM;
+	rc = -EPERM;
+	goto out;
 ok:
-	rcu_read_unlock();
 	/*
 	 * If a task drops privileges and becomes nondumpable (through a syscall
 	 * like setresuid()) while we are trying to access it, we must ensure
@@ -350,10 +356,11 @@ ok:
 	     !ptrace_has_cap(mm->user_ns, mode))) {
 		pr_notice_ratelimited(
 			"vpsadminos_lsmct_diag: ptrace generic dumpable deny current=%d target=%d mode=0x%x dumpable=%d mm_userns=%u\n",
-			task_pid_nr(current), task_pid_nr(task), mode,
-			get_dumpable(mm),
-			mm->user_ns ? mm->user_ns->ns.inum : 0);
-		return -EPERM;
+				task_pid_nr(current), task_pid_nr(task), mode,
+				get_dumpable(mm),
+				mm->user_ns ? mm->user_ns->ns.inum : 0);
+		rc = -EPERM;
+		goto out;
 	}
 
 	rc = security_ptrace_access_check(task, mode);
@@ -362,6 +369,8 @@ ok:
 			"vpsadminos_lsmct_diag: ptrace security deny current=%d target=%d mode=0x%x rc=%d\n",
 			task_pid_nr(current), task_pid_nr(task), mode, rc);
 
+out:
+	put_cred(tcred);
 	return rc;
 }
 

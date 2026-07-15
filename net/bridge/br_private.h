@@ -19,6 +19,7 @@
 #include <linux/if_vlan.h>
 #include <linux/rhashtable.h>
 #include <linux/refcount.h>
+#include <linux/syslog_namespace.h>
 
 #define BR_HASH_BITS 8
 #define BR_HASH_SIZE (1 << BR_HASH_BITS)
@@ -631,9 +632,19 @@ struct br_input_skb_cb {
 # define BR_INPUT_SKB_CB_MROUTERS_ONLY(__skb)	(0)
 #endif
 
-#define br_printk(level, br, format, args...)	\
-	ns_printk(dev_net((br)->dev)->user_ns->syslog_ns,	\
-		  level "%s: " format, (br)->dev->name, ##args)
+#define br_printk(level, br, format, args...)				\
+	do {								\
+		const struct net_bridge *__br = (br);			\
+		struct syslog_namespace *__syslog_ns;			\
+									\
+		__syslog_ns = get_syslog_ns_from_userns_checked(		\
+			dev_net(__br->dev)->user_ns);				\
+		if (!IS_ERR(__syslog_ns)) {				\
+			ns_printk(__syslog_ns, level "%s: " format,		\
+				  __br->dev->name, ##args);			\
+			put_syslog_ns(__syslog_ns);				\
+		}							\
+	} while (0)
 
 #define br_err(__br, format, args...)			\
 	br_printk(KERN_ERR, __br, format, ##args)

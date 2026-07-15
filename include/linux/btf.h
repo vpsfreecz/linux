@@ -140,6 +140,7 @@ struct btf_struct_metas {
 };
 
 struct bpf_token;
+struct bpf_current_container;
 struct file;
 
 extern const struct file_operations btf_fops;
@@ -151,6 +152,11 @@ const struct btf_header *btf_header(const struct btf *btf);
 int btf_new_fd(const union bpf_attr *attr, bpfptr_t uattr, u32 uattr_sz,
 	       struct bpf_token *token);
 struct btf *btf_get_by_fd(int fd);
+struct btf *
+btf_get_by_fd_for_container(int fd,
+			    const struct bpf_current_container *container);
+bool btf_container_allowed(const struct btf *btf,
+			   const struct bpf_current_container *container);
 bool btf_current_container_allowed(const struct btf *btf);
 bool btf_file(const struct file *file);
 const struct bpf_token *btf_file_token(const struct file *file);
@@ -158,6 +164,9 @@ int btf_get_info_by_fd(const struct btf *btf,
 		       const union bpf_attr *attr,
 		       union bpf_attr __user *uattr);
 struct btf *btf_get_curr_or_next(u32 *id);
+struct btf *
+btf_get_curr_or_next_for_container(u32 *id,
+				   const struct bpf_current_container *container);
 /* Figure out the size of a type_id.  If type_id is a modifier
  * (e.g. const), it will be resolved to find out the type with size.
  *
@@ -222,6 +231,8 @@ int btf_type_snprintf_show(const struct btf *btf, u32 type_id, void *obj,
 			   char *buf, int len, u64 flags);
 
 int btf_get_fd_by_id(u32 id);
+int btf_get_fd_by_id_for_container(u32 id,
+				   const struct bpf_current_container *container);
 u32 btf_obj_id(const struct btf *btf);
 bool btf_is_kernel(const struct btf *btf);
 bool btf_is_module(const struct btf *btf);

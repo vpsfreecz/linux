@@ -8,6 +8,7 @@
  *
  *  proc net directory handling functions
  */
+#include <linux/auth_guard.h>
 #include <linux/errno.h>
 #include <linux/time.h>
 #include <linux/proc_fs.h>
@@ -94,10 +95,17 @@ static const struct proc_ops proc_net_seq_ops = {
 int bpf_iter_init_seq_net(void *priv_data, struct bpf_iter_aux_info *aux)
 {
 #ifdef CONFIG_NET_NS
+	struct task_nsproxy_snapshot snapshot;
 	struct seq_net_private *p = priv_data;
 
-	p->net = get_net_track(current->nsproxy->net_ns, &p->ns_tracker,
-			       GFP_KERNEL);
+	if (task_nsproxy_snapshot_get(current, &snapshot))
+		return -EACCES;
+	p->net = get_net_track(READ_ONCE(snapshot.nsproxy->net_ns),
+			       &p->ns_tracker, GFP_KERNEL);
+	if (!task_nsproxy_snapshot_put(&snapshot)) {
+		put_net_track(p->net, &p->ns_tracker);
+		return -EACCES;
+	}
 #endif
 	return 0;
 }
@@ -267,20 +275,27 @@ EXPORT_SYMBOL_GPL(proc_create_net_single_write);
 
 static struct net *get_proc_task_net(struct inode *dir)
 {
+	struct task_nsproxy_snapshot snapshot;
 	struct task_struct *task;
-	struct nsproxy *ns;
-	struct net *net = NULL;
+	struct net *net;
+	int ret;
 
 	rcu_read_lock();
 	task = pid_task(proc_pid(dir), PIDTYPE_PID);
-	if (task != NULL) {
-		task_lock(task);
-		ns = task->nsproxy;
-		if (ns != NULL)
-			net = get_net(ns->net_ns);
-		task_unlock(task);
+	if (!task) {
+		rcu_read_unlock();
+		return NULL;
 	}
+	ret = task_nsproxy_snapshot_get(task, &snapshot);
 	rcu_read_unlock();
+	if (ret)
+		return ret == -ESRCH ? NULL : ERR_PTR(ret);
+
+	net = get_net(READ_ONCE(snapshot.nsproxy->net_ns));
+	if (!task_nsproxy_snapshot_put(&snapshot)) {
+		put_net(net);
+		return ERR_PTR(-EACCES);
+	}
 
 	return net;
 }
@@ -293,7 +308,9 @@ static struct dentry *proc_tgid_net_lookup(struct inode *dir,
 
 	de = ERR_PTR(-ENOENT);
 	net = get_proc_task_net(dir);
-	if (net != NULL) {
+	if (IS_ERR(net)) {
+		de = ERR_CAST(net);
+	} else if (net) {
 		de = proc_lookup_de(dir, dentry, net->proc_net);
 		put_net(net);
 	}
@@ -308,10 +325,12 @@ static int proc_tgid_net_getattr(struct mnt_idmap *idmap,
 	struct net *net;
 
 	net = get_proc_task_net(inode);
+	if (IS_ERR(net))
+		return PTR_ERR(net);
 
 	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
 
-	if (net != NULL) {
+	if (net) {
 		stat->nlink = net->proc_net->nlink;
 		put_net(net);
 	}
@@ -332,7 +351,9 @@ static int proc_tgid_net_readdir(struct file *file, struct dir_context *ctx)
 
 	ret = -EINVAL;
 	net = get_proc_task_net(file_inode(file));
-	if (net != NULL) {
+	if (IS_ERR(net)) {
+		ret = PTR_ERR(net);
+	} else if (net) {
 		ret = proc_readdir_de(file, ctx, net->proc_net);
 		put_net(net);
 	}

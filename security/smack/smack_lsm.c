@@ -417,7 +417,8 @@ static int smk_ptrace_rule_check(struct task_struct *tracer,
 	struct smk_audit_info ad, *saip = NULL;
 	struct task_smack *tsp;
 	struct smack_known *tracer_known;
-	const struct cred *tracercred;
+	const struct cred *tracercred __free(put_cred) =
+		get_task_cred_checked_nowait(tracer);
 
 	if ((mode & PTRACE_MODE_NOAUDIT) == 0) {
 		smk_ad_init(&ad, func, LSM_AUDIT_DATA_TASK);
@@ -425,8 +426,8 @@ static int smk_ptrace_rule_check(struct task_struct *tracer,
 		saip = &ad;
 	}
 
-	rcu_read_lock();
-	tracercred = __task_cred(tracer);
+	if (IS_ERR(tracercred))
+		return PTR_ERR(tracercred);
 	tsp = smack_cred(tracercred);
 	tracer_known = smk_of_task(tsp);
 
@@ -447,14 +448,12 @@ static int smk_ptrace_rule_check(struct task_struct *tracer,
 				  tracee_known->smk_known,
 				  0, rc, saip);
 
-		rcu_read_unlock();
 		return rc;
 	}
 
 	/* In case of rule==SMACK_PTRACE_DEFAULT or mode==PTRACE_MODE_READ */
 	rc = smk_tskacc(tsp, tracee_known, smk_ptrace_mode(mode), saip);
 
-	rcu_read_unlock();
 	return rc;
 }
 
@@ -475,8 +474,11 @@ static int smk_ptrace_rule_check(struct task_struct *tracer,
 static int smack_ptrace_access_check(struct task_struct *ctp, unsigned int mode)
 {
 	struct smack_known *skp;
+	int rc;
 
-	skp = smk_of_task_struct_obj(ctp);
+	rc = smk_of_task_struct_obj_checked(ctp, &skp);
+	if (rc)
+		return rc;
 
 	return smk_ptrace_rule_check(current, skp, mode, __func__);
 }
@@ -1923,8 +1925,10 @@ static int smack_file_send_sigiotask(struct task_struct *tsk,
 {
 	struct smack_known **blob;
 	struct smack_known *skp;
-	struct smack_known *tkp = smk_of_task(smack_cred(tsk->cred));
+	struct smack_known *tkp = NULL;
+	const struct cred *scred;
 	const struct cred *tcred;
+	enum auth_guard_check_result result;
 	struct file *file;
 	int rc;
 	struct smk_audit_info ad;
@@ -1933,6 +1937,20 @@ static int smack_file_send_sigiotask(struct task_struct *tsk,
 	 * struct fown_struct is never outside the context of a struct file
 	 */
 	file = fown->file;
+	result = auth_guard_task_snapshot_begin(tsk);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		return -EACCES;
+
+	rcu_read_lock();
+	tcred = __task_cred(tsk);
+	scred = rcu_dereference(tsk->cred);
+	result = auth_guard_task_check_real_cred(tsk, tcred);
+	if (result != AUTH_GUARD_CHECK_VALID ||
+	    !cred_guard_verify_committed_cred(scred)) {
+		rc = -EACCES;
+		goto out_unlock;
+	}
+	tkp = smk_of_task(smack_cred(scred));
 
 	/* we don't log here as rc can be overridden */
 	blob = smack_file(file);
@@ -1940,11 +1958,13 @@ static int smack_file_send_sigiotask(struct task_struct *tsk,
 	rc = smk_access(skp, tkp, MAY_DELIVER, NULL);
 	rc = smk_bu_note("sigiotask", skp, tkp, MAY_DELIVER, rc);
 
-	rcu_read_lock();
-	tcred = __task_cred(tsk);
 	if (rc != 0 && smack_privileged_cred(CAP_MAC_OVERRIDE, tcred))
 		rc = 0;
+
+out_unlock:
 	rcu_read_unlock();
+	if (!auth_guard_task_snapshot_end(tsk) || !tkp)
+		return -EACCES;
 
 	smk_ad_init(&ad, __func__, LSM_AUDIT_DATA_TASK);
 	smk_ad_setfield_u_tsk(&ad, tsk);
@@ -2192,9 +2212,12 @@ static int smk_curacc_on_task(struct task_struct *p, int access,
 				const char *caller)
 {
 	struct smk_audit_info ad;
-	struct smack_known *skp = smk_of_task_struct_obj(p);
+	struct smack_known *skp;
 	int rc;
 
+	rc = smk_of_task_struct_obj_checked(p, &skp);
+	if (rc)
+		return rc;
 	smk_ad_init(&ad, caller, LSM_AUDIT_DATA_TASK);
 	smk_ad_setfield_u_tsk(&ad, p);
 	rc = smk_curacc(skp, access, &ad);
@@ -2343,11 +2366,14 @@ static int smack_task_kill(struct task_struct *p, struct kernel_siginfo *info,
 {
 	struct smk_audit_info ad;
 	struct smack_known *skp;
-	struct smack_known *tkp = smk_of_task_struct_obj(p);
+	struct smack_known *tkp;
 	int rc;
 
 	if (!sig)
 		return 0; /* null signal; existence test */
+	rc = smk_of_task_struct_obj_checked(p, &tkp);
+	if (rc)
+		return rc;
 
 	smk_ad_init(&ad, __func__, LSM_AUDIT_DATA_TASK);
 	smk_ad_setfield_u_tsk(&ad, p);
@@ -3701,12 +3727,16 @@ static int smack_getselfattr(unsigned int attr, struct lsm_ctx __user *ctx,
  */
 static int smack_getprocattr(struct task_struct *p, const char *name, char **value)
 {
-	struct smack_known *skp = smk_of_task_struct_obj(p);
+	struct smack_known *skp;
 	char *cp;
+	int rc;
 	int slen;
 
 	if (strcmp(name, "current") != 0)
 		return -EINVAL;
+	rc = smk_of_task_struct_obj_checked(p, &skp);
+	if (rc)
+		return rc;
 
 	cp = kstrdup(skp->smk_known, GFP_KERNEL);
 	if (cp == NULL)
@@ -3778,7 +3808,9 @@ static int do_setattr(u64 attr, void *value, size_t size)
 	 */
 	smk_destroy_label_list(&tsp->smk_relabel);
 
-	commit_creds(new);
+	rc = commit_creds(new);
+	if (rc)
+		return rc;
 	return size;
 }
 

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/auth_guard.h>
 #include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/lsm_namespace.h>
+#include <linux/nsproxy.h>
 #include <linux/nstree.h>
 #include <linux/overflow.h>
 #include <linux/proc_ns.h>
@@ -107,58 +109,127 @@ int register_lsm_namespace_backend(const struct lsm_namespace_backend *backend)
 }
 EXPORT_SYMBOL_GPL(register_lsm_namespace_backend);
 
+DEFINE_USERNS_BOUNDARY_GETTER(get_lsm_ns_from_userns_checked, lsm_namespace,
+			      lsm_ns, get_lsm_ns, put_lsm_ns, &init_lsm_ns)
+
 struct lsm_namespace *current_lsm_ns(void)
 {
-	struct user_namespace *user_ns = current_user_ns();
+	struct auth_guard_userns_boundary boundary;
+	struct user_namespace *user_ns;
+	struct lsm_namespace *ns;
 
-	if (user_ns && user_ns->lsm_ns)
-		return user_ns->lsm_ns;
+	user_ns = get_current_user_ns_checked();
+	if (IS_ERR(user_ns))
+		return NULL;
+	if (auth_guard_userns_boundary_snapshot_begin(user_ns) !=
+	    AUTH_GUARD_CHECK_VALID) {
+		put_user_ns(user_ns);
+		return NULL;
+	}
+	auth_guard_userns_boundary_read(user_ns, &boundary);
+	ns = boundary.lsm_ns ?: &init_lsm_ns;
+	if (!auth_guard_userns_boundary_snapshot_end(user_ns))
+		ns = NULL;
+	put_user_ns(user_ns);
+	if (!ns)
+		return NULL;
 
-	return &init_lsm_ns;
+	return ns;
 }
 EXPORT_SYMBOL_GPL(current_lsm_ns);
 
+struct lsm_namespace *get_current_lsm_ns_checked_where(const char *where)
+{
+	struct user_namespace *user_ns;
+	struct lsm_namespace *ns;
+
+	user_ns = get_current_user_ns_checked_where(where);
+	if (IS_ERR(user_ns))
+		return ERR_CAST(user_ns);
+	ns = get_lsm_ns_from_userns_checked_where(user_ns, where);
+	put_user_ns(user_ns);
+
+	return ns;
+}
+EXPORT_SYMBOL_GPL(get_current_lsm_ns_checked_where);
+
 bool lsm_ns_visible_lsmid(u64 lsmid)
 {
-	struct lsm_namespace *ns = current_lsm_ns();
+	struct lsm_namespace *ns __free(put_lsm_ns) =
+		get_current_lsm_ns_checked();
+	bool visible;
 
-	if (!lsm_ns_restricts_visibility(ns))
-		return true;
+	if (IS_ERR(ns))
+		return false;
+	visible = !lsm_ns_restricts_visibility(ns) ||
+		!lsm_ns_is_managed_major(lsmid) || ns->lsmid == lsmid;
 
-	if (!lsm_ns_is_managed_major(lsmid))
-		return true;
-
-	return ns->lsmid == lsmid;
+	return visible;
 }
 EXPORT_SYMBOL_GPL(lsm_ns_visible_lsmid);
 
-void lsm_ns_clear_pending_child_request(struct task_struct *task)
+void lsm_ns_release_pending_child_request(struct auth_guard_task_lsm_request *saved)
 {
-	if (!task)
+	if (!saved)
 		return;
 
-	task->lsm_ns_for_child = false;
-	task->lsm_ns_for_child_lsmid = LSM_ID_UNDEF;
-	kfree(task->lsm_ns_for_child_ctx);
-	task->lsm_ns_for_child_ctx = NULL;
+	kfree(saved->ctx);
+	*saved = (struct auth_guard_task_lsm_request) {
+		.lsmid = LSM_ID_UNDEF,
+	};
+}
+
+enum auth_guard_mutation_result
+lsm_ns_clear_pending_child_request_in_transition_where(
+	struct task_struct *task, struct auth_guard_task_lsm_request *saved,
+	const char *where)
+{
+	struct auth_guard_task_lsm_request replacement = {
+		.lsmid = LSM_ID_UNDEF,
+	};
+
+	if (!task)
+		return AUTH_GUARD_MUTATION_REJECTED;
+
+	return auth_guard_task_replace_lsm_request_in_transition_where(
+		task, &replacement, saved, where);
+}
+
+int lsm_ns_clear_pending_child_request(struct task_struct *task)
+{
+	struct auth_guard_task_lsm_request replacement = {
+		.lsmid = LSM_ID_UNDEF,
+	};
+	struct auth_guard_task_lsm_request old_request;
+	enum auth_guard_mutation_result mutation;
+
+	if (!task)
+		return 0;
+
+	mutation = auth_guard_task_replace_lsm_request(task, &replacement,
+						       &old_request);
+	if (mutation == AUTH_GUARD_MUTATION_REJECTED)
+		return -EACCES;
+	AUTH_GUARD_QUARANTINE_FAIL_STOP(mutation);
+	lsm_ns_release_pending_child_request(&old_request);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(lsm_ns_clear_pending_child_request);
 
-bool lsm_ns_current_syslog_routes_lsm(u64 lsmid)
+struct syslog_namespace *lsm_ns_get_current_syslog_route_lsm(u64 lsmid)
 {
-	struct lsm_namespace *lsm_ns = current_lsm_ns();
-	struct syslog_namespace *syslog_ns = current_syslog_ns();
-	struct lsm_namespace *owner_lsm_ns;
+	struct auth_guard_userns_boundary boundary;
+	struct lsm_namespace *owner_lsm_ns __free(put_lsm_ns) = NULL;
+	struct syslog_namespace *result = NULL;
 
-	if (!lsm_ns || lsm_ns == &init_lsm_ns || lsm_ns->lsmid != lsmid)
-		return false;
+	if (get_current_namespace_boundary_owner(&boundary, &owner_lsm_ns))
+		return NULL;
 
-	if (!syslog_ns || syslog_ns == &init_syslog_ns || !syslog_ns->user_ns)
-		return false;
+	if (boundary.lsm_ns == &init_lsm_ns || boundary.lsm_ns->lsmid != lsmid)
+		goto out;
 
-	owner_lsm_ns = READ_ONCE(syslog_ns->user_ns->lsm_ns);
-	if (!owner_lsm_ns)
-		owner_lsm_ns = &init_lsm_ns;
+	if (boundary.syslog_ns == &init_syslog_ns || !owner_lsm_ns)
+		goto out;
 
 	/*
 	 * Route guest-visible denials only when the active syslog namespace is
@@ -166,14 +237,25 @@ bool lsm_ns_current_syslog_routes_lsm(u64 lsmid)
 	 * the current task. This keeps foreign syslog setns() targets and the
 	 * host log stream out of guest-denial mirroring.
 	 */
-	return owner_lsm_ns == lsm_ns;
+	if (owner_lsm_ns == boundary.lsm_ns) {
+		result = boundary.syslog_ns;
+		boundary.syslog_ns = NULL;
+	}
+
+out:
+	put_namespace_boundary(&boundary);
+	return result;
 }
-EXPORT_SYMBOL_GPL(lsm_ns_current_syslog_routes_lsm);
+EXPORT_SYMBOL_GPL(lsm_ns_get_current_syslog_route_lsm);
 
 int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 {
 	const struct lsm_namespace_backend *backend;
+	struct auth_guard_task_lsm_request old_request;
+	struct auth_guard_task_lsm_request replacement;
+	struct lsm_namespace *current_ns __free(put_lsm_ns) = NULL;
 	struct lsm_ctx *copy;
+	enum auth_guard_mutation_result mutation;
 	u64 lsmid;
 	u64 required_len;
 	int err;
@@ -185,7 +267,10 @@ int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 	if (check_add_overflow(sizeof(*ctx), ctx->ctx_len, &required_len) ||
 	    ctx->len != required_len)
 		return -EINVAL;
-	if (current_lsm_ns() != &init_lsm_ns)
+	current_ns = get_current_lsm_ns_checked();
+	if (IS_ERR(current_ns))
+		return PTR_ERR(current_ns);
+	if (current_ns != &init_lsm_ns)
 		return -EPERM;
 
 	lsmid = ctx->id;
@@ -209,13 +294,23 @@ int lsm_ns_prepare_unshare(const struct lsm_ctx *ctx)
 	if (!copy)
 		return -ENOMEM;
 
-	lsm_ns_clear_pending_child_request(current);
-	current->lsm_ns_for_child = true;
-	current->lsm_ns_for_child_lsmid = lsmid;
-	current->lsm_ns_for_child_ctx = copy;
+	replacement = (struct auth_guard_task_lsm_request) {
+		.enabled = true,
+		.lsmid = lsmid,
+		.ctx = copy,
+		.ctx_len = ctx->len,
+	};
+	mutation = auth_guard_task_replace_lsm_request(current, &replacement,
+						       &old_request);
+	if (mutation == AUTH_GUARD_MUTATION_REJECTED) {
+		kfree(copy);
+		return -EACCES;
+	}
+	AUTH_GUARD_QUARANTINE_FAIL_STOP(mutation);
+	lsm_ns_release_pending_child_request(&old_request);
 
 	pr_notice("lsm_ns: arm child create current=%u lsm=%llu\n",
-		  current_lsm_ns()->ns.inum,
+		  init_lsm_ns.ns.inum,
 		  (unsigned long long)lsmid);
 	return 0;
 }
@@ -225,12 +320,14 @@ int lsm_ns_install_userns(struct user_namespace *user_ns,
 			  struct task_struct *task, struct cred *new_cred)
 {
 	const struct lsm_namespace_backend *backend;
-	struct lsm_namespace *ns;
+	struct lsm_namespace *ns __free(put_lsm_ns) = NULL;
 
 	if (!user_ns || !task || !new_cred)
 		return -EINVAL;
 
-	ns = user_ns->lsm_ns ? user_ns->lsm_ns : &init_lsm_ns;
+	ns = get_lsm_ns_from_userns_checked(user_ns);
+	if (IS_ERR(ns))
+		return PTR_ERR(ns);
 	if (ns == &init_lsm_ns)
 		return 0;
 
@@ -279,30 +376,37 @@ void free_lsm_ns(struct lsm_namespace *ns)
 EXPORT_SYMBOL_GPL(free_lsm_ns);
 
 int lsm_ns_check_userns_setns_from(const struct user_namespace *user_ns,
-				   const struct lsm_namespace *current_ns)
+					   const struct lsm_namespace *current_ns)
 {
-	struct lsm_namespace *target_ns;
+	struct lsm_namespace *target_ns __free(put_lsm_ns) = NULL;
 
 	if (!user_ns)
 		return -EINVAL;
 
 	if (!current_ns)
-		current_ns = current_lsm_ns();
-	target_ns = user_ns->lsm_ns ? user_ns->lsm_ns : &init_lsm_ns;
+		return -EACCES;
+	target_ns = get_lsm_ns_from_userns_checked(user_ns);
+	if (IS_ERR(target_ns))
+		return PTR_ERR(target_ns);
 	if (target_ns == current_ns)
 		return 0;
 
 	pr_notice("lsm_ns: reject userns setns current=%u target_user=%u target_lsm=%u\n",
 		  current_ns ? current_ns->ns.inum : 0,
-		  user_ns->ns.inum,
-		  target_ns->ns.inum);
+		      user_ns->ns.inum,
+		      target_ns->ns.inum);
 	return -EPERM;
 }
 EXPORT_SYMBOL_GPL(lsm_ns_check_userns_setns_from);
 
 int lsm_ns_check_userns_setns(const struct user_namespace *user_ns)
 {
-	return lsm_ns_check_userns_setns_from(user_ns, current_lsm_ns());
+	struct lsm_namespace *current_ns __free(put_lsm_ns) =
+		get_current_lsm_ns_checked();
+
+	if (IS_ERR(current_ns))
+		return PTR_ERR(current_ns);
+	return lsm_ns_check_userns_setns_from(user_ns, current_ns);
 }
 EXPORT_SYMBOL_GPL(lsm_ns_check_userns_setns);
 
@@ -333,15 +437,9 @@ fail_free:
 	return ERR_PTR(err);
 }
 
-static void lsm_ns_attach_userns(struct lsm_namespace *ns,
-				 struct user_namespace *user_ns,
-				 struct lsm_namespace *old_ns)
-{
-	if (user_ns != current_user_ns() && user_ns->lsm_ns == old_ns) {
-		put_lsm_ns(user_ns->lsm_ns);
-		user_ns->lsm_ns = get_lsm_ns(ns);
-	}
-}
+DEFINE_USERNS_BOUNDARY_REPLACER(lsm_ns_replace_userns_default,
+				lsm_namespace, lsm_ns,
+				get_lsm_ns, put_lsm_ns)
 
 struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns,
 				  struct task_struct *task, struct cred *new_cred,
@@ -349,6 +447,8 @@ struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns
 				  struct lsm_namespace *old_ns)
 {
 	struct lsm_namespace *ns;
+	struct lsm_namespace *user_lsm_ns __free(put_lsm_ns) = NULL;
+	enum auth_guard_mutation_result mutation;
 	u64 lsmid;
 	int err;
 
@@ -386,7 +486,10 @@ struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns
 	if (user_ns == &init_user_ns || user_ns->parent != &init_user_ns)
 		return ERR_PTR(-EPERM);
 
-	if (user_ns->lsm_ns != old_ns)
+	user_lsm_ns = get_lsm_ns_from_userns_checked(user_ns);
+	if (IS_ERR(user_lsm_ns))
+		return ERR_CAST(user_lsm_ns);
+	if (user_lsm_ns != old_ns)
 		return ERR_PTR(-EINVAL);
 
 	ns = clone_lsm_ns(user_ns, lsmid, old_ns);
@@ -399,22 +502,30 @@ struct lsm_namespace *copy_lsm_ns(bool new_child, struct user_namespace *user_ns
 		return ERR_PTR(err);
 	}
 
-	lsm_ns_attach_userns(ns, user_ns, old_ns);
+	mutation = lsm_ns_replace_userns_default(user_ns, old_ns, ns);
+	if (mutation == AUTH_GUARD_MUTATION_QUARANTINED)
+		return ERR_PTR(-EACCES);
+	if (mutation != AUTH_GUARD_MUTATION_APPLIED) {
+		put_lsm_ns(ns);
+		return ERR_PTR(-EACCES);
+	}
 	return ns;
 }
 EXPORT_SYMBOL_GPL(copy_lsm_ns);
 
 static struct ns_common *lsmns_get(struct task_struct *task)
 {
-	struct lsm_namespace *ns = &init_lsm_ns;
+	const struct cred *cred __free(put_cred) = get_task_cred_checked(task);
+	struct lsm_namespace *ns = NULL;
 	struct user_namespace *user_ns;
 
-	rcu_read_lock();
-	user_ns = __task_cred(task)->user_ns;
-	if (user_ns && user_ns->lsm_ns)
-		ns = user_ns->lsm_ns;
-	get_lsm_ns(ns);
-	rcu_read_unlock();
+	if (IS_ERR(cred))
+		return NULL;
+
+	user_ns = cred->user_ns;
+	ns = get_lsm_ns_from_userns_checked(user_ns);
+	if (IS_ERR(ns))
+		return NULL;
 
 	return &ns->ns;
 }
@@ -426,13 +537,17 @@ static void lsmns_put(struct ns_common *ns)
 
 static int lsmns_install(struct nsset *nsset, struct ns_common *new)
 {
+	struct lsm_namespace *current_ns __free(put_lsm_ns) =
+		get_current_lsm_ns_checked();
 	struct lsm_namespace *ns = to_lsm_ns(new);
+	unsigned int current_inum = 0;
 
 	(void)nsset;
 
+	if (!IS_ERR(current_ns))
+		current_inum = current_ns->ns.inum;
 	pr_notice("lsm_ns: reject direct setns current=%u target=%u\n",
-		  current_lsm_ns()->ns.inum,
-		  ns->ns.inum);
+		  current_inum, ns->ns.inum);
 	return -EPERM;
 }
 
@@ -455,15 +570,22 @@ static bool lsmns_contains(const struct lsm_namespace *ancestor,
 
 static struct ns_common *lsmns_get_parent(struct ns_common *ns)
 {
-	struct lsm_namespace *parent = to_lsm_ns(ns)->parent;
-	struct lsm_namespace *caller_ns = current_lsm_ns();
+	struct lsm_namespace *parent;
+	struct lsm_namespace *caller_ns __free(put_lsm_ns) =
+		get_current_lsm_ns_checked();
+	struct ns_common *ret;
 
+	if (IS_ERR(caller_ns))
+		return ERR_CAST(caller_ns);
+	parent = to_lsm_ns(ns)->parent;
 	if (!parent)
-		return ERR_PTR(-EPERM);
-	if (!caller_ns || !lsmns_contains(caller_ns, parent))
-		return ERR_PTR(-EPERM);
+		ret = ERR_PTR(-EPERM);
+	else if (!lsmns_contains(caller_ns, parent))
+		ret = ERR_PTR(-EPERM);
+	else
+		ret = &get_lsm_ns(parent)->ns;
 
-	return &get_lsm_ns(parent)->ns;
+	return ret;
 }
 
 const struct proc_ns_operations lsmns_operations = {

@@ -2766,12 +2766,12 @@ static inline void sub_nr_running(struct rq *rq, unsigned count)
 	sched_update_tick_dependency(rq);
 }
 
-extern void inc_cgns_nr_uninterruptible(struct task_struct *p);
+void inc_cgns_nr_uninterruptible(struct rq *rq, struct task_struct *p);
 static inline void __block_task(struct rq *rq, struct task_struct *p)
 {
 	if (p->sched_contributes_to_load) {
 		rq->nr_uninterruptible++;
-		inc_cgns_nr_uninterruptible(p);
+		inc_cgns_nr_uninterruptible(rq, p);
 	}
 
 	if (p->in_iowait) {

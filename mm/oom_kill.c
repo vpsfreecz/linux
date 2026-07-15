@@ -781,6 +781,7 @@ static void mark_oom_victim(struct task_struct *tsk)
 {
 	const struct cred *cred;
 	struct mm_struct *mm = tsk->mm;
+	uid_t uid = (uid_t)-1;
 
 	WARN_ON(oom_killer_disabled);
 	/* OOM killer might race with memcg OOM */
@@ -799,9 +800,12 @@ static void mark_oom_victim(struct task_struct *tsk)
 	 */
 	thaw_process(tsk);
 	atomic_inc(&oom_victims);
-	cred = get_task_cred(tsk);
-	trace_mark_victim(tsk, cred->uid.val);
-	put_cred(cred);
+	cred = get_task_cred_checked_nowait(tsk);
+	if (!IS_ERR(cred)) {
+		uid = cred->uid.val;
+		put_cred(cred);
+	}
+	trace_mark_victim(tsk, uid);
 }
 
 /**

@@ -780,7 +780,10 @@ int __ksmbd_override_fsids(struct ksmbd_work *work,
 		cred->cap_effective = cap_drop_fs_set(cred->cap_effective);
 
 	WARN_ON(work->saved_cred);
-	work->saved_cred = override_creds(cred);
+	work->saved_cred = override_creds_from_prepared(cred);
+	if (!work->saved_cred)
+		return -EACCES;
+
 	return 0;
 }
 

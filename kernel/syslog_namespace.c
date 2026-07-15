@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/auth_guard.h>
 #include <linux/capability.h>
 #include <linux/err.h>
 #include <linux/init.h>
@@ -130,6 +131,11 @@ void free_syslog_ns(struct syslog_namespace *ns)
 	/* Concurrent nstree traversal depends on a grace period. */
 	call_rcu(&ns->ns.ns_rcu, delayed_free_syslog_ns);
 }
+EXPORT_SYMBOL_GPL(free_syslog_ns);
+
+DEFINE_USERNS_BOUNDARY_REPLACER(syslog_ns_replace_userns_default,
+				syslog_namespace, syslog_ns,
+				get_syslog_ns, put_syslog_ns)
 
 static struct syslog_namespace *clone_syslog_ns(
 				struct user_namespace *user_ns,
@@ -138,6 +144,7 @@ static struct syslog_namespace *clone_syslog_ns(
 {
 	struct syslog_namespace *ns;
 	struct ucounts *ucounts;
+	enum auth_guard_mutation_result mutation;
 	int err;
 
 	ucounts = inc_syslog_namespaces(user_ns);
@@ -185,14 +192,21 @@ static struct syslog_namespace *clone_syslog_ns(
 	 * subsystems keyed by user_ns (for example netns logging) use the child
 	 * syslog buffer rather than the inherited parent one.
 	 */
-	if (user_ns != current_user_ns() && user_ns->syslog_ns == old_ns) {
-		put_syslog_ns(user_ns->syslog_ns);
-		user_ns->syslog_ns = get_syslog_ns(ns);
+	if (user_ns != current_user_ns()) {
+		mutation = syslog_ns_replace_userns_default(user_ns, old_ns, ns);
+		if (mutation == AUTH_GUARD_MUTATION_QUARANTINED)
+			return ERR_PTR(-EACCES);
+		if (mutation != AUTH_GUARD_MUTATION_APPLIED) {
+			err = -EACCES;
+			goto fail_log_buf;
+		}
 	}
 
 	__ns_tree_add(&ns->ns, &syslog_ns_tree);
 	return ns;
 
+fail_log_buf:
+	syslog_ns_log_buf_free(ns);
 fail_unregister_name:
 	unregister_syslog_ns_name(ns);
 fail_name:
@@ -277,19 +291,8 @@ struct syslog_namespace *copy_syslog_ns(bool new, char *name,
 	return clone_syslog_ns(user_ns, old_ns, name);
 }
 
-static struct ns_common *syslogns_get(struct task_struct *task)
-{
-	struct syslog_namespace *ns = NULL;
-	struct nsproxy *nsproxy;
-
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy)
-		ns = get_syslog_ns(nsproxy->syslog_ns);
-	task_unlock(task);
-
-	return ns ? &ns->ns : NULL;
-}
+DEFINE_TASK_NSPROXY_MEMBER_GETTER(syslogns_get, struct syslog_namespace,
+				  syslog_ns, get_syslog_ns, put_syslog_ns)
 
 static void syslogns_put(struct ns_common *ns)
 {
@@ -316,9 +319,8 @@ static int syslogns_install(struct nsset *nsset, struct ns_common *new)
 	if (ret)
 		return ret;
 
-	put_syslog_ns(nsproxy->syslog_ns);
-	nsproxy->syslog_ns = get_syslog_ns(ns);
-	return 0;
+	return auth_guard_nsproxy_install_owned(nsproxy, syslog_ns, ns,
+						get_syslog_ns, put_syslog_ns);
 }
 
 static struct user_namespace *syslogns_owner(struct ns_common *ns)
@@ -340,15 +342,23 @@ static bool syslogns_contains(const struct syslog_namespace *ancestor,
 
 static struct ns_common *syslogns_get_parent(struct ns_common *ns)
 {
-	struct syslog_namespace *parent = to_syslog_ns(ns)->parent;
-	struct syslog_namespace *caller_ns = current_syslog_ns();
+	struct syslog_namespace *parent;
+	struct syslog_namespace *caller_ns;
+	struct ns_common *ret;
 
+	caller_ns = get_current_syslog_ns_checked();
+	if (IS_ERR(caller_ns))
+		return ERR_CAST(caller_ns);
+	parent = to_syslog_ns(ns)->parent;
 	if (!parent)
-		return ERR_PTR(-EPERM);
-	if (!caller_ns || !syslogns_contains(caller_ns, parent))
-		return ERR_PTR(-EPERM);
+		ret = ERR_PTR(-EPERM);
+	else if (!syslogns_contains(caller_ns, parent))
+		ret = ERR_PTR(-EPERM);
+	else
+		ret = &get_syslog_ns(parent)->ns;
+	put_syslog_ns(caller_ns);
 
-	return &get_syslog_ns(parent)->ns;
+	return ret;
 }
 
 const struct proc_ns_operations syslogns_operations = {

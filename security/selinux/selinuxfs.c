@@ -87,15 +87,18 @@ struct selinux_fs_info {
 
 static int selinux_fs_info_create(struct super_block *sb)
 {
+	struct selinux_cred_view actor;
 	struct selinux_fs_info *fsi;
 
+	if (!selinux_cred_view_get(current_cred(), &actor))
+		return -EACCES;
 	fsi = kzalloc(sizeof(*fsi), GFP_KERNEL);
 	if (!fsi)
 		return -ENOMEM;
 
 	fsi->last_ino = SEL_INO_NEXT - 1;
 	fsi->sb = sb;
-	fsi->state = get_selinux_state(current_selinux_state());
+	fsi->state = get_selinux_state(actor.state);
 	sb->s_fs_info = fsi;
 	return 0;
 }
@@ -116,27 +119,38 @@ static void selinux_fs_info_free(struct super_block *sb)
 	sb->s_fs_info = NULL;
 }
 
-static int selinuxfs_current_sid(struct selinux_fs_info *fsi, u32 *sid)
+static bool selinuxfs_outer_sid_for_state(bool active,
+					  struct selinux_state *outer_state,
+					  u32 outer_sid,
+					  const struct selinux_state *cred_state,
+					  const struct selinux_state *state,
+					  u32 *sid)
 {
-	const struct cred *cred = current_cred();
-	const struct cred_security_struct *crsec = selinux_cred(cred);
+	if (!active || outer_state != state || cred_state == outer_state ||
+	    !selinux_initialized_state(outer_state))
+		return false;
+
+	*sid = outer_sid;
+	return true;
+}
+
+static int selinuxfs_current_sid(const struct selinux_fs_info *fsi,
+				 const struct selinux_cred_view *actor, u32 *sid)
+{
+	const struct cred_security_struct *crsec = actor->security;
 	struct selinux_state *state = fsi->state ?: &selinux_state;
-	struct selinux_state *cstate = cred_selinux_state(cred);
+	struct selinux_state *cstate = actor->state;
 
-	if (crsec->outer_active && crsec->outer_state == state &&
-	    cstate != crsec->outer_state &&
-	    selinux_initialized_state(crsec->outer_state)) {
-		*sid = crsec->outer_sid;
+	if (selinuxfs_outer_sid_for_state(crsec->outer_active,
+					  crsec->outer_state, crsec->outer_sid,
+					  cstate, state, sid))
 		return 0;
-	}
 
-	if (crsec->pending_outer_active &&
-	    crsec->pending_outer_state == state &&
-	    cstate != crsec->pending_outer_state &&
-	    selinux_initialized_state(crsec->pending_outer_state)) {
-		*sid = crsec->pending_outer_sid;
+	if (selinuxfs_outer_sid_for_state(crsec->pending_outer_active,
+					  crsec->pending_outer_state,
+					  crsec->pending_outer_sid, cstate,
+					  state, sid))
 		return 0;
-	}
 
 	if (cstate == state) {
 		*sid = crsec->sid;
@@ -146,23 +160,28 @@ static int selinuxfs_current_sid(struct selinux_fs_info *fsi, u32 *sid)
 	return -EACCES;
 }
 
-static bool selinuxfs_allows_child_bootstrap_control(
-	struct selinux_fs_info *fsi, u32 perms)
+static int
+selinuxfs_allows_child_bootstrap_control(const struct selinux_fs_info *fsi,
+					 const struct selinux_cred_view *actor,
+					 u32 perms)
 {
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-	const struct cred *cred = current_cred();
 	struct selinux_state *state = fsi->state ?: &selinux_state;
 	struct lsm_namespace *ns;
+	bool allowed;
 
 	if (perms != SECURITY__LOAD_POLICY && perms != SECURITY__SETENFORCE)
-		return false;
+		return 0;
 
-	if (state != cred_selinux_state(cred))
-		return false;
+	if (state != actor->state)
+		return 0;
 
-	ns = current_lsm_ns();
-	if (!ns || ns == &init_lsm_ns || ns->lsmid != LSM_ID_SELINUX)
-		return false;
+	ns = get_current_lsm_ns_checked();
+	if (IS_ERR(ns))
+		return PTR_ERR(ns);
+	allowed = ns != &init_lsm_ns && ns->lsmid == LSM_ID_SELINUX &&
+		selinux_state_child_policy_load_pending(state);
+	put_lsm_ns(ns);
 
 	/*
 	 * A child SELinux state starts with a cloned parent policy only so it can
@@ -170,21 +189,25 @@ static bool selinuxfs_allows_child_bootstrap_control(
 	 * that temporary clone to authorize the control operation that replaces it.
 	 * Once the first load succeeds, ordinary child-policy checks apply.
 	 */
-	return selinux_state_child_policy_load_pending(state);
+	return allowed;
 #else
-	return false;
+	return 0;
 #endif
 }
 
 static int selinuxfs_has_perm(struct selinux_fs_info *fsi, u32 perms)
 {
+	struct selinux_cred_view actor;
 	u32 sid;
 	int rc;
 
-	if (selinuxfs_allows_child_bootstrap_control(fsi, perms))
-		return 0;
+	if (!selinux_cred_view_get(current_cred(), &actor))
+		return -EACCES;
+	rc = selinuxfs_allows_child_bootstrap_control(fsi, &actor, perms);
+	if (rc)
+		return rc < 0 ? rc : 0;
 
-	rc = selinuxfs_current_sid(fsi, &sid);
+	rc = selinuxfs_current_sid(fsi, &actor, &sid);
 	if (rc)
 		return rc;
 
@@ -2239,27 +2262,34 @@ err:
 }
 
 #ifdef CONFIG_SECURITY_LSM_NAMESPACE
-static bool selinuxfs_userns_mount_allowed(struct fs_context *fc)
+static int selinuxfs_userns_mount_check(struct fs_context *fc)
 {
 	struct lsm_namespace *ns;
+	bool allowed;
 
-	if (fc->user_ns == &init_user_ns)
-		return true;
+	ns = get_current_lsm_ns_checked();
+	if (IS_ERR(ns))
+		return PTR_ERR(ns);
+	allowed = fc->user_ns == &init_user_ns ||
+		(ns != &init_lsm_ns && ns->lsmid == LSM_ID_SELINUX);
+	put_lsm_ns(ns);
 
-	ns = current_lsm_ns();
-	return ns && ns != &init_lsm_ns && ns->lsmid == LSM_ID_SELINUX;
+	return allowed ? 0 : -EPERM;
 }
 #else
-static bool selinuxfs_userns_mount_allowed(struct fs_context *fc)
+static int selinuxfs_userns_mount_check(struct fs_context *fc)
 {
-	return true;
+	return 0;
 }
 #endif
 
 static int sel_get_tree(struct fs_context *fc)
 {
-	if (!selinuxfs_userns_mount_allowed(fc))
-		return -EPERM;
+	int rc;
+
+	rc = selinuxfs_userns_mount_check(fc);
+	if (rc)
+		return rc;
 
 	return get_tree_nodev(fc, sel_fill_super);
 }

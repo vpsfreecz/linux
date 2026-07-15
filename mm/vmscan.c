@@ -32,6 +32,7 @@
 #include <linux/rmap.h>
 #include <linux/topology.h>
 #include <linux/cpu.h>
+#include <linux/cgroup.h>
 #include <linux/cpuset.h>
 #include <linux/cgroup_namespace.h>
 #include <linux/compaction.h>
@@ -7551,22 +7552,46 @@ void __meminit kswapd_stop(int nid)
 	pgdat_kswapd_unlock(pgdat);
 }
 
+#ifdef CONFIG_MEMCG
 static int proc_dointvec_minmax_swappiness(const struct ctl_table *table,
-				    int write, void *buffer,
-				    size_t *lenp, loff_t *ppos)
+					   int write, void *buffer,
+					   size_t *lenp, loff_t *ppos)
 {
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
 	struct ctl_table *vtable;
-	struct user_namespace *ns = current_user_ns();
-	struct cgroup_namespace *cgns = current->nsproxy->cgroup_ns;
-	struct mem_cgroup *ns_root_memcg;
+	struct user_namespace *ns;
+	struct cgroup_namespace *cgns;
+	struct mem_cgroup *current_memcg = NULL;
+	struct mem_cgroup *ns_root_memcg = NULL;
+	enum auth_guard_check_result auth_result;
 	int ret = 0;
 	int *swappiness;
+	bool init_namespaces;
 	bool need_free = false;
 
-	ns_root_memcg = mem_cgroup_from_css(cgns->root_cset->subsys[memory_cgrp_id]);
+	auth_result = cgroup_task_auth_snapshot_get(current, -1, &snapshot);
+	if (auth_result != AUTH_GUARD_CHECK_VALID)
+		return auth_result == AUTH_GUARD_CHECK_BUSY ? -EAGAIN : -EACCES;
 
-	if (write && !ns_capable(cgns->user_ns, CAP_SYS_ADMIN))
-		return -EPERM;
+	ns = current_user_ns();
+	cgns = snapshot.cgroup_ns;
+	init_namespaces = ns == &init_user_ns && cgns == &init_cgroup_ns;
+	if (!mem_cgroup_disabled())
+		ns_root_memcg = mem_cgroup_from_css(snapshot.root_cset->subsys[memory_cgrp_id]);
+
+	if (write && !ns_capable(cgns->user_ns, CAP_SYS_ADMIN)) {
+		ret = -EPERM;
+		goto out;
+	}
+	if (!init_namespaces && !ns_root_memcg) {
+		if (write) {
+			ret = -EOPNOTSUPP;
+			goto out;
+		}
+		ret = proc_dointvec_minmax(table, false, buffer, lenp, ppos);
+		goto out;
+	}
 
 	/*
 	 * Virtualize swappiness if we're not in init namespaces;
@@ -7574,19 +7599,27 @@ static int proc_dointvec_minmax_swappiness(const struct ctl_table *table,
 	 * if admin in current cgroup namespace, or use current memory
 	 * cgroup swappiness for read only access.
 	 */
-	if ((ns == &init_user_ns) && (cgns == &init_cgroup_ns)) {
+	if (init_namespaces) {
 		swappiness = &vm_swappiness;
 		ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
 	} else {
 		vtable = kmemdup(table, sizeof(*vtable), GFP_KERNEL);
-		if (!vtable)
-			return -ENOMEM;
+		if (!vtable) {
+			ret = -ENOMEM;
+			goto out;
+		}
 		need_free = true;
 
-		if (ns_capable(cgns->user_ns, CAP_SYS_ADMIN))
+		if (ns_capable(cgns->user_ns, CAP_SYS_ADMIN)) {
 			swappiness = &ns_root_memcg->swappiness;
-		else
-			swappiness = &get_mem_cgroup_from_mm(current->mm)->swappiness;
+		} else {
+			current_memcg = get_mem_cgroup_from_mm(current->mm);
+			if (!current_memcg) {
+				ret = -EOPNOTSUPP;
+				goto out;
+			}
+			swappiness = &current_memcg->swappiness;
+		}
 		vtable->data = swappiness;
 		ret = proc_dointvec_minmax(vtable, write, buffer, lenp, ppos);
 	}
@@ -7597,7 +7630,7 @@ static int proc_dointvec_minmax_swappiness(const struct ctl_table *table,
 	/*
 	 * Propagate new value to all memcgs in this cgroup namespace.
 	 */
-	if (write) {
+	if (write && ns_root_memcg) {
 		struct mem_cgroup *tmp;
 
 		for (tmp = mem_cgroup_iter(ns_root_memcg, NULL, NULL);
@@ -7606,10 +7639,20 @@ static int proc_dointvec_minmax_swappiness(const struct ctl_table *table,
 			tmp->swappiness = *swappiness;
 	}
 out:
+	if (current_memcg)
+		mem_cgroup_put(current_memcg);
 	if (need_free)
 		kfree(vtable);
 	return ret;
 }
+#else
+static int proc_dointvec_minmax_swappiness(const struct ctl_table *table,
+					   int write, void *buffer,
+					   size_t *lenp, loff_t *ppos)
+{
+	return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+}
+#endif
 
 static const struct ctl_table vmscan_sysctl_table[] = {
 	{

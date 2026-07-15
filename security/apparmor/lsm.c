@@ -127,11 +127,13 @@ static int apparmor_ptrace_access_check(struct task_struct *child,
 					unsigned int mode)
 {
 	struct aa_label *tracer, *tracee;
-	const struct cred *cred;
+	const struct cred *cred __free(put_cred) =
+		get_task_cred_checked_nowait(child);
 	int error;
 	bool needput;
 
-	cred = get_task_cred(child);
+	if (IS_ERR(cred))
+		return PTR_ERR(cred);
 	tracee = cred_label(cred);	/* ref count on cred */
 	tracer = __begin_current_label_crit_section(&needput);
 	error = aa_may_ptrace(current_cred(), tracer, cred, tracee,
@@ -142,7 +144,6 @@ static int apparmor_ptrace_access_check(struct task_struct *child,
 			"vpsadminos_lsmct_diag: apparmor ptrace deny rc=%d mode=0x%x current=%d child=%d\n",
 			error, mode, task_pid_nr(current), task_pid_nr(child));
 	__end_current_label_crit_section(tracer, needput);
-	put_cred(cred);
 
 	return error;
 }
@@ -150,16 +151,19 @@ static int apparmor_ptrace_access_check(struct task_struct *child,
 static int apparmor_ptrace_traceme(struct task_struct *parent)
 {
 	struct aa_label *tracer, *tracee;
-	const struct cred *cred;
+	const struct cred *cred __free(put_cred) = NULL;
 	int error;
 	bool needput;
 
 	tracee = __begin_current_label_crit_section(&needput);
-	cred = get_task_cred(parent);
+	cred = get_task_cred_checked_nowait(parent);
+	if (IS_ERR(cred)) {
+		__end_current_label_crit_section(tracee, needput);
+		return PTR_ERR(cred);
+	}
 	tracer = cred_label(cred);	/* ref count on cred */
 	error = aa_may_ptrace(cred, tracer, current_cred(), tracee,
 			      AA_PTRACE_TRACE);
-	put_cred(cred);
 	__end_current_label_crit_section(tracee, needput);
 
 	return error;
@@ -170,10 +174,11 @@ static int apparmor_capget(const struct task_struct *target, kernel_cap_t *effec
 			   kernel_cap_t *inheritable, kernel_cap_t *permitted)
 {
 	struct aa_label *label;
-	const struct cred *cred;
+	const struct cred *cred __free(put_cred) =
+		get_task_cred_checked((struct task_struct *)target);
 
-	rcu_read_lock();
-	cred = __task_cred(target);
+	if (IS_ERR(cred))
+		return PTR_ERR(cred);
 	label = aa_get_newest_cred_label(cred);
 
 	/*
@@ -192,7 +197,6 @@ static int apparmor_capget(const struct task_struct *target, kernel_cap_t *effec
 			*permitted = cap_intersect(*permitted, allowed);
 		}
 	}
-	rcu_read_unlock();
 	aa_put_label(label);
 
 	return 0;
@@ -842,10 +846,13 @@ static int apparmor_getprocattr(struct task_struct *task, const char *name,
 				char **value)
 {
 	int error = -ENOENT;
-	/* released below */
-	const struct cred *cred = get_task_cred(task);
+	const struct cred *cred __free(put_cred) =
+		get_task_cred_checked(task);
 	struct aa_task_ctx *ctx = task_ctx(current);
 	struct aa_label *label = NULL;
+
+	if (IS_ERR(cred))
+		return PTR_ERR(cred);
 
 	if (strcmp(name, "current") == 0)
 		label = aa_get_newest_label(cred_label(cred));
@@ -860,7 +867,6 @@ static int apparmor_getprocattr(struct task_struct *task, const char *name,
 		error = aa_getprocattr(label, value, true);
 
 	aa_put_label(label);
-	put_cred(cred);
 
 	return error;
 }
@@ -1040,12 +1046,14 @@ static int apparmor_task_setrlimit(struct task_struct *task,
 static int apparmor_task_kill(struct task_struct *target, struct kernel_siginfo *info,
 			      int sig, const struct cred *cred)
 {
-	const struct cred *tc;
+	const struct cred *tc __free(put_cred) =
+		get_task_cred_checked(target);
 	struct aa_label *cl, *tl;
 	int error;
 	bool needput;
 
-	tc = get_task_cred(target);
+	if (IS_ERR(tc))
+		return PTR_ERR(tc);
 	tl = aa_get_newest_cred_label(tc);
 	if (cred) {
 		/*
@@ -1060,7 +1068,6 @@ static int apparmor_task_kill(struct task_struct *target, struct kernel_siginfo 
 		__end_current_label_crit_section(cl, needput);
 	}
 	aa_put_label(tl);
-	put_cred(tc);
 
 	return error;
 }

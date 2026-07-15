@@ -3754,10 +3754,13 @@ static int __init target_core_init_configfs(void)
 		ret = -ENOMEM;
 		goto out;
 	}
-	old_cred = override_creds(kern_cred);
+	old_cred = override_creds_from_prepared(kern_cred);
+	if (!old_cred) {
+		ret = -EACCES;
+		goto out;
+	}
 	target_init_dbroot();
-	revert_creds(old_cred);
-	put_cred(kern_cred);
+	put_cred(revert_creds(old_cred));
 
 	return 0;
 

@@ -681,11 +681,13 @@ static int ovl_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		config->userxattr = true;
 		break;
 	case Opt_override_creds: {
-		const struct cred *cred = NULL;
+		const struct cred *old_cred;
+		struct cred *cred;
 
 		if (result.negated) {
-			swap(cred, ofs->creator_cred);
-			put_cred(cred);
+			old_cred = ofs->creator_cred;
+			ofs->creator_cred = NULL;
+			put_cred(old_cred);
 			break;
 		}
 
@@ -695,12 +697,21 @@ static int ovl_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		}
 
 		cred = prepare_creds();
-		if (cred)
-			swap(cred, ofs->creator_cred);
-		else
+		if (!cred) {
 			err = -ENOMEM;
+			break;
+		}
 
-		put_cred(cred);
+		/* Never override disk quota limits or use reserved space. */
+		cap_lower(cred->cap_effective, CAP_SYS_RESOURCE);
+
+		err = commit_prepared_cred(cred);
+		if (err)
+			break;
+
+		old_cred = ofs->creator_cred;
+		ofs->creator_cred = cred;
+		put_cred(old_cred);
 		break;
 	}
 	default:

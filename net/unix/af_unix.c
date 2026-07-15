@@ -1264,7 +1264,12 @@ static struct sock *unix_find_bsd(struct sockaddr_un *sunaddr, int addr_len,
 		get_fs_root(init_task.fs, &root);
 		task_unlock(&init_task);
 
-		cred = override_creds(kcred);
+		cred = override_creds_from_prepared(kcred);
+		if (!cred) {
+			path_put(&root);
+			err = -EACCES;
+			goto fail;
+		}
 		err = vfs_path_lookup(root.dentry, root.mnt, sunaddr->sun_path,
 				      LOOKUP_BENEATH | LOOKUP_NO_SYMLINKS |
 				      LOOKUP_NO_MAGICLINKS, &path);
