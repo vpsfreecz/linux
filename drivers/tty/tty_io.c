@@ -66,6 +66,7 @@
  */
 
 #include <linux/types.h>
+#include <linux/auth_guard.h>
 #include <linux/major.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
@@ -3017,6 +3018,7 @@ void __do_SAK(struct tty_struct *tty)
 {
 	struct task_struct *g, *p;
 	struct pid *session;
+	enum auth_guard_check_result guard_result;
 	int i;
 
 	scoped_guard(spinlock_irqsave, &tty->ctrl.lock)
@@ -3033,8 +3035,11 @@ void __do_SAK(struct tty_struct *tty)
 			   task_pid_nr(p), p->comm);
 		group_send_sig_info(SIGKILL, SEND_SIG_PRIV, p, PIDTYPE_SID);
 	} while_each_pid_task(session, PIDTYPE_SID, p);
+	read_unlock(&tasklist_lock);
 
 	/* Now kill any processes that happen to have the tty open */
+retry_files:
+	read_lock(&tasklist_lock);
 	for_each_process_thread(g, p) {
 		if (p->signal->tty == tty) {
 			tty_notice(tty, "SAK: killed process %d (%s): by controlling tty\n",
@@ -3043,8 +3048,29 @@ void __do_SAK(struct tty_struct *tty)
 					PIDTYPE_SID);
 			continue;
 		}
-		guard(task_lock)(p);
+		task_lock(p);
+		guard_result = auth_guard_task_check_status(p);
+		if (guard_result == AUTH_GUARD_CHECK_BUSY) {
+			task_unlock(p);
+			read_unlock(&tasklist_lock);
+			cond_resched();
+			goto retry_files;
+		}
+		if (guard_result == AUTH_GUARD_CHECK_UNAVAILABLE) {
+			task_unlock(p);
+			continue;
+		}
+		if (guard_result != AUTH_GUARD_CHECK_VALID) {
+			task_unlock(p);
+			tty_notice(tty,
+				   "SAK: killed process %d (%s): invalid task authority\n",
+				   task_pid_nr(p), p->comm);
+			group_send_sig_info(SIGKILL, SEND_SIG_PRIV, p,
+					    PIDTYPE_SID);
+			continue;
+		}
 		i = iterate_fd(p->files, 0, this_tty, tty);
+		task_unlock(p);
 		if (i != 0) {
 			tty_notice(tty, "SAK: killed process %d (%s): by fd#%d\n",
 				   task_pid_nr(p), p->comm, i - 1);

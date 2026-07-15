@@ -9,6 +9,9 @@
  *             Pavel Emelianov <xemul@openvz.org>
  */
 
+#include <linux/auth_guard.h>
+#include <linux/cred.h>
+#include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/nsproxy.h>
@@ -30,36 +33,297 @@
 #include <linux/perf_event.h>
 
 static struct kmem_cache *nsproxy_cachep;
+static void free_nsproxy_unpublished(struct nsproxy *ns);
+static void free_nsproxy_rejected(struct nsproxy *ns);
 
-static void consume_pending_child_ns_request(struct task_struct *task)
+static int
+namespace_boundary_snapshot_error(enum auth_guard_check_result result)
 {
-	if (!task)
+	return result == AUTH_GUARD_CHECK_BUSY ? -EAGAIN : -EACCES;
+}
+
+int get_current_namespace_boundary_where(
+	struct auth_guard_userns_boundary *boundary, const char *where)
+{
+	struct user_namespace *user_ns = NULL;
+	const struct cred *cred;
+	struct nsproxy *nsproxy;
+	enum auth_guard_check_result result;
+	int ret;
+
+	if (!boundary)
+		return -EINVAL;
+	*boundary = (struct auth_guard_userns_boundary) {};
+
+	nsproxy = get_current_nsproxy_checked_where(where);
+	if (IS_ERR(nsproxy))
+		return PTR_ERR(nsproxy);
+
+	cred = current_cred();
+	user_ns = get_user_ns(READ_ONCE(cred->user_ns));
+	if (!user_ns) {
+		ret = -EACCES;
+		goto out_nsproxy;
+	}
+	result = auth_guard_userns_boundary_snapshot_begin_where(user_ns, where);
+	if (result != AUTH_GUARD_CHECK_VALID) {
+		ret = namespace_boundary_snapshot_error(result);
+		goto out_user_ns;
+	}
+
+	boundary->syslog_ns = get_syslog_ns(READ_ONCE(nsproxy->syslog_ns));
+	boundary->tracing_ns = get_tracing_ns(READ_ONCE(nsproxy->tracing_ns));
+	ret = boundary->syslog_ns ? 0 : -EACCES;
+#ifdef CONFIG_TRACING_NS
+	if (!boundary->tracing_ns)
+		ret = -EACCES;
+#endif
+	if (!auth_guard_userns_boundary_snapshot_end_where(user_ns, where))
+		ret = -EACCES;
+
+out_user_ns:
+	put_user_ns(user_ns);
+out_nsproxy:
+	if (!put_current_nsproxy_checked_where(nsproxy, where))
+		ret = -EACCES;
+	if (ret)
+		put_namespace_boundary(boundary);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(get_current_namespace_boundary_where);
+
+void put_namespace_boundary(struct auth_guard_userns_boundary *boundary)
+{
+	if (!boundary)
+		return;
+	if (!IS_ERR(boundary->tracing_ns))
+		put_tracing_ns(boundary->tracing_ns);
+	if (!IS_ERR(boundary->syslog_ns))
+		put_syslog_ns(boundary->syslog_ns);
+	*boundary = (struct auth_guard_userns_boundary) {};
+}
+EXPORT_SYMBOL_GPL(put_namespace_boundary);
+
+static int task_nsproxy_snapshot_error(enum auth_guard_check_result result)
+{
+	switch (result) {
+	case AUTH_GUARD_CHECK_BUSY:
+		return -EAGAIN;
+	case AUTH_GUARD_CHECK_CREDENTIAL_ONLY:
+	case AUTH_GUARD_CHECK_UNAVAILABLE:
+		return -ESRCH;
+	default:
+		return -EACCES;
+	}
+}
+
+int task_nsproxy_snapshot_get_where(struct task_struct *task,
+				    struct task_nsproxy_snapshot *snapshot,
+				    const char *where)
+{
+	struct nsproxy *nsproxy = NULL;
+	enum auth_guard_check_result result;
+	bool nsproxy_reserved = false;
+	bool remote;
+	bool task_reserved = false;
+
+	if (!task || !snapshot)
+		return -EINVAL;
+	snapshot->task = NULL;
+	snapshot->nsproxy = NULL;
+
+	remote = task != current;
+	if (remote)
+		task_lock(task);
+	result = auth_guard_task_snapshot_begin_where(task, where);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		goto out;
+	task_reserved = true;
+
+	nsproxy = READ_ONCE(task->nsproxy);
+	if (!nsproxy) {
+		result = AUTH_GUARD_CHECK_UNAVAILABLE;
+		goto out;
+	}
+	result = auth_guard_nsproxy_snapshot_begin_where(nsproxy, where);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		goto out;
+	nsproxy_reserved = true;
+
+	get_task_struct(task);
+	get_nsproxy(nsproxy);
+	snapshot->task = task;
+	snapshot->nsproxy = nsproxy;
+	if (remote)
+		task_unlock(task);
+	return 0;
+
+out:
+	if (nsproxy_reserved &&
+	    !auth_guard_nsproxy_snapshot_end_where(nsproxy, where))
+		result = AUTH_GUARD_CHECK_INVALID;
+	if (task_reserved && !auth_guard_task_snapshot_end_where(task, where))
+		result = AUTH_GUARD_CHECK_INVALID;
+	if (remote)
+		task_unlock(task);
+	return task_nsproxy_snapshot_error(result);
+}
+EXPORT_SYMBOL_GPL(task_nsproxy_snapshot_get_where);
+
+bool task_nsproxy_snapshot_put_where(struct task_nsproxy_snapshot *snapshot,
+				     const char *where)
+{
+	struct task_struct *task;
+	struct nsproxy *nsproxy;
+	bool valid;
+
+	if (WARN_ON_ONCE(!snapshot || !snapshot->task || !snapshot->nsproxy))
+		return false;
+	task = snapshot->task;
+	nsproxy = snapshot->nsproxy;
+	snapshot->task = NULL;
+	snapshot->nsproxy = NULL;
+
+	valid = auth_guard_nsproxy_snapshot_end_where(nsproxy, where);
+	if (!auth_guard_task_snapshot_end_where(task, where))
+		valid = false;
+	put_nsproxy(nsproxy);
+	put_task_struct(task);
+	return valid;
+}
+EXPORT_SYMBOL_GPL(task_nsproxy_snapshot_put_where);
+
+struct nsproxy *get_current_nsproxy_checked_where(const char *where)
+{
+	struct task_nsproxy_snapshot snapshot;
+	int ret;
+
+	ret = task_nsproxy_snapshot_get_where(current, &snapshot, where);
+	if (ret)
+		return ERR_PTR(ret == -ESRCH ? -EACCES : ret);
+	return snapshot.nsproxy;
+}
+EXPORT_SYMBOL_GPL(get_current_nsproxy_checked_where);
+
+bool put_current_nsproxy_checked_where(struct nsproxy *nsproxy,
+				       const char *where)
+{
+	struct task_nsproxy_snapshot snapshot = {
+		.task = current,
+		.nsproxy = nsproxy,
+	};
+
+	return task_nsproxy_snapshot_put_where(&snapshot, where);
+}
+EXPORT_SYMBOL_GPL(put_current_nsproxy_checked_where);
+
+static bool has_pending_child_ns_request(const struct task_struct *task)
+{
+	return task && (task->syslog_ns_for_child ||
+			task->tracing_ns_for_child);
+}
+
+static void reset_pending_child_ns_request_payloads(
+	struct pending_child_ns_request_payloads *payloads)
+{
+	*payloads = (struct pending_child_ns_request_payloads) {};
+}
+
+void release_pending_child_ns_request_payloads(
+	struct pending_child_ns_request_payloads *payloads)
+{
+	if (!payloads)
+		return;
+	kfree(payloads->syslog.name);
+	reset_pending_child_ns_request_payloads(payloads);
+}
+
+static void __consume_pending_child_ns_request_where(
+	struct task_struct *task,
+	struct pending_child_ns_request_payloads *payloads, const char *where)
+{
+	const struct auth_guard_task_syslog_request empty_syslog = {};
+	enum auth_guard_mutation_result mutation;
+
+	mutation = auth_guard_task_replace_syslog_request_in_transition_where(
+		task, &empty_syslog, &payloads->syslog, where);
+	AUTH_GUARD_MUTATION_FAIL_STOP(mutation);
+	mutation = auth_guard_task_replace_tracing_request_in_transition_where(
+		task, false, &payloads->tracing, where);
+	AUTH_GUARD_MUTATION_FAIL_STOP(mutation);
+}
+
+int consume_pending_child_ns_request_where(struct task_struct *task,
+					    const char *where)
+{
+	struct pending_child_ns_request_payloads payloads;
+
+	reset_pending_child_ns_request_payloads(&payloads);
+	if (!has_pending_child_ns_request(task))
+		return 0;
+	if (!auth_guard_task_begin_transition_where(task, where))
+		return -EACCES;
+
+	__consume_pending_child_ns_request_where(task, &payloads, where);
+	AUTH_GUARD_FAIL_STOP_UNLESS(
+		auth_guard_task_finish_transition_where(task, where));
+	release_pending_child_ns_request_payloads(&payloads);
+	return 0;
+}
+
+void consume_pending_child_ns_request_in_transition_where(
+	struct task_struct *task,
+	struct pending_child_ns_request_payloads *payloads, const char *where)
+{
+	if (!task || !payloads)
 		return;
 
-	task->syslog_ns_for_child = false;
-	task->tracing_ns_for_child = false;
-	kfree(task->syslog_ns_for_child_name);
-	task->syslog_ns_for_child_name = NULL;
+	reset_pending_child_ns_request_payloads(payloads);
+	if (!has_pending_child_ns_request(task))
+		return;
+	AUTH_GUARD_FAIL_STOP_UNLESS(
+		auth_guard_task_transition_open_where(task, where));
+	__consume_pending_child_ns_request_where(task, payloads, where);
 }
+
+#define DEFINE_CHILD_USERNS_DEFAULT_RESTORER(_name, _type, _replace) \
+static enum auth_guard_mutation_result \
+restore_child_userns_##_name##_default( \
+	struct user_namespace *user_ns, struct _type *installed, \
+	struct _type *previous) \
+{ \
+	if (user_ns && user_ns != current_user_ns() && installed != previous) \
+		return _replace(user_ns, installed, previous); \
+	return AUTH_GUARD_MUTATION_APPLIED; \
+}
+
+DEFINE_CHILD_USERNS_DEFAULT_RESTORER(syslog, syslog_namespace,
+				     syslog_ns_replace_userns_default)
 
 #ifdef CONFIG_TRACING_NS
-static void
-restore_child_userns_syslog_default(struct user_namespace *user_ns,
-				    struct syslog_namespace *new_ns,
-				    struct syslog_namespace *old_ns)
-{
-#ifdef CONFIG_SYSLOG_NS
-	if (user_ns && user_ns != current_user_ns() &&
-	    user_ns->syslog_ns == new_ns && user_ns->syslog_ns_is_owner) {
-		struct syslog_namespace *drop = user_ns->syslog_ns;
+DEFINE_CHILD_USERNS_DEFAULT_RESTORER(tracing, tracing_namespace,
+				     tracing_ns_replace_userns_default)
+#endif
 
-		user_ns->syslog_ns = get_syslog_ns(old_ns);
-		user_ns->syslog_ns_is_owner = false;
-		put_syslog_ns_structural(drop);
-	}
+#undef DEFINE_CHILD_USERNS_DEFAULT_RESTORER
+
+static bool restore_child_userns_boundary_defaults(
+	struct user_namespace *user_ns, struct nsproxy *installed,
+	struct nsproxy *previous)
+{
+#ifdef CONFIG_TRACING_NS
+	if (restore_child_userns_tracing_default(
+		    user_ns, installed->tracing_ns, previous->tracing_ns) !=
+	    AUTH_GUARD_MUTATION_APPLIED)
+		return false;
 #endif
+	if (restore_child_userns_syslog_default(
+		    user_ns, installed->syslog_ns, previous->syslog_ns) !=
+	    AUTH_GUARD_MUTATION_APPLIED)
+		return false;
+
+	return true;
 }
-#endif
 
 struct nsproxy init_nsproxy = {
 	.count			= REFCOUNT_INIT(1),
@@ -90,8 +354,10 @@ static inline struct nsproxy *create_nsproxy(void)
 	struct nsproxy *nsproxy;
 
 	nsproxy = kmem_cache_alloc(nsproxy_cachep, GFP_KERNEL);
-	if (nsproxy)
+	if (nsproxy) {
+		memset(nsproxy, 0, sizeof(*nsproxy));
 		refcount_set(&nsproxy->count, 1);
+	}
 	return nsproxy;
 }
 
@@ -191,13 +457,15 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		goto out_tracing;
 	}
 #endif
-	consume_pending_child_ns_request(syslog_req_task);
+	/* The caller consumes the one-shot request only at its commit point. */
 	return new_nsp;
 
 #ifdef CONFIG_TRACING_NS
 out_tracing:
-	restore_child_userns_syslog_default(user_ns, new_nsp->syslog_ns,
-					    tsk->nsproxy->syslog_ns);
+	if (restore_child_userns_syslog_default(
+		    user_ns, new_nsp->syslog_ns, tsk->nsproxy->syslog_ns) !=
+	    AUTH_GUARD_MUTATION_APPLIED)
+		goto out_quarantined_child_boundary;
 	put_syslog_ns(new_nsp->syslog_ns);
 #endif
 out_syslog:
@@ -207,7 +475,7 @@ out_syslog:
 out_time:
 	put_net(new_nsp->net_ns);
 out_net:
-	put_cgroup_ns(new_nsp->cgroup_ns);
+	put_cgroup_ns_maybe_unpublished(new_nsp->cgroup_ns);
 out_cgroup:
 	put_pid_ns(new_nsp->pid_ns_for_children);
 out_pid:
@@ -219,6 +487,38 @@ out_uts:
 out_ns:
 	kmem_cache_free(nsproxy_cachep, new_nsp);
 	return ERR_PTR(err);
+
+#ifdef CONFIG_TRACING_NS
+out_quarantined_child_boundary:
+	/* Retain every pointer-bearing object after an unverifiable rollback. */
+	return ERR_PTR(err);
+#endif
+}
+
+static int seal_nsproxy(struct nsproxy *nsproxy, bool *sealed)
+{
+	*sealed = false;
+	if (!auth_guard_nsproxy_init(nsproxy))
+		return -EACCES;
+	*sealed = true;
+	return 0;
+}
+
+static int seal_and_publish_nsproxy(struct nsproxy *nsproxy, u64 flags,
+				    bool *sealed)
+{
+	int ret;
+
+	ret = seal_nsproxy(nsproxy, sealed);
+	if (ret)
+		return ret;
+	if (!(flags & CLONE_NEWCGROUP))
+		return 0;
+
+	ret = cgroup_ns_publish(nsproxy->cgroup_ns);
+	if (ret)
+		return ret;
+	return 0;
 }
 
 /*
@@ -230,14 +530,17 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 	struct nsproxy *old_ns = tsk->nsproxy;
 	struct user_namespace *user_ns = task_cred_xxx(tsk, user_ns);
 	struct nsproxy *new_ns;
+	bool sealed;
+	int err;
 
 	if (likely(!(flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			      CLONE_NEWPID | CLONE_NEWNET |
 			      CLONE_NEWCGROUP | CLONE_NEWTIME))) &&
-	    likely(!current->syslog_ns_for_child) &&
-	    likely(!current->tracing_ns_for_child)) {
+	    likely(!has_pending_child_ns_request(current))) {
 		if ((flags & CLONE_VM) ||
 		    likely(old_ns->time_ns_for_children == old_ns->time_ns)) {
+			if (!auth_guard_nsproxy_check(old_ns))
+				return -EACCES;
 			get_nsproxy(old_ns);
 			return 0;
 		}
@@ -254,33 +557,146 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 	if ((flags & (CLONE_NEWIPC | CLONE_SYSVSEM)) ==
 		(CLONE_NEWIPC | CLONE_SYSVSEM))
 		return -EINVAL;
+	if (!auth_guard_nsproxy_check(old_ns))
+		return -EACCES;
 
 	new_ns = create_new_namespaces(flags, tsk, current, user_ns,
 				       tsk->fs);
 	if (IS_ERR(new_ns))
 		return  PTR_ERR(new_ns);
 
-	if ((flags & CLONE_VM) == 0)
-		timens_on_fork(new_ns, tsk);
+	if ((flags & CLONE_VM) == 0) {
+		err = timens_on_fork(new_ns, tsk);
+		if (err) {
+			if (restore_child_userns_boundary_defaults(
+				    user_ns, new_ns, old_ns))
+				free_nsproxy_unpublished(new_ns);
+			return err;
+		}
+	}
+	/* cgroup_finalize_fork_authority() publishes the completed root. */
+	err = seal_nsproxy(new_ns, &sealed);
+	if (err) {
+		if (restore_child_userns_boundary_defaults(
+			    user_ns, new_ns, old_ns)) {
+			if (sealed)
+				free_nsproxy(new_ns);
+			else
+				free_nsproxy_rejected(new_ns);
+		}
+		return err;
+	}
 
 	tsk->nsproxy = new_ns;
 	return 0;
 }
 
+struct nsproxy_destroy_snapshot {
+	struct mnt_namespace *mnt_ns;
+	struct uts_namespace *uts_ns;
+	struct ipc_namespace *ipc_ns;
+	struct pid_namespace *pid_ns_for_children;
+	struct net *net_ns;
+	struct time_namespace *time_ns;
+	struct time_namespace *time_ns_for_children;
+	struct cgroup_namespace *cgroup_ns;
+	struct syslog_namespace *syslog_ns;
+	struct tracing_namespace *tracing_ns;
+};
+
+static void free_nsproxy_snapshot(const struct nsproxy_destroy_snapshot *snapshot)
+{
+	put_mnt_ns(snapshot->mnt_ns);
+	put_uts_ns(snapshot->uts_ns);
+	put_ipc_ns(snapshot->ipc_ns);
+	put_pid_ns(snapshot->pid_ns_for_children);
+	put_time_ns(snapshot->time_ns);
+	put_time_ns(snapshot->time_ns_for_children);
+	put_syslog_ns(snapshot->syslog_ns);
+#ifdef CONFIG_TRACING_NS
+	put_tracing_ns(snapshot->tracing_ns);
+#endif
+	put_cgroup_ns_maybe_unpublished(snapshot->cgroup_ns);
+	put_net(snapshot->net_ns);
+}
+
+static void free_nsproxy_unpublished(struct nsproxy *ns)
+{
+	struct nsproxy_destroy_snapshot snapshot = {
+		.mnt_ns = ns->mnt_ns,
+		.uts_ns = ns->uts_ns,
+		.ipc_ns = ns->ipc_ns,
+		.pid_ns_for_children = ns->pid_ns_for_children,
+		.net_ns = ns->net_ns,
+		.time_ns = ns->time_ns,
+		.time_ns_for_children = ns->time_ns_for_children,
+		.cgroup_ns = ns->cgroup_ns,
+		.syslog_ns = ns->syslog_ns,
+#ifdef CONFIG_TRACING_NS
+		.tracing_ns = ns->tracing_ns,
+#endif
+	};
+
+	free_nsproxy_snapshot(&snapshot);
+	kmem_cache_free(nsproxy_cachep, ns);
+}
+
+static void free_nsproxy_rejected(struct nsproxy *ns)
+{
+	(void)xchg(&ns->mnt_ns, NULL);
+	(void)xchg(&ns->uts_ns, NULL);
+	(void)xchg(&ns->ipc_ns, NULL);
+	(void)xchg(&ns->pid_ns_for_children, NULL);
+	(void)xchg(&ns->net_ns, NULL);
+	(void)xchg(&ns->time_ns, NULL);
+	(void)xchg(&ns->time_ns_for_children, NULL);
+	(void)xchg(&ns->cgroup_ns, NULL);
+	(void)xchg(&ns->syslog_ns, NULL);
+	(void)xchg(&ns->tracing_ns, NULL);
+	kmem_cache_free(nsproxy_cachep, ns);
+}
+
 void free_nsproxy(struct nsproxy *ns)
 {
-	put_mnt_ns(ns->mnt_ns);
-	put_uts_ns(ns->uts_ns);
-	put_ipc_ns(ns->ipc_ns);
-	put_pid_ns(ns->pid_ns_for_children);
-	put_time_ns(ns->time_ns);
-	put_time_ns(ns->time_ns_for_children);
-	put_syslog_ns(ns->syslog_ns);
-#ifdef CONFIG_TRACING_NS
-	put_tracing_ns(ns->tracing_ns);
-#endif
-	put_cgroup_ns(ns->cgroup_ns);
-	put_net(ns->net_ns);
+	struct nsproxy_destroy_snapshot snapshot = {};
+	bool exact = true;
+	bool valid;
+
+	valid = auth_guard_nsproxy_destroy_begin(ns);
+	if (valid) {
+		snapshot.mnt_ns = READ_ONCE(ns->mnt_ns);
+		snapshot.uts_ns = READ_ONCE(ns->uts_ns);
+		snapshot.ipc_ns = READ_ONCE(ns->ipc_ns);
+		snapshot.pid_ns_for_children =
+			READ_ONCE(ns->pid_ns_for_children);
+		snapshot.net_ns = READ_ONCE(ns->net_ns);
+		snapshot.time_ns = READ_ONCE(ns->time_ns);
+		snapshot.time_ns_for_children =
+			READ_ONCE(ns->time_ns_for_children);
+		snapshot.cgroup_ns = READ_ONCE(ns->cgroup_ns);
+		snapshot.syslog_ns = READ_ONCE(ns->syslog_ns);
+		snapshot.tracing_ns = READ_ONCE(ns->tracing_ns);
+		valid = auth_guard_nsproxy_snapshot_end(ns);
+	}
+
+	exact &= xchg(&ns->mnt_ns, NULL) == snapshot.mnt_ns;
+	exact &= xchg(&ns->uts_ns, NULL) == snapshot.uts_ns;
+	exact &= xchg(&ns->ipc_ns, NULL) == snapshot.ipc_ns;
+	exact &= xchg(&ns->pid_ns_for_children, NULL) ==
+		snapshot.pid_ns_for_children;
+	exact &= xchg(&ns->net_ns, NULL) == snapshot.net_ns;
+	exact &= xchg(&ns->time_ns, NULL) == snapshot.time_ns;
+	exact &= xchg(&ns->time_ns_for_children, NULL) ==
+		snapshot.time_ns_for_children;
+	exact &= xchg(&ns->cgroup_ns, NULL) == snapshot.cgroup_ns;
+	exact &= xchg(&ns->syslog_ns, NULL) == snapshot.syslog_ns;
+	exact &= xchg(&ns->tracing_ns, NULL) == snapshot.tracing_ns;
+	if (valid && !exact) {
+		(void)auth_guard_nsproxy_check(ns);
+		valid = false;
+	}
+	if (valid)
+		free_nsproxy_snapshot(&snapshot);
 	kmem_cache_free(nsproxy_cachep, ns);
 }
 
@@ -291,19 +707,22 @@ void free_nsproxy(struct nsproxy *ns)
 int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 	struct nsproxy **new_nsp, struct cred *new_cred, struct fs_struct *new_fs)
 {
+	struct nsproxy *old_nsproxy = current->nsproxy;
 	struct user_namespace *user_ns;
+	bool sealed;
 	int err = 0;
 
+	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!(unshare_flags & (CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC |
 			       CLONE_NEWNET | CLONE_NEWPID | CLONE_NEWCGROUP |
 			       CLONE_NEWTIME)) &&
-	    !current->syslog_ns_for_child &&
-	    !current->tracing_ns_for_child)
+	    !has_pending_child_ns_request(current))
 		return 0;
 
-	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
+	if (!auth_guard_nsproxy_check(current->nsproxy))
+		return -EACCES;
 
 	*new_nsp = create_new_namespaces(unshare_flags, current, current,
 					 user_ns, new_fs ? new_fs : current->fs);
@@ -311,38 +730,105 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 		err = PTR_ERR(*new_nsp);
 		goto out;
 	}
+	err = seal_and_publish_nsproxy(*new_nsp, unshare_flags, &sealed);
+	if (err) {
+		if (restore_child_userns_boundary_defaults(
+			    user_ns, *new_nsp, old_nsproxy)) {
+			if (sealed)
+				free_nsproxy(*new_nsp);
+			else
+				free_nsproxy_rejected(*new_nsp);
+		}
+		*new_nsp = NULL;
+	}
 
 out:
 	return err;
 }
 
-void switch_task_namespaces(struct task_struct *p, struct nsproxy *new)
+int switch_task_namespaces_checked_where(struct task_struct *p,
+					 struct nsproxy *new,
+					 const char *where)
 {
-	struct nsproxy *ns;
+	enum auth_guard_mutation_result mutation;
+	struct nsproxy *old;
 
 	might_sleep();
+	if (!new)
+		return -EINVAL;
+	if (!auth_guard_nsproxy_check_where(new, where) ||
+	    !auth_guard_task_begin_transition_where(p, where))
+		return -EACCES;
 
 	task_lock(p);
-	ns = p->nsproxy;
-	p->nsproxy = new;
+	mutation = auth_guard_task_replace_nsproxy_in_transition_where(
+		p, new, &old, where);
+	AUTH_GUARD_MUTATION_FAIL_STOP(mutation);
+	AUTH_GUARD_FAIL_STOP_UNLESS(
+		auth_guard_task_finish_transition_where(p, where));
 	task_unlock(p);
 
-	if (ns)
-		put_nsproxy(ns);
+	if (old)
+		put_nsproxy(old);
+	return 0;
+}
+
+void switch_task_namespaces(struct task_struct *p, struct nsproxy *new)
+{
+	if (WARN_ON_ONCE(switch_task_namespaces_checked(p, new)))
+		put_nsproxy(new);
 }
 
 void exit_task_namespaces(struct task_struct *p)
 {
-	switch_task_namespaces(p, NULL);
+	struct nsproxy *ns;
+	struct nsproxy *expected;
+	enum auth_guard_mutation_result mutation;
+	enum auth_guard_task_teardown_status auth_guard_status;
+	bool exact;
+	bool old_valid;
+	bool trusted;
+
+	auth_guard_status = auth_guard_task_begin_teardown_transition(p);
+
+	task_lock(p);
+	expected = READ_ONCE(p->nsproxy);
+	old_valid = auth_guard_task_validate_teardown(p, auth_guard_status);
+	if (auth_guard_status == AUTH_GUARD_TASK_TEARDOWN_OPENED &&
+	    old_valid) {
+		ns = NULL;
+		mutation = auth_guard_task_replace_nsproxy_in_transition(
+			p, NULL, &ns);
+		exact = mutation == AUTH_GUARD_MUTATION_APPLIED &&
+			ns == expected &&
+			auth_guard_task_validate_transition_result(p);
+		if (mutation != AUTH_GUARD_MUTATION_APPLIED)
+			(void)xchg(&p->nsproxy, NULL);
+	} else {
+		ns = xchg(&p->nsproxy, NULL);
+		exact = ns == expected;
+	}
+
+	trusted = auth_guard_task_complete_teardown(p, auth_guard_status,
+						    old_valid, exact, false);
+	if (!trusted && auth_guard_status == AUTH_GUARD_TASK_TEARDOWN_FAILED)
+		WARN_ON_ONCE(1);
+	task_unlock(p);
+	if (ns && trusted)
+		put_nsproxy(ns);
 }
 
 int exec_task_namespaces(void)
 {
 	struct task_struct *tsk = current;
 	struct nsproxy *new;
+	bool sealed;
+	int err;
 
 	if (tsk->nsproxy->time_ns_for_children == tsk->nsproxy->time_ns)
 		return 0;
+	if (!auth_guard_nsproxy_check(tsk->nsproxy))
+		return -EACCES;
 
 	/*
 	 * exec only syncs the deferred time namespace into the active nsproxy.
@@ -354,9 +840,25 @@ int exec_task_namespaces(void)
 	if (IS_ERR(new))
 		return PTR_ERR(new);
 
-	timens_on_fork(new, tsk);
-	switch_task_namespaces(tsk, new);
+	err = timens_on_exec(new, tsk);
+	if (err)
+		goto out_free;
+	err = seal_and_publish_nsproxy(new, 0, &sealed);
+	if (err)
+		goto out_rejected;
+	err = switch_task_namespaces_checked(tsk, new);
+	if (err)
+		goto out_free;
 	return 0;
+
+out_rejected:
+	if (!sealed) {
+		free_nsproxy_rejected(new);
+		return err;
+	}
+out_free:
+	free_nsproxy(new);
+	return err;
 }
 
 static int check_setns_flags(unsigned long flags)
@@ -401,9 +903,12 @@ static int check_setns_flags(unsigned long flags)
 static void put_nsset(struct nsset *nsset)
 {
 	unsigned flags = nsset->flags;
+	struct cred *cred = nsset_cred(nsset);
 
-	if (flags & CLONE_NEWUSER)
-		put_cred(nsset_cred(nsset));
+	if (cred) {
+		abort_creds(cred);
+		nsset->cred = NULL;
+	}
 	/*
 	 * We only created a temporary copy if we attached to more than just
 	 * the mount namespace.
@@ -417,6 +922,12 @@ static void put_nsset(struct nsset *nsset)
 static int prepare_nsset(unsigned flags, struct nsset *nsset)
 {
 	struct task_struct *me = current;
+	bool sealed;
+	int err = -ENOMEM;
+
+	nsset->flags = flags;
+	if (!auth_guard_nsproxy_check(me->nsproxy))
+		return -EACCES;
 
 	/*
 	 * setns() needs a transient duplicate of the caller's namespaces for
@@ -427,6 +938,15 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 					       current_user_ns(), me->fs);
 	if (IS_ERR(nsset->nsproxy))
 		return PTR_ERR(nsset->nsproxy);
+	err = seal_and_publish_nsproxy(nsset->nsproxy, 0, &sealed);
+	if (err) {
+		if (sealed)
+			free_nsproxy(nsset->nsproxy);
+		else
+			free_nsproxy_rejected(nsset->nsproxy);
+		nsset->nsproxy = NULL;
+		return err;
+	}
 
 	if (flags & CLONE_NEWUSER)
 		nsset->cred = prepare_creds();
@@ -444,12 +964,11 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 			goto out;
 	}
 
-	nsset->flags = flags;
 	return 0;
 
 out:
 	put_nsset(nsset);
-	return -ENOMEM;
+	return err;
 }
 
 static int pidfd_install_vpsadminos_tracing_ns(struct nsset *nsset,
@@ -458,8 +977,6 @@ static int pidfd_install_vpsadminos_tracing_ns(struct nsset *nsset,
 					       struct pid_namespace *pid_ns)
 {
 #ifdef CONFIG_TRACING_NS
-	struct tracing_namespace *old_ns;
-
 	if (!ns)
 		ns = &init_tracing_ns;
 
@@ -476,9 +993,8 @@ static int pidfd_install_vpsadminos_tracing_ns(struct nsset *nsset,
 	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	old_ns = nsset->nsproxy->tracing_ns;
-	nsset->nsproxy->tracing_ns = get_tracing_ns(ns);
-	put_tracing_ns(old_ns);
+	return auth_guard_nsproxy_install_owned(nsset->nsproxy, tracing_ns, ns,
+						get_tracing_ns, put_tracing_ns);
 #endif
 	return 0;
 }
@@ -541,10 +1057,54 @@ static int pidfd_install_vpsadminos_syslog_ns(struct nsset *nsset,
 	if (!ns_capable(authority_user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	put_syslog_ns(nsset->nsproxy->syslog_ns);
-	nsset->nsproxy->syslog_ns = get_syslog_ns(ns);
+	return auth_guard_nsproxy_install_owned(nsset->nsproxy, syslog_ns, ns,
+						get_syslog_ns, put_syslog_ns);
 #endif
 	return 0;
+}
+
+struct pidfd_nsproxy_snapshot {
+	struct mnt_namespace *mnt_ns;
+	struct uts_namespace *uts_ns;
+	struct ipc_namespace *ipc_ns;
+	struct net *net_ns;
+	struct time_namespace *time_ns;
+	struct cgroup_namespace *cgroup_ns;
+	struct syslog_namespace *syslog_ns;
+	struct tracing_namespace *tracing_ns;
+};
+
+static enum auth_guard_check_result
+pidfd_nsproxy_snapshot_get(struct nsproxy *nsproxy, unsigned int flags,
+			   struct pidfd_nsproxy_snapshot *snapshot)
+{
+	enum auth_guard_check_result result;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	result = auth_guard_nsproxy_snapshot_begin(nsproxy);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		return result;
+
+	snapshot->mnt_ns = READ_ONCE(nsproxy->mnt_ns);
+	snapshot->uts_ns = READ_ONCE(nsproxy->uts_ns);
+	snapshot->ipc_ns = READ_ONCE(nsproxy->ipc_ns);
+	snapshot->net_ns = READ_ONCE(nsproxy->net_ns);
+	snapshot->time_ns = READ_ONCE(nsproxy->time_ns);
+	snapshot->cgroup_ns = READ_ONCE(nsproxy->cgroup_ns);
+	snapshot->syslog_ns = READ_ONCE(nsproxy->syslog_ns);
+	snapshot->tracing_ns = READ_ONCE(nsproxy->tracing_ns);
+
+	if (((flags & CLONE_NEWNS) && !snapshot->mnt_ns) ||
+	    ((flags & CLONE_NEWUTS) && !snapshot->uts_ns) ||
+	    ((flags & CLONE_NEWIPC) && !snapshot->ipc_ns) ||
+	    ((flags & CLONE_NEWNET) && !snapshot->net_ns) ||
+	    ((flags & CLONE_NEWTIME) && !snapshot->time_ns) ||
+	    ((flags & CLONE_NEWCGROUP) && !snapshot->cgroup_ns))
+		result = AUTH_GUARD_CHECK_UNAVAILABLE;
+
+	if (!auth_guard_nsproxy_snapshot_end(nsproxy))
+		result = AUTH_GUARD_CHECK_INVALID;
+	return result;
 }
 
 /*
@@ -553,7 +1113,7 @@ static int pidfd_install_vpsadminos_syslog_ns(struct nsset *nsset,
  * non-mutating; the ordinary install hooks below still enforce permissions.
  */
 static bool pidfd_changes_visible_ns(struct nsset *nsset,
-				     const struct nsproxy *target,
+				     const struct pidfd_nsproxy_snapshot *target,
 				     struct user_namespace *user_ns __maybe_unused,
 				     struct pid_namespace *pid_ns __maybe_unused)
 {
@@ -602,7 +1162,8 @@ static bool pidfd_changes_visible_ns(struct nsset *nsset,
 	return false;
 }
 
-static bool pidfd_vpsadminos_has_hidden(struct nsproxy *target)
+static bool
+pidfd_vpsadminos_has_hidden(const struct pidfd_nsproxy_snapshot *target)
 {
 #ifdef CONFIG_TRACING_NS
 	if (target->tracing_ns && target->tracing_ns != &init_tracing_ns)
@@ -618,7 +1179,7 @@ static bool pidfd_vpsadminos_has_hidden(struct nsproxy *target)
 }
 
 static int pidfd_prepare_vpsadminos_namespaces(struct nsset *nsset,
-					       struct nsproxy *target,
+					       const struct pidfd_nsproxy_snapshot *target,
 					       struct user_namespace *user_ns,
 					       struct pid_namespace *pid_ns,
 					       struct user_namespace *target_user_ns,
@@ -689,6 +1250,9 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 	unsigned flags = nsset->flags;
 	struct user_namespace *user_ns = NULL;
 	struct user_namespace *target_user_ns = NULL;
+	const struct cred *target_cred;
+	enum auth_guard_check_result auth_result;
+	struct pidfd_nsproxy_snapshot target_ns;
 	struct pid_namespace *pid_ns = NULL;
 	struct pid_namespace *target_pid_ns = NULL;
 	struct nsproxy *nsp;
@@ -707,12 +1271,34 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 		return -EPERM;
 	}
 
+retry_snapshot:
+	target_cred = get_task_cred_checked(tsk);
+	if (IS_ERR(target_cred)) {
+		rcu_read_unlock();
+		return PTR_ERR(target_cred);
+	}
+
 	task_lock(tsk);
-	nsp = tsk->nsproxy;
+	nsp = READ_ONCE(tsk->nsproxy);
 	if (nsp)
 		get_nsproxy(nsp);
+	auth_result = auth_guard_task_check_real_cred(tsk, target_cred);
+	if (auth_result == AUTH_GUARD_CHECK_VALID && nsp)
+		auth_result = pidfd_nsproxy_snapshot_get(nsp, flags, &target_ns);
 	task_unlock(tsk);
+	if (auth_result != AUTH_GUARD_CHECK_VALID) {
+		if (nsp)
+			put_nsproxy(nsp);
+		put_cred(target_cred);
+		if (auth_result == AUTH_GUARD_CHECK_BUSY) {
+			cpu_relax();
+			goto retry_snapshot;
+		}
+		rcu_read_unlock();
+		return -EPERM;
+	}
 	if (!nsp) {
+		put_cred(target_cred);
 		rcu_read_unlock();
 		return -ESRCH;
 	}
@@ -720,6 +1306,7 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 #ifdef CONFIG_PID_NS
 	target_pid_ns = task_active_pid_ns(tsk);
 	if (unlikely(!target_pid_ns)) {
+		put_cred(target_cred);
 		rcu_read_unlock();
 		ret = -ESRCH;
 		goto out;
@@ -732,15 +1319,16 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 #endif
 
 #ifdef CONFIG_USER_NS
-	target_user_ns = get_user_ns(__task_cred(tsk)->user_ns);
+	target_user_ns = get_user_ns(target_cred->user_ns);
 	if (flags & CLONE_NEWUSER)
 		user_ns = get_user_ns(target_user_ns);
 #endif
+	put_cred(target_cred);
 	rcu_read_unlock();
 
-	if (pidfd_changes_visible_ns(nsset, nsp, user_ns, pid_ns)) {
-		ret = pidfd_prepare_vpsadminos_namespaces(nsset, nsp, user_ns,
-							  pid_ns,
+	if (pidfd_changes_visible_ns(nsset, &target_ns, user_ns, pid_ns)) {
+		ret = pidfd_prepare_vpsadminos_namespaces(nsset, &target_ns,
+							  user_ns, pid_ns,
 							  target_user_ns,
 							  target_pid_ns);
 		if (ret)
@@ -762,14 +1350,14 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 #endif
 
 	if (flags & CLONE_NEWNS) {
-		ret = validate_ns(nsset, from_mnt_ns(nsp->mnt_ns));
+		ret = validate_ns(nsset, from_mnt_ns(target_ns.mnt_ns));
 		if (ret)
 			goto out;
 	}
 
 #ifdef CONFIG_UTS_NS
 	if (flags & CLONE_NEWUTS) {
-		ret = validate_ns(nsset, &nsp->uts_ns->ns);
+		ret = validate_ns(nsset, &target_ns.uts_ns->ns);
 		if (ret)
 			goto out;
 	}
@@ -777,7 +1365,7 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 
 #ifdef CONFIG_IPC_NS
 	if (flags & CLONE_NEWIPC) {
-		ret = validate_ns(nsset, &nsp->ipc_ns->ns);
+		ret = validate_ns(nsset, &target_ns.ipc_ns->ns);
 		if (ret)
 			goto out;
 	}
@@ -793,7 +1381,7 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 
 #ifdef CONFIG_CGROUPS
 	if (flags & CLONE_NEWCGROUP) {
-		ret = validate_ns(nsset, &nsp->cgroup_ns->ns);
+		ret = validate_ns(nsset, &target_ns.cgroup_ns->ns);
 		if (ret)
 			goto out;
 	}
@@ -801,7 +1389,7 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 
 #ifdef CONFIG_NET_NS
 	if (flags & CLONE_NEWNET) {
-		ret = validate_ns(nsset, &nsp->net_ns->ns);
+		ret = validate_ns(nsset, &target_ns.net_ns->ns);
 		if (ret)
 			goto out;
 	}
@@ -809,7 +1397,7 @@ static int validate_nsset(struct nsset *nsset, struct pid *pid)
 
 #ifdef CONFIG_TIME_NS
 	if (flags & CLONE_NEWTIME) {
-		ret = validate_ns(nsset, &nsp->time_ns->ns);
+		ret = validate_ns(nsset, &target_ns.time_ns->ns);
 		if (ret)
 			goto out;
 	}
@@ -837,16 +1425,44 @@ out:
  * exported anymore a simple commit handler for each namespace
  * should be added to ns_common.
  */
-static void commit_nsset(struct nsset *nsset)
+static int commit_nsset(struct nsset *nsset)
 {
 	unsigned flags = nsset->flags;
 	struct task_struct *me = current;
+	struct nsproxy *old_nsproxy;
+	enum auth_guard_mutation_result mutation;
+#ifdef CONFIG_USER_NS
+	int ret;
+#endif
 
 #ifdef CONFIG_USER_NS
 	if (flags & CLONE_NEWUSER) {
-		/* transfer ownership */
-		commit_creds(nsset_cred(nsset));
+		struct cred *cred = nsset_cred(nsset);
+
+		ret = cred_guard_preflight_commit_creds(cred);
+		if (ret)
+			return ret;
+	}
+#endif
+
+	if (!auth_guard_nsproxy_check(nsset->nsproxy))
+		return -EACCES;
+
+	if (!(flags & CLONE_NEWUSER ?
+	      cred_guard_task_begin_consuming_transition(me) :
+	      auth_guard_task_begin_transition(me)))
+		return -EACCES;
+
+#ifdef CONFIG_USER_NS
+	if (flags & CLONE_NEWUSER) {
+		struct cred *cred = nsset_cred(nsset);
+
+		ret = commit_creds_in_task_transition(cred);
 		nsset->cred = NULL;
+		if (ret) {
+			auth_guard_task_abort_transition(me);
+			return ret;
+		}
 	}
 #endif
 
@@ -866,9 +1482,17 @@ static void commit_nsset(struct nsset *nsset)
 		timens_commit(me, nsset->nsproxy->time_ns);
 #endif
 
-	/* transfer ownership */
-	switch_task_namespaces(me, nsset->nsproxy);
+	task_lock(me);
+	mutation = auth_guard_task_replace_nsproxy_in_transition(
+		me, nsset->nsproxy, &old_nsproxy);
+	AUTH_GUARD_MUTATION_FAIL_STOP(mutation);
+	AUTH_GUARD_FAIL_STOP_UNLESS(auth_guard_task_finish_transition(me));
+	task_unlock(me);
+
+	if (old_nsproxy)
+		put_nsproxy(old_nsproxy);
 	nsset->nsproxy = NULL;
+	return 0;
 }
 
 SYSCALL_DEFINE2(setns, int, fd, int, flags)
@@ -903,9 +1527,12 @@ SYSCALL_DEFINE2(setns, int, fd, int, flags)
 	else
 		err = validate_nsset(&nsset, pidfd_pid(fd_file(f)));
 	if (!err) {
-		commit_nsset(&nsset);
+		err = commit_nsset(&nsset);
+		if (err)
+			goto put_nsset;
 		perf_event_namespaces(current);
 	}
+put_nsset:
 	put_nsset(&nsset);
 out:
 	return err;

@@ -10,6 +10,7 @@
  */
 
 #include <linux/sched.h>
+#include <linux/auth_guard.h>
 #include <linux/nodemask.h>
 #include <linux/list.h>
 #include <linux/rculist.h>
@@ -18,6 +19,7 @@
 #include <linux/seq_file.h>
 #include <linux/kernfs.h>
 #include <linux/jump_label.h>
+#include <linux/cleanup.h>
 #include <linux/types.h>
 #include <linux/notifier.h>
 #include <linux/ns_common.h>
@@ -30,6 +32,32 @@
 #include <linux/cgroup_namespace.h>
 
 struct kernel_clone_args;
+
+struct cgroup_task_auth_snapshot {
+	struct cgroup_namespace *cgroup_ns;
+	struct css_set *root_cset;
+	struct cgroup_subsys_state *task_css;
+};
+
+/* Return with @task locked after waiting out a legitimate guard writer. */
+static inline enum auth_guard_check_result
+cgroup_task_lock_auth_guard_wait_where(struct task_struct *task,
+				       const char *where)
+{
+	enum auth_guard_check_result result;
+
+	for (;;) {
+		task_lock(task);
+		result = auth_guard_task_check_status_where(task, where);
+		if (result != AUTH_GUARD_CHECK_BUSY)
+			return result;
+		task_unlock(task);
+		cond_resched();
+	}
+}
+
+#define cgroup_task_lock_auth_guard_wait(_task) \
+	cgroup_task_lock_auth_guard_wait_where((_task), __func__)
 
 /*
  * All weight knobs on the default hierarchy should use the following min,
@@ -136,11 +164,21 @@ extern int cgroup_can_fork(struct task_struct *p,
 			   struct kernel_clone_args *kargs);
 extern void cgroup_cancel_fork(struct task_struct *p,
 			       struct kernel_clone_args *kargs);
+void cgroup_finalize_fork_authority(struct task_struct *p,
+				    struct kernel_clone_args *kargs);
 extern void cgroup_post_fork(struct task_struct *p,
 			     struct kernel_clone_args *kargs);
 void cgroup_exit(struct task_struct *p);
 void cgroup_release(struct task_struct *p);
 void cgroup_free(struct task_struct *p);
+struct css_set *cgroup_ns_root_cset_checked_where(struct cgroup_namespace *ns,
+						  const char *where);
+enum auth_guard_check_result
+cgroup_task_auth_snapshot_get_where(struct task_struct *task,
+				    int task_subsys_id,
+				    struct cgroup_task_auth_snapshot *snapshot,
+				    const char *where);
+void cgroup_task_auth_snapshot_put(struct cgroup_task_auth_snapshot *snapshot);
 
 int cgroup_init_early(void);
 int cgroup_init(void);
@@ -663,6 +701,9 @@ struct cgroup *cgroup_get_from_id(u64 id);
 
 struct cgroup_subsys_state;
 struct cgroup;
+struct cftype;
+struct css_set;
+struct cgroup_namespace;
 
 static inline u64 cgroup_id(const struct cgroup *cgrp) { return 1; }
 static inline void css_get(struct cgroup_subsys_state *css) {}
@@ -679,11 +720,39 @@ static inline int cgroup_can_fork(struct task_struct *p,
 				  struct kernel_clone_args *kargs) { return 0; }
 static inline void cgroup_cancel_fork(struct task_struct *p,
 				      struct kernel_clone_args *kargs) {}
+static inline void cgroup_finalize_fork_authority(struct task_struct *p,
+						  struct kernel_clone_args *kargs) {}
 static inline void cgroup_post_fork(struct task_struct *p,
 				    struct kernel_clone_args *kargs) {}
 static inline void cgroup_exit(struct task_struct *p) {}
 static inline void cgroup_release(struct task_struct *p) {}
 static inline void cgroup_free(struct task_struct *p) {}
+static inline struct css_set *
+cgroup_ns_root_cset_checked_where(struct cgroup_namespace *ns,
+				  const char *where)
+{
+	return NULL;
+}
+
+static inline enum auth_guard_check_result
+cgroup_task_auth_snapshot_get_where(struct task_struct *task,
+				    int task_subsys_id,
+				    struct cgroup_task_auth_snapshot *snapshot,
+				    const char *where)
+{
+	snapshot->cgroup_ns = NULL;
+	snapshot->root_cset = NULL;
+	snapshot->task_css = NULL;
+	return AUTH_GUARD_CHECK_UNAVAILABLE;
+}
+
+static inline void
+cgroup_task_auth_snapshot_put(struct cgroup_task_auth_snapshot *snapshot)
+{
+	snapshot->cgroup_ns = NULL;
+	snapshot->root_cset = NULL;
+	snapshot->task_css = NULL;
+}
 
 static inline int cgroup_init_early(void) { return 0; }
 static inline int cgroup_init(void) { return 0; }
@@ -709,6 +778,17 @@ static inline bool task_under_cgroup_hierarchy(struct task_struct *task,
 static inline void cgroup_path_from_kernfs_id(u64 id, char *buf, size_t buflen)
 {}
 #endif /* !CONFIG_CGROUPS */
+
+static inline void __free_cgroup_task_auth_snapshot(void *data)
+{
+	cgroup_task_auth_snapshot_put(data);
+}
+
+#define cgroup_ns_root_cset_checked(_ns) \
+	cgroup_ns_root_cset_checked_where((_ns), __func__)
+#define cgroup_task_auth_snapshot_get(_task, _task_subsys_id, _snapshot) \
+	cgroup_task_auth_snapshot_get_where((_task), (_task_subsys_id), \
+					   (_snapshot), __func__)
 
 #ifdef CONFIG_CGROUPS
 /*
