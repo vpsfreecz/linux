@@ -24,9 +24,11 @@
  */
 
 #include <linux/kernel_read_file.h>
+#include <linux/auth_guard.h>
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/fdtable.h>
+#include <linux/cred.h>
 #include <linux/mm.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
@@ -1106,6 +1108,14 @@ int begin_new_exec(struct linux_binprm * bprm)
 	if (retval)
 		return retval;
 
+	retval = set_cred_ucounts(bprm->cred);
+	if (retval < 0)
+		return retval;
+
+	retval = cred_guard_preflight_commit_creds(bprm->cred);
+	if (retval)
+		return retval;
+
 	/*
 	 * This tracepoint marks the point before flushing the old exec where
 	 * the current task is still unchanged, but errors are fatal (point of
@@ -1251,17 +1261,14 @@ int begin_new_exec(struct linux_binprm * bprm)
 	WRITE_ONCE(me->self_exec_id, me->self_exec_id + 1);
 	flush_signal_handlers(me, 0);
 
-	retval = set_cred_ucounts(bprm->cred);
-	if (retval < 0)
-		goto out_unlock;
-
 	/*
 	 * install the new credentials for this executable
 	 */
 	security_bprm_committing_creds(bprm);
 
-	commit_creds(bprm->cred);
+	retval = commit_creds(bprm->cred);
 	bprm->cred = NULL;
+	BUG_ON(retval);
 
 	/*
 	 * Disable monitoring for regular users
