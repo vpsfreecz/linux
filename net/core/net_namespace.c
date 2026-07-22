@@ -511,6 +511,15 @@ out_free:
 	goto out;
 }
 
+static void net_free_preinit(struct net *net)
+{
+#ifdef CONFIG_KEYS
+	key_remove_domain(net->key_domain);
+#endif
+	kfree(rcu_access_pointer(net->gen));
+	kmem_cache_free(net_cachep, net);
+}
+
 static LLIST_HEAD(defer_free_list);
 
 static void net_complete_free(void)
@@ -568,8 +577,10 @@ struct net *copy_net_ns(u64 flags,
 	}
 
 	rv = preinit_net(net, user_ns);
-	if (rv < 0)
+	if (rv < 0) {
+		net_free_preinit(net);
 		goto dec_ucounts;
+	}
 	net->ucounts = ucounts;
 	get_user_ns(user_ns);
 
