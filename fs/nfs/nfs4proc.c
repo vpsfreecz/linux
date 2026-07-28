@@ -7394,6 +7394,18 @@ static void nfs4_lock_done(struct rpc_task *task, void *calldata)
 	case 0:
 		renew_lease(NFS_SERVER(d_inode(data->ctx->dentry)),
 				data->timestamp);
+		if (data->arg.new_lock && !data->cancelled) {
+			struct inode *inode = lsp->ls_state->inode;
+			struct nfs_inode *nfsi = NFS_I(inode);
+			int status;
+
+			data->fl.c.flc_flags &= ~(FL_SLEEP | FL_ACCESS);
+			down_read(&nfsi->rwsem);
+			status = locks_lock_inode_wait(inode, &data->fl);
+			up_read(&nfsi->rwsem);
+			if (status < 0)
+				goto out_restart;
+		}
 		if (data->arg.new_lock_owner != 0) {
 			nfs_confirm_seqid(&lsp->ls_seqid, 0);
 			nfs4_stateid_copy(&lsp->ls_stateid, &data->res.stateid);
