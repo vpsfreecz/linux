@@ -2206,6 +2206,9 @@ static inline struct list_head *get_event_list(struct perf_event *event)
 				    &event->pmu_ctx->flexible_active;
 }
 
+static void
+event_sched_out(struct perf_event *event, struct perf_event_context *ctx);
+
 static void perf_group_detach(struct perf_event *event)
 {
 	struct perf_event *leader = event->group_leader;
@@ -2250,6 +2253,16 @@ static void perf_group_detach(struct perf_event *event)
 		 */
 		if (sibling->event_caps & PERF_EV_CAP_SIBLING)
 			__event_disable(sibling, ctx, PERF_EVENT_STATE_ERROR);
+
+		/*
+		 * A leader removed by an old remove-on-exec path is no
+		 * longer attached to the context, but its siblings can still
+		 * be active.  Schedule those siblings out before promoting
+		 * them so they are not added to the PMU twice later.
+		 */
+		if (!(event->attach_state & PERF_ATTACH_CONTEXT) &&
+		    sibling->state == PERF_EVENT_STATE_ACTIVE)
+			event_sched_out(sibling, ctx);
 
 		sibling->group_leader = sibling;
 		list_del_init(&sibling->sibling_list);
@@ -3954,6 +3967,16 @@ static int merge_sched_in(struct perf_event *event, void *data)
 		return 0;
 
 	if (!event_filter_match(event))
+		return 0;
+
+	/*
+	 * An old remove-on-exec path can leave an active sibling promoted to a
+	 * singleton and linked on the PMU active list before livepatch
+	 * activation.  It is already programmed; do not schedule or link it a
+	 * second time.
+	 */
+	if (event->state == PERF_EVENT_STATE_ACTIVE &&
+	    !list_empty(&event->active_list))
 		return 0;
 
 	if (group_can_go_on(event, *can_add_hw)) {
