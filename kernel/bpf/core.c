@@ -42,6 +42,10 @@
 #include <asm/barrier.h>
 #include <linux/unaligned.h>
 
+#ifdef CONFIG_X86
+#include <asm/tlbflush.h>
+#endif
+
 /* Registers */
 #define BPF_R0	regs[BPF_REG_0]
 #define BPF_R1	regs[BPF_REG_1]
@@ -901,6 +905,12 @@ static inline void vpsadminos_bpf_jit_ibpb(void)
 #endif
 
 #ifdef CONFIG_LIVEPATCH
+#ifndef CONFIG_X86
+static inline void vpsadminos_livepatch_flush_tlb_all(void)
+{
+}
+#endif
+
 struct klp_object;
 
 struct vpsadminos_post_patch_callback {
@@ -916,6 +926,7 @@ static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
 {
 	(void)obj;
 	vpsadminos_bpf_jit_ibpb();
+	vpsadminos_livepatch_flush_tlb_all();
 }
 
 static struct vpsadminos_post_patch_callback vpsadminos_post_patch_data

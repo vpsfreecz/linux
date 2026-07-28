@@ -1096,6 +1096,22 @@ void flush_tlb_all(void)
 	on_each_cpu(do_flush_tlb_all, NULL, 1);
 }
 
+#ifdef CONFIG_LIVEPATCH
+/*
+ * A livepatch can replace switch_mm_irqs_off() only after vulnerable calls
+ * have already missed a shootdown.  Once the replacement is active across
+ * all tasks, discard every such stale translation.  Keep the online mask
+ * stable so that no CPU can come online without either receiving this IPI or
+ * taking the normal hotplug TLB reinitialization path afterward.
+ */
+void vpsadminos_livepatch_flush_tlb_all(void)
+{
+	cpus_read_lock();
+	flush_tlb_all();
+	cpus_read_unlock();
+}
+#endif
+
 static void do_kernel_range_flush(void *info)
 {
 	struct flush_tlb_info *f = info;

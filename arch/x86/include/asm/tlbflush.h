@@ -245,6 +245,9 @@ void flush_tlb_multi(const struct cpumask *cpumask,
 				: PAGE_SHIFT, true)
 
 extern void flush_tlb_all(void);
+#ifdef CONFIG_LIVEPATCH
+void vpsadminos_livepatch_flush_tlb_all(void);
+#endif
 extern void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 				unsigned long end, unsigned int stride_shift,
 				bool freed_tables);
