@@ -452,6 +452,8 @@ mtype_destroy(struct ip_set *set)
 	struct htype *h = set->data;
 	struct list_head *l, *lt;
 
+	if (SET_WITH_TIMEOUT(set))
+		disable_delayed_work_sync(&h->gc.dwork);
 	mtype_ahash_destroy(set, (__force struct htable *)h->table, true);
 	list_for_each_safe(l, lt, &h->ad) {
 		list_del(l);

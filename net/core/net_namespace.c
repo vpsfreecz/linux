@@ -1376,6 +1376,20 @@ int register_pernet_subsys(struct pernet_operations *ops)
 }
 EXPORT_SYMBOL_GPL(register_pernet_subsys);
 
+#ifdef CONFIG_LIVEPATCH
+int vpsadminos_pernet_try_register(struct pernet_operations *ops)
+{
+	int error;
+
+	if (!down_write_trylock(&pernet_ops_rwsem))
+		return -EBUSY;
+	error = register_pernet_operations(first_device, ops);
+	up_write(&pernet_ops_rwsem);
+
+	return error;
+}
+#endif
+
 /**
  *      unregister_pernet_subsys - unregister a network namespace subsystem
  *	@ops: pernet operations structure to manipulate

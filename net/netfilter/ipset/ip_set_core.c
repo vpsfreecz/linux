@@ -21,6 +21,9 @@
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/ipset/ip_set.h>
+#if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
+#include <linux/livepatch.h>
+#endif
 
 static LIST_HEAD(ip_set_type_list);		/* all registered set types */
 static DEFINE_MUTEX(ip_set_type_mutex);		/* protects ip_set_type_list */
@@ -2241,6 +2244,101 @@ static struct nfnetlink_subsystem ip_set_netlink_subsys __read_mostly = {
 	.cb_count	= IPSET_MSG_MAX,
 	.cb		= ip_set_netlink_subsys_cb,
 };
+
+#ifdef CONFIG_LIVEPATCH
+struct vpsadminos_ipset_pre_patch_callback {
+	int (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_ipset_post_patch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_ipset_post_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+static bool vpsadminos_ipset_transition_quiesced;
+
+static int vpsadminos_ipset_netns_hold(struct net *net)
+{
+	if (!maybe_get_net(net))
+		return -ENOENT;
+	return 0;
+}
+
+static void vpsadminos_ipset_netns_release(struct net *net)
+{
+	put_net(net);
+}
+
+static struct pernet_operations vpsadminos_ipset_netns_guard = {
+	.init = vpsadminos_ipset_netns_hold,
+	.exit = vpsadminos_ipset_netns_release,
+};
+
+static int vpsadminos_ipset_livepatch_quiesce(struct klp_object *obj)
+{
+	int ret;
+
+	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
+		return 0;
+	if (WARN_ON_ONCE(vpsadminos_ipset_transition_quiesced))
+		return -EBUSY;
+
+	ret = vpsadminos_pernet_try_register(&vpsadminos_ipset_netns_guard);
+	if (ret)
+		return ret;
+
+	ret = vpsadminos_nfnl_try_unregister(&ip_set_netlink_subsys);
+	if (ret) {
+		unregister_pernet_subsys(&vpsadminos_ipset_netns_guard);
+		return ret;
+	}
+
+	WRITE_ONCE(vpsadminos_ipset_transition_quiesced, true);
+	return 0;
+}
+
+static void vpsadminos_ipset_livepatch_restore(struct klp_object *obj)
+{
+	int ret;
+
+	if (!READ_ONCE(vpsadminos_ipset_transition_quiesced))
+		return;
+
+	ret = nfnetlink_subsys_register(&ip_set_netlink_subsys);
+	if (ret)
+		pr_err("ip_set: livepatch failed to restore NFNETLINK: %d\n",
+		       ret);
+	unregister_pernet_subsys(&vpsadminos_ipset_netns_guard);
+	WRITE_ONCE(vpsadminos_ipset_transition_quiesced, false);
+}
+
+static struct vpsadminos_ipset_pre_patch_callback
+vpsadminos_ipset_pre_patch_data
+__section(".kpatch.callbacks.pre_patch") __used = {
+	.fn = vpsadminos_ipset_livepatch_quiesce,
+	.objname = NULL,
+};
+
+static struct vpsadminos_ipset_post_patch_callback
+vpsadminos_ipset_post_patch_data
+__section(".kpatch.callbacks.post_patch") __used = {
+	.fn = vpsadminos_ipset_livepatch_restore,
+	.objname = NULL,
+};
+
+static struct vpsadminos_ipset_post_unpatch_callback
+vpsadminos_ipset_post_unpatch_data
+__section(".kpatch.callbacks.post_unpatch") __used = {
+	.fn = vpsadminos_ipset_livepatch_restore,
+	.objname = NULL,
+};
+#endif
 
 /* Interface to iptables/ip6tables */
 

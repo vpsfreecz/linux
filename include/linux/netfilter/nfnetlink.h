@@ -50,6 +50,9 @@ struct nfnetlink_subsystem {
 
 int nfnetlink_subsys_register(const struct nfnetlink_subsystem *n);
 int nfnetlink_subsys_unregister(const struct nfnetlink_subsystem *n);
+#ifdef CONFIG_LIVEPATCH
+int vpsadminos_nfnl_try_unregister(const struct nfnetlink_subsystem *n);
+#endif
 
 int nfnetlink_has_listeners(struct net *net, unsigned int group);
 int nfnetlink_send(struct sk_buff *skb, struct net *net, u32 portid,

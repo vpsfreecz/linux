@@ -496,6 +496,9 @@ int register_pernet_subsys(struct pernet_operations *);
 void unregister_pernet_subsys(struct pernet_operations *);
 int register_pernet_device(struct pernet_operations *);
 void unregister_pernet_device(struct pernet_operations *);
+#ifdef CONFIG_LIVEPATCH
+int vpsadminos_pernet_try_register(struct pernet_operations *ops);
+#endif
 
 struct ctl_table;
 

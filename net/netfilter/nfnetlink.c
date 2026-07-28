@@ -144,6 +144,23 @@ int nfnetlink_subsys_unregister(const struct nfnetlink_subsystem *n)
 }
 EXPORT_SYMBOL_GPL(nfnetlink_subsys_unregister);
 
+#ifdef CONFIG_LIVEPATCH
+int vpsadminos_nfnl_try_unregister(const struct nfnetlink_subsystem *n)
+{
+	if (!mutex_trylock(&table[n->subsys_id].mutex))
+		return -EBUSY;
+	if (rcu_access_pointer(table[n->subsys_id].subsys) != n) {
+		mutex_unlock(&table[n->subsys_id].mutex);
+		return -ENOENT;
+	}
+	RCU_INIT_POINTER(table[n->subsys_id].subsys, NULL);
+	mutex_unlock(&table[n->subsys_id].mutex);
+	synchronize_rcu();
+
+	return 0;
+}
+#endif
+
 static inline const struct nfnetlink_subsystem *nfnetlink_get_subsys(u16 type)
 {
 	u8 subsys_id = NFNL_SUBSYS_ID(type);
