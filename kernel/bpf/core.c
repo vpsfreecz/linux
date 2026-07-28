@@ -39,6 +39,9 @@
 #include <linux/memcontrol.h>
 #include <linux/execmem.h>
 #include <linux/vpsadminos-livepatch.h>
+#ifdef CONFIG_LIVEPATCH
+#include <linux/livepatch.h>
+#endif
 
 #include <asm/barrier.h>
 #include <linux/unaligned.h>
@@ -906,6 +909,33 @@ static inline void vpsadminos_bpf_jit_ibpb(void)
 #endif
 
 #ifdef CONFIG_LIVEPATCH
+#define VPSADMINOS_PIPAPO_STATE_ID	0x7a1f024282b3489dUL
+#define VPSADMINOS_PIPAPO_STATE_ACTIVE	((void *)1UL)
+
+static struct klp_state vpsadminos_pipapo_state
+__section(".kpatch.system_states") __used
+__aligned(__alignof__(struct klp_state)) = {
+	.id = VPSADMINOS_PIPAPO_STATE_ID,
+	.version = 2,
+};
+
+static void vpsadminos_pipapo_livepatch_post_patch(void)
+{
+	struct klp_state *prev_state;
+
+	WRITE_ONCE(vpsadminos_pipapo_state.data,
+		   VPSADMINOS_PIPAPO_STATE_ACTIVE);
+	prev_state = klp_get_prev_state(VPSADMINOS_PIPAPO_STATE_ID);
+	if (prev_state &&
+	    READ_ONCE(prev_state->data) == VPSADMINOS_PIPAPO_STATE_ACTIVE)
+		WRITE_ONCE(prev_state->data, NULL);
+}
+
+static void vpsadminos_pipapo_livepatch_post_unpatch(void)
+{
+	WRITE_ONCE(vpsadminos_pipapo_state.data, NULL);
+}
+
 #ifndef CONFIG_X86
 static inline void vpsadminos_livepatch_flush_tlb_all(void)
 {
@@ -952,6 +982,7 @@ static int vpsadminos_livepatch_pre_patch(struct klp_object *obj)
 static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
 {
 	(void)obj;
+	vpsadminos_pipapo_livepatch_post_patch();
 	vpsadminos_nfqueue_livepatch_post_patch();
 	vpsadminos_sunrpc_livepatch_post_patch();
 	vpsadminos_xfrm_livepatch_post_patch();
@@ -971,6 +1002,7 @@ static void vpsadminos_livepatch_post_unpatch(struct klp_object *obj)
 	(void)obj;
 	vpsadminos_sunrpc_livepatch_post_unpatch();
 	vpsadminos_nfqueue_livepatch_post_unpatch();
+	vpsadminos_pipapo_livepatch_post_unpatch();
 }
 
 static struct vpsadminos_pre_patch_callback vpsadminos_pre_patch_data

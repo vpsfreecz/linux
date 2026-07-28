@@ -338,11 +338,108 @@
 #include <uapi/linux/netfilter/nf_tables.h>
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
+#ifdef CONFIG_LIVEPATCH
+#include <linux/livepatch.h>
+#include <linux/rtnetlink.h>
+#include <linux/vpsadminos-livepatch.h>
+#endif
 
 #include "nft_set_pipapo_avx2.h"
 #include "nft_set_pipapo.h"
 
 static void nft_pipapo_abort(const struct nft_set *set);
+static void pipapo_free_match(struct nft_pipapo_match *m);
+
+#ifdef CONFIG_LIVEPATCH
+static int vpsadminos_pipapo_clone_state_ctor(void *obj, void *shadow_data,
+					      void *ctor_data)
+{
+	u8 *state = shadow_data;
+
+	*state = NFT_PIPAPO_CLONE_NEW;
+	return 0;
+}
+
+static u8 *
+vpsadminos_pipapo_clone_state(const struct nft_pipapo_match *m)
+{
+	return klp_shadow_get((void *)m,
+			      VPSADMINOS_PIPAPO_CLONE_SHADOW_ID);
+}
+
+static int
+vpsadminos_pipapo_clone_state_alloc(struct nft_pipapo_match *m)
+{
+	u8 *state;
+
+	state = klp_shadow_alloc(m, VPSADMINOS_PIPAPO_CLONE_SHADOW_ID,
+				 sizeof(*state), GFP_KERNEL_ACCOUNT,
+				 vpsadminos_pipapo_clone_state_ctor, NULL);
+	return state ? 0 : -ENOMEM;
+}
+
+static enum nft_pipapo_clone_state
+vpsadminos_pipapo_clone_state_get(const struct nft_pipapo_match *m)
+{
+	u8 *state = vpsadminos_pipapo_clone_state(m);
+
+	return state ? *state : NFT_PIPAPO_CLONE_ERR;
+}
+
+static void
+vpsadminos_pipapo_clone_state_set(struct nft_pipapo_match *m,
+				  enum nft_pipapo_clone_state value)
+{
+	u8 *state = vpsadminos_pipapo_clone_state(m);
+
+	if (WARN_ON_ONCE(!state))
+		return;
+	*state = value;
+}
+
+static void
+vpsadminos_pipapo_clone_state_free(struct nft_pipapo_match *m)
+{
+	klp_shadow_free(m, VPSADMINOS_PIPAPO_CLONE_SHADOW_ID, NULL);
+}
+
+static bool
+vpsadminos_pipapo_clone_state_missing(const struct nft_pipapo_match *m)
+{
+	return !vpsadminos_pipapo_clone_state(m);
+}
+#else
+static int
+vpsadminos_pipapo_clone_state_alloc(struct nft_pipapo_match *m)
+{
+	m->state = NFT_PIPAPO_CLONE_NEW;
+	return 0;
+}
+
+static enum nft_pipapo_clone_state
+vpsadminos_pipapo_clone_state_get(const struct nft_pipapo_match *m)
+{
+	return m->state;
+}
+
+static void
+vpsadminos_pipapo_clone_state_set(struct nft_pipapo_match *m,
+				  enum nft_pipapo_clone_state value)
+{
+	m->state = value;
+}
+
+static void
+vpsadminos_pipapo_clone_state_free(struct nft_pipapo_match *m)
+{
+}
+
+static bool
+vpsadminos_pipapo_clone_state_missing(const struct nft_pipapo_match *m)
+{
+	return false;
+}
+#endif
 
 /**
  * pipapo_refill() - For each set bit, set bits from selected mapping table item
@@ -1252,8 +1349,18 @@ static struct nft_pipapo_match *pipapo_maybe_clone(const struct nft_set *set)
 	struct nft_pipapo *priv = nft_set_priv(set);
 	struct nft_pipapo_match *m;
 
-	if (priv->clone)
-		return priv->clone;
+	if (priv->clone) {
+		if (!vpsadminos_pipapo_clone_state_missing(priv->clone))
+			return priv->clone;
+
+		/*
+		 * A clone without livepatch state predates activation.  It may
+		 * be the inconsistent clone left by the old first-insert
+		 * failure, so discard it without inspecting its tables.
+		 */
+		pipapo_free_match(priv->clone);
+		priv->clone = NULL;
+	}
 
 	m = rcu_dereference_protected(priv->match,
 				      nft_pipapo_transaction_mutex_held(set));
@@ -1286,7 +1393,8 @@ static int nft_pipapo_insert(const struct net *net, const struct nft_set *set,
 	const u8 *start_p, *end_p;
 	int i, bsize_max, err = 0;
 
-	if (!m || m->state == NFT_PIPAPO_CLONE_ERR)
+	if (!m || vpsadminos_pipapo_clone_state_get(m) ==
+		  NFT_PIPAPO_CLONE_ERR)
 		return -ENOMEM;
 
 	if (nft_set_ext_exists(ext, NFT_SET_EXT_KEY_END))
@@ -1388,10 +1496,11 @@ static int nft_pipapo_insert(const struct net *net, const struct nft_set *set,
 
 	pipapo_map(m, rulemap, e);
 
-	m->state = NFT_PIPAPO_CLONE_MOD;
+	vpsadminos_pipapo_clone_state_set(m, NFT_PIPAPO_CLONE_MOD);
 	return 0;
 abort:
-	DEBUG_NET_WARN_ON_ONCE(m->state == NFT_PIPAPO_CLONE_ERR);
+	DEBUG_NET_WARN_ON_ONCE(vpsadminos_pipapo_clone_state_get(m) ==
+			       NFT_PIPAPO_CLONE_ERR);
 
 	/* Two rollback cases:
 	 * 1) no previous changes.  nft_pipapo_abort is not
@@ -1402,10 +1511,11 @@ abort:
 	 * records pointing to this set.  Leave the rollback to
 	 * the transaction handling.
 	 */
-	if (m->state == NFT_PIPAPO_CLONE_NEW)
+	if (vpsadminos_pipapo_clone_state_get(m) ==
+	    NFT_PIPAPO_CLONE_NEW)
 		nft_pipapo_abort(set); /* releases m */
 	else
-		m->state = NFT_PIPAPO_CLONE_ERR;
+		vpsadminos_pipapo_clone_state_set(m, NFT_PIPAPO_CLONE_ERR);
 
 	return err;
 }
@@ -1485,9 +1595,13 @@ static struct nft_pipapo_match *pipapo_clone(struct nft_pipapo_match *old)
 		dst++;
 	}
 
-	new->state = NFT_PIPAPO_CLONE_NEW;
+	if (vpsadminos_pipapo_clone_state_alloc(new))
+		goto out_state;
 	return new;
 
+out_state:
+	pipapo_free_match(new);
+	return NULL;
 out_mt:
 	kvfree(dst->lt);
 out_lt:
@@ -1804,6 +1918,8 @@ static void pipapo_free_match(struct nft_pipapo_match *m)
 {
 	int i;
 
+	vpsadminos_pipapo_clone_state_free(m);
+
 	for_each_possible_cpu(i)
 		pipapo_free_scratch(m, i);
 
@@ -1848,9 +1964,16 @@ static void nft_pipapo_commit(struct nft_set *set)
 	if (!priv->clone)
 		return;
 
+	if (vpsadminos_pipapo_clone_state_get(priv->clone) ==
+	    NFT_PIPAPO_CLONE_ERR) {
+		nft_pipapo_abort(set);
+		return;
+	}
+
 	if (time_after_eq(jiffies, priv->last_gc + nft_set_gc_interval(set)))
 		pipapo_gc_scan(set, priv->clone);
 
+	vpsadminos_pipapo_clone_state_free(priv->clone);
 	old = rcu_replace_pointer(priv->match, priv->clone,
 				  nft_pipapo_transaction_mutex_held(set));
 	priv->clone = NULL;
@@ -1909,7 +2032,8 @@ nft_pipapo_deactivate(const struct net *net, const struct nft_set *set,
 	/* removal must occur on priv->clone, if we are low on memory
 	 * we have no choice and must fail the removal request.
 	 */
-	if (!m || m->state == NFT_PIPAPO_CLONE_ERR)
+	if (!m || vpsadminos_pipapo_clone_state_get(m) ==
+		  NFT_PIPAPO_CLONE_ERR)
 		return NULL;
 
 	e = pipapo_get(m, (const u8 *)elem->key.val.data,
@@ -1918,6 +2042,7 @@ nft_pipapo_deactivate(const struct net *net, const struct nft_set *set,
 		return NULL;
 
 	nft_set_elem_change_active(net, set, &e->ext);
+	vpsadminos_pipapo_clone_state_set(m, NFT_PIPAPO_CLONE_MOD);
 
 	return &e->priv;
 }
@@ -2083,6 +2208,11 @@ static void nft_pipapo_remove(const struct net *net, const struct nft_set *set,
 	unsigned int rules_f0, first_rule = 0;
 	struct nft_pipapo_elem *e;
 	const u8 *data;
+
+	if (WARN_ON_ONCE(!m ||
+			 vpsadminos_pipapo_clone_state_get(m) ==
+			 NFT_PIPAPO_CLONE_ERR))
+		return;
 
 	e = nft_elem_priv_cast(elem_priv);
 	data = (const u8 *)nft_set_ext_key(&e->ext);
@@ -2371,7 +2501,11 @@ static void nft_pipapo_destroy(const struct nft_ctx *ctx,
 	m = rcu_dereference_protected(priv->match, true);
 
 	if (priv->clone) {
-		nft_set_pipapo_match_destroy(ctx, set, priv->clone);
+		if (vpsadminos_pipapo_clone_state_get(priv->clone) ==
+		    NFT_PIPAPO_CLONE_ERR)
+			nft_set_pipapo_match_destroy(ctx, set, m);
+		else
+			nft_set_pipapo_match_destroy(ctx, set, priv->clone);
 		pipapo_free_match(priv->clone);
 		priv->clone = NULL;
 	} else {
@@ -2396,6 +2530,70 @@ static void nft_pipapo_gc_init(const struct nft_set *set)
 
 	priv->last_gc = jiffies;
 }
+
+#ifdef CONFIG_LIVEPATCH
+static bool vpsadminos_is_pipapo_set(const struct nft_set *set)
+{
+	if (set->ops == &nft_set_pipapo_type.ops)
+		return true;
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
+	if (set->ops == &nft_set_pipapo_avx2_type.ops)
+		return true;
+#endif
+	return false;
+}
+
+void vpsadminos_pipapo_livepatch_cleanup(void)
+{
+	struct nftables_pernet *nft_net;
+	struct nft_pipapo_match *clone;
+	struct nft_pipapo *priv;
+	struct nft_table *table;
+	struct nft_set *set;
+	struct net *net;
+
+	down_read(&net_rwsem);
+	for_each_net(net) {
+		nft_net = nft_pernet(net);
+
+		/*
+		 * NFtables is no longer accepting new batches.  Cross the
+		 * commit mutex once so every batch which acquired the
+		 * subsystem before it was unregistered has published any
+		 * deferred destruction, then drain that work while patched
+		 * destroy functions are still active.
+		 */
+		mutex_lock(&nft_net->commit_mutex);
+		mutex_unlock(&nft_net->commit_mutex);
+		nf_tables_trans_destroy_flush_work(net);
+
+		mutex_lock(&nft_net->commit_mutex);
+
+		list_for_each_entry(table, &nft_net->tables, list) {
+			list_for_each_entry(set, &table->sets, list) {
+				if (!vpsadminos_is_pipapo_set(set))
+					continue;
+
+				priv = nft_set_priv(set);
+				clone = priv->clone;
+				if (!clone)
+					continue;
+
+				if (vpsadminos_pipapo_clone_state_get(clone) ==
+				    NFT_PIPAPO_CLONE_ERR) {
+					pipapo_free_match(clone);
+					priv->clone = NULL;
+				} else {
+					vpsadminos_pipapo_clone_state_free(clone);
+				}
+			}
+		}
+
+		mutex_unlock(&nft_net->commit_mutex);
+	}
+	up_read(&net_rwsem);
+}
+#endif
 
 const struct nft_set_type nft_set_pipapo_type = {
 	.features	= NFT_SET_INTERVAL | NFT_SET_MAP | NFT_SET_OBJECT |

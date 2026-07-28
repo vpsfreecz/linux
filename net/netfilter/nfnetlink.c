@@ -385,6 +385,13 @@ enum {
 	NFNL_BATCH_REPLAY	= (1 << 2),
 };
 
+#ifdef CONFIG_LIVEPATCH
+static noinline void vpsadminos_nfnl_livepatch_batch_frame(void)
+{
+	barrier();
+}
+#endif
+
 static void nfnetlink_rcv_batch(struct sk_buff *skb, struct nlmsghdr *nlh,
 				u16 subsys_id, u32 genid)
 {
@@ -397,6 +404,10 @@ static void nfnetlink_rcv_batch(struct sk_buff *skb, struct nlmsghdr *nlh,
 	LIST_HEAD(err_list);
 	u32 status;
 	int err;
+
+#ifdef CONFIG_LIVEPATCH
+	vpsadminos_nfnl_livepatch_batch_frame();
+#endif
 
 	if (subsys_id >= NFNL_SUBSYS_COUNT)
 		return netlink_ack(skb, nlh, -EINVAL, NULL);

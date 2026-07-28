@@ -151,12 +151,18 @@ enum nft_pipapo_clone_state {
  */
 struct nft_pipapo_match {
 	u8 field_count;
+#ifndef CONFIG_LIVEPATCH
 	enum nft_pipapo_clone_state state:8;
+#endif
 	unsigned int bsize_max;
 	struct nft_pipapo_scratch * __percpu *scratch;
 	struct rcu_head rcu;
 	struct nft_pipapo_field f[] __counted_by(field_count);
 };
+
+#ifdef CONFIG_LIVEPATCH
+#define VPSADMINOS_PIPAPO_CLONE_SHADOW_ID	0xb9c17a5984451080UL
+#endif
 
 /**
  * struct nft_pipapo - Representation of a set

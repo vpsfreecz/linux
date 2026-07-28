@@ -16,6 +16,10 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/nf_tables.h>
+#if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
+#include <linux/livepatch.h>
+#include <linux/vpsadminos-livepatch.h>
+#endif
 #include <net/netfilter/nf_flow_table.h>
 #include <net/netfilter/nf_tables_core.h>
 #include <net/netfilter/nf_tables.h>
@@ -11122,6 +11126,172 @@ static const struct nfnetlink_subsystem nf_tables_subsys = {
 	.owner		= THIS_MODULE,
 };
 
+#ifdef CONFIG_LIVEPATCH
+struct vpsadminos_nftables_pre_patch_callback {
+	int (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nftables_post_patch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nftables_pre_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nftables_post_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+static bool vpsadminos_nftables_transition_quiesced;
+static bool vpsadminos_nftables_patch_active;
+
+static noinline void vpsadminos_nftables_livepatch_notifier_frame(void)
+{
+	barrier();
+}
+
+static int vpsadminos_nftables_netns_hold(struct net *net)
+{
+	if (!maybe_get_net(net))
+		return -ENOENT;
+	return 0;
+}
+
+static void vpsadminos_nftables_netns_release(struct net *net)
+{
+	put_net(net);
+}
+
+static struct pernet_operations vpsadminos_nftables_netns_guard = {
+	.init = vpsadminos_nftables_netns_hold,
+	.exit = vpsadminos_nftables_netns_release,
+};
+
+static int
+vpsadminos_nftables_livepatch_quiesce(struct klp_object *obj)
+{
+	int ret;
+
+	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
+		return 0;
+	if (WARN_ON_ONCE(vpsadminos_nftables_transition_quiesced))
+		return -EBUSY;
+
+	ret = vpsadminos_pernet_try_register
+				(&vpsadminos_nftables_netns_guard);
+	if (ret)
+		return ret;
+
+	ret = vpsadminos_nfnl_try_unregister(&nf_tables_subsys);
+	if (ret) {
+		unregister_pernet_subsys(&vpsadminos_nftables_netns_guard);
+		return ret;
+	}
+
+	WRITE_ONCE(vpsadminos_nftables_transition_quiesced, true);
+	return 0;
+}
+
+static void
+vpsadminos_nftables_livepatch_quiesce_blocking(struct klp_object *obj)
+{
+	int ret;
+
+	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
+		return;
+	if (WARN_ON_ONCE(vpsadminos_nftables_transition_quiesced))
+		return;
+
+	do {
+		ret = register_pernet_subsys
+				(&vpsadminos_nftables_netns_guard);
+		if (ret)
+			cond_resched();
+	} while (ret);
+
+	nfnetlink_subsys_unregister(&nf_tables_subsys);
+	WRITE_ONCE(vpsadminos_nftables_transition_quiesced, true);
+}
+
+static void
+vpsadminos_nftables_livepatch_pre_unpatch(struct klp_object *obj)
+{
+	vpsadminos_nftables_livepatch_quiesce_blocking(obj);
+	if (READ_ONCE(vpsadminos_nftables_transition_quiesced) &&
+	    READ_ONCE(vpsadminos_nftables_patch_active))
+		vpsadminos_pipapo_livepatch_cleanup();
+}
+
+static void vpsadminos_nftables_livepatch_restore(void)
+{
+	int ret;
+
+	if (!READ_ONCE(vpsadminos_nftables_transition_quiesced))
+		return;
+
+	ret = nfnetlink_subsys_register(&nf_tables_subsys);
+	if (ret)
+		pr_err("livepatch failed to restore NF_TABLES: %d\n", ret);
+	unregister_pernet_subsys(&vpsadminos_nftables_netns_guard);
+	WRITE_ONCE(vpsadminos_nftables_transition_quiesced, false);
+}
+
+static void
+vpsadminos_nftables_livepatch_post_patch(struct klp_object *obj)
+{
+	if (!obj->mod || obj->mod->state == MODULE_STATE_GOING)
+		return;
+
+	WRITE_ONCE(vpsadminos_nftables_patch_active, true);
+	vpsadminos_nftables_livepatch_restore();
+}
+
+static void
+vpsadminos_nftables_livepatch_post_unpatch(struct klp_object *obj)
+{
+	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE) {
+		WRITE_ONCE(vpsadminos_nftables_patch_active, false);
+		return;
+	}
+
+	WRITE_ONCE(vpsadminos_nftables_patch_active, false);
+	vpsadminos_nftables_livepatch_restore();
+}
+
+static struct vpsadminos_nftables_pre_patch_callback
+vpsadminos_nftables_pre_patch_data
+__section(".kpatch.callbacks.pre_patch") __used = {
+	.fn = vpsadminos_nftables_livepatch_quiesce,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nftables_post_patch_callback
+vpsadminos_nftables_post_patch_data
+__section(".kpatch.callbacks.post_patch") __used = {
+	.fn = vpsadminos_nftables_livepatch_post_patch,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nftables_pre_unpatch_callback
+vpsadminos_nftables_pre_unpatch_data
+__section(".kpatch.callbacks.pre_unpatch") __used = {
+	.fn = vpsadminos_nftables_livepatch_pre_unpatch,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nftables_post_unpatch_callback
+vpsadminos_nftables_post_unpatch_data
+__section(".kpatch.callbacks.post_unpatch") __used = {
+	.fn = vpsadminos_nftables_livepatch_post_unpatch,
+	.objname = NULL,
+};
+#endif
+
 int nft_chain_validate_dependency(const struct nft_chain *chain,
 				  enum nft_chain_types type)
 {
@@ -11715,6 +11885,10 @@ static int nft_rcv_nl_event(struct notifier_block *this, unsigned long event,
 	unsigned int deleted;
 	bool restart = false;
 	unsigned int gc_seq;
+
+#ifdef CONFIG_LIVEPATCH
+	vpsadminos_nftables_livepatch_notifier_frame();
+#endif
 
 	if (event != NETLINK_URELEASE || n->protocol != NETLINK_NETFILTER)
 		return NOTIFY_DONE;

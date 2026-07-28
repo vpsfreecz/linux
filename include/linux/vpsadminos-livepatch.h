@@ -34,6 +34,10 @@ static inline void vpsadminos_nfqueue_livepatch_post_unpatch(void)
 }
 #endif
 
+#ifdef CONFIG_LIVEPATCH
+void vpsadminos_pipapo_livepatch_cleanup(void);
+#endif
+
 #if defined(CONFIG_LIVEPATCH) && defined(CONFIG_SUNRPC)
 int vpsadminos_sunrpc_livepatch_pre_patch(void);
 void vpsadminos_sunrpc_livepatch_post_patch(void);
