@@ -1096,6 +1096,9 @@ static void skb_release_data(struct sk_buff *skb, enum skb_drop_reason reason)
 	if (!skb_data_unref(skb, shinfo))
 		goto exit;
 
+	if (unlikely(skb_zcopy_managed(skb) && !skb_zcopy(skb)))
+		skb_zcopy_downgrade_managed(skb);
+
 	if (skb_zcopy(skb)) {
 		bool skip_unref = shinfo->flags & SKBFL_MANAGED_FRAG_REFS;
 
