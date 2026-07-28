@@ -54,7 +54,20 @@
 #include <linux/highmem.h>
 #include <linux/uio.h>
 #include <linux/sched/mm.h>
-
+#ifdef CONFIG_LIVEPATCH
+#include <linux/atomic.h>
+#include <linux/kallsyms.h>
+#include <linux/kprobes.h>
+#include <linux/livepatch.h>
+#include <linux/ptrace.h>
+#include <linux/rcupdate.h>
+#include <linux/sched/signal.h>
+#include <linux/stacktrace.h>
+#include <linux/stop_machine.h>
+#include <linux/vpsadminos-livepatch.h>
+#include <linux/wait_bit.h>
+#include "kpatch-macros.h"
+#endif
 #include <trace/events/sock.h>
 #include <trace/events/sunrpc.h>
 
@@ -2664,6 +2677,773 @@ out_put_xprt:
 	goto out;
 }
 
+#ifdef CONFIG_LIVEPATCH
+#define VPSADMINOS_SUNRPC_TLS_SHADOW_ID	0x02c5d466e3067e6aUL
+#define VPSADMINOS_SUNRPC_TLS_STATE_ID	0x8ad3e4b57a645262UL
+
+enum vpsadminos_sunrpc_tls_owner {
+	VPSADMINOS_SUNRPC_TLS_QUEUED,
+	VPSADMINOS_SUNRPC_TLS_WORKER,
+	VPSADMINOS_SUNRPC_TLS_CALLBACK,
+};
+
+struct vpsadminos_sunrpc_tls_registry {
+	spinlock_t lock;		/* protects queued, inflight, gated, active */
+	struct list_head queued;
+	unsigned int inflight;
+	bool gated;
+	bool active;
+};
+
+struct vpsadminos_sunrpc_tls_work {
+	struct list_head node;
+	struct vpsadminos_sunrpc_tls_registry *registry;
+	struct sock_xprt *transport;
+	struct rpc_clnt *clnt;
+	enum vpsadminos_sunrpc_tls_owner owner;
+};
+
+struct vpsadminos_sunrpc_tls_work_init {
+	struct vpsadminos_sunrpc_tls_registry *registry;
+	struct sock_xprt *transport;
+	struct rpc_clnt *clnt;
+};
+
+static struct vpsadminos_sunrpc_tls_registry *
+vpsadminos_sunrpc_tls_registry;
+
+static void xs_connect(struct rpc_xprt *xprt, struct rpc_task *task);
+static void xs_tcp_tls_setup_socket(struct work_struct *work);
+
+static struct klp_state vpsadminos_sunrpc_tls_state
+__section(".kpatch.system_states") __used
+__aligned(__alignof__(struct klp_state)) = {
+	.id = VPSADMINOS_SUNRPC_TLS_STATE_ID,
+	.version = 1,
+};
+
+static int
+vpsadminos_sunrpc_tls_work_ctor(void *obj, void *shadow_data,
+				void *ctor_data)
+{
+	struct vpsadminos_sunrpc_tls_work_init *init = ctor_data;
+	struct vpsadminos_sunrpc_tls_work *state = shadow_data;
+
+	INIT_LIST_HEAD(&state->node);
+	state->registry = init->registry;
+	state->transport = init->transport;
+	state->clnt = init->clnt;
+	state->owner = VPSADMINOS_SUNRPC_TLS_QUEUED;
+	WARN_ON_ONCE(obj != init->transport);
+	return 0;
+}
+
+#ifdef CONFIG_X86_64
+#define VPSADMINOS_SUNRPC_XS_CONNECT_GATE_OFFSET	0x5
+#define VPSADMINOS_SUNRPC_TLS_WORKER_GATE_OFFSET	0x6
+#define VPSADMINOS_SUNRPC_TLS_WORKER_GATE_INSN_SIZE	0x3
+
+static bool vpsadminos_sunrpc_gates_active;
+static atomic_t vpsadminos_sunrpc_gate_inflight = ATOMIC_INIT(0);
+static struct vpsadminos_sunrpc_tls_registry *
+vpsadminos_sunrpc_gate_registry;
+
+static __always_inline bool vpsadminos_sunrpc_gates_are_active(void)
+{
+	/* Pairs with the release after both probe sites have been armed. */
+	return smp_load_acquire(&vpsadminos_sunrpc_gates_active);
+}
+
+static void vpsadminos_sunrpc_gate_put(void)
+{
+	if (atomic_dec_and_test(&vpsadminos_sunrpc_gate_inflight))
+		wake_up_var(&vpsadminos_sunrpc_gate_inflight);
+}
+
+static noinline void
+vpsadminos_sunrpc_connect_gate_target(struct rpc_xprt *xprt,
+				      struct rpc_task *task)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+
+	registry = READ_ONCE(vpsadminos_sunrpc_gate_registry);
+	if (WARN_ON_ONCE(!registry))
+		return;
+	xs_connect(xprt, task);
+	vpsadminos_sunrpc_gate_put();
+}
+
+static noinline void
+vpsadminos_sunrpc_worker_gate_target(struct work_struct *work)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+
+	registry = READ_ONCE(vpsadminos_sunrpc_gate_registry);
+	if (WARN_ON_ONCE(!registry))
+		return;
+	xs_tcp_tls_setup_socket(work);
+	vpsadminos_sunrpc_gate_put();
+}
+
+static int
+vpsadminos_sunrpc_xs_connect_gate_pre(struct kprobe *probe,
+				      struct pt_regs *regs)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+	struct rpc_xprt *xprt;
+
+	(void)probe;
+	if (!vpsadminos_sunrpc_gates_are_active())
+		return 0;
+	registry = READ_ONCE(vpsadminos_sunrpc_gate_registry);
+	if (!registry)
+		return 0;
+
+	xprt = (struct rpc_xprt *)regs_get_kernel_argument(regs, 0);
+	if (!xprt || xprt->xprtsec.policy == RPC_XPRTSEC_NONE)
+		return 0;
+
+	atomic_inc(&vpsadminos_sunrpc_gate_inflight);
+	regs->ip = (unsigned long)vpsadminos_sunrpc_connect_gate_target;
+	return 1;
+}
+
+NOKPROBE_SYMBOL(vpsadminos_sunrpc_xs_connect_gate_pre);
+
+static int
+vpsadminos_sunrpc_tls_worker_gate_pre(struct kprobe *probe,
+				      struct pt_regs *regs)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+
+	if (!vpsadminos_sunrpc_gates_are_active())
+		return 0;
+	registry = READ_ONCE(vpsadminos_sunrpc_gate_registry);
+	if (!registry)
+		return 0;
+
+	/*
+	 * The exact production xs_tcp_tls_setup_socket() starts with the
+	 * five-byte __fentry__ call and a one-byte push %rbp.  This probe is
+	 * on the following instruction so the focused hold probe can remain
+	 * at +0x5.  Undo that push before entering the replacement at its
+	 * normal function boundary.
+	 */
+	atomic_inc(&vpsadminos_sunrpc_gate_inflight);
+	regs->sp += sizeof(unsigned long);
+	regs->ip = (unsigned long)vpsadminos_sunrpc_worker_gate_target;
+	return 1;
+}
+
+NOKPROBE_SYMBOL(vpsadminos_sunrpc_tls_worker_gate_pre);
+
+static void
+vpsadminos_sunrpc_xs_connect_gate_post(struct kprobe *probe,
+				       struct pt_regs *regs,
+				       unsigned long flags)
+{
+	(void)probe;
+	(void)regs;
+	(void)flags;
+}
+
+NOKPROBE_SYMBOL(vpsadminos_sunrpc_xs_connect_gate_post);
+
+static struct kprobe vpsadminos_sunrpc_xs_connect_gate = {
+	.symbol_name = "xs_connect",
+	.offset = VPSADMINOS_SUNRPC_XS_CONNECT_GATE_OFFSET,
+	.pre_handler = vpsadminos_sunrpc_xs_connect_gate_pre,
+	.flags = KPROBE_FLAG_DISABLED,
+	/*
+	 * An optimized kprobe ignores instruction-pointer changes made by
+	 * its pre-handler.  A post-handler keeps this gate unoptimized.
+	 */
+	.post_handler = vpsadminos_sunrpc_xs_connect_gate_post,
+};
+
+static struct kprobe vpsadminos_sunrpc_tls_worker_gate = {
+	.symbol_name = "xs_tcp_tls_setup_socket",
+	.offset = VPSADMINOS_SUNRPC_TLS_WORKER_GATE_OFFSET,
+	.pre_handler = vpsadminos_sunrpc_tls_worker_gate_pre,
+	.post_handler = vpsadminos_sunrpc_xs_connect_gate_post,
+	.flags = KPROBE_FLAG_DISABLED,
+};
+
+static struct kprobe *vpsadminos_sunrpc_gates[] = {
+	&vpsadminos_sunrpc_tls_worker_gate,
+	&vpsadminos_sunrpc_xs_connect_gate,
+};
+
+static bool vpsadminos_sunrpc_gates_registered;
+
+#define VPSADMINOS_SUNRPC_STACK_ENTRIES	100
+
+struct vpsadminos_sunrpc_stack_scan {
+	unsigned long escaped_start;
+	unsigned long worker_end;
+};
+
+/*
+ * stop_machine() leaves only stopper threads runnable. Every ordinary
+ * workqueue worker is therefore inactive and has a stable stack for the
+ * reliable unwinder. A worker whose saved instruction pointer still names
+ * the gate instruction will execute the registered probe when it resumes and
+ * can be redirected safely. Only a worker past the end of that instruction
+ * has escaped the gate.
+ */
+static int vpsadminos_sunrpc_scan_worker_stacks(void *data)
+{
+	struct vpsadminos_sunrpc_stack_scan *scan = data;
+	unsigned long entries[VPSADMINOS_SUNRPC_STACK_ENTRIES];
+	struct task_struct *group, *task;
+	int i, nr_entries;
+	int ret = 0;
+
+	rcu_read_lock();
+	for_each_process_thread(group, task) {
+		if (!(READ_ONCE(task->flags) & PF_WQ_WORKER))
+			continue;
+
+		nr_entries = stack_trace_save_tsk_reliable(task, entries,
+							   ARRAY_SIZE(entries));
+		if (nr_entries < 0) {
+			ret = -EAGAIN;
+			break;
+		}
+		if (nr_entries == ARRAY_SIZE(entries)) {
+			ret = -E2BIG;
+			break;
+		}
+		for (i = 0; i < nr_entries; i++) {
+			if (entries[i] >= scan->escaped_start &&
+			    entries[i] < scan->worker_end) {
+				ret = -EBUSY;
+				goto out;
+			}
+		}
+	}
+out:
+	rcu_read_unlock();
+	return ret;
+}
+
+static int vpsadminos_sunrpc_validate_worker_stacks(void)
+{
+	struct vpsadminos_sunrpc_stack_scan scan;
+	unsigned long worker_start;
+	unsigned long size;
+
+	if (WARN_ON_ONCE(!vpsadminos_sunrpc_tls_worker_gate.addr))
+		return -ENOENT;
+
+	worker_start =
+		(unsigned long)vpsadminos_sunrpc_tls_worker_gate.addr -
+		VPSADMINOS_SUNRPC_TLS_WORKER_GATE_OFFSET;
+	if (!kallsyms_lookup_size_offset(worker_start, &size, NULL) ||
+	    !size)
+		return -ENOENT;
+	scan.worker_end = worker_start + size;
+	scan.escaped_start =
+		(unsigned long)vpsadminos_sunrpc_tls_worker_gate.addr +
+		VPSADMINOS_SUNRPC_TLS_WORKER_GATE_INSN_SIZE;
+	if (scan.worker_end < worker_start ||
+	    scan.escaped_start <
+		    (unsigned long)vpsadminos_sunrpc_tls_worker_gate.addr ||
+	    scan.escaped_start > scan.worker_end)
+		return -EOVERFLOW;
+
+	return stop_machine(vpsadminos_sunrpc_scan_worker_stacks, &scan, NULL);
+}
+
+static bool
+vpsadminos_sunrpc_gate_has_peer(const struct kprobe *gate)
+{
+	/*
+	 * An independent kprobe owns an empty list node.  Kprobes can instead
+	 * reuse a core-owned empty aggregate, in which case this gate is the
+	 * aggregate's sole child and both of its list links point to the
+	 * aggregate head.  Only unequal non-self links prove that another
+	 * child occupies the instruction.
+	 */
+	return !list_empty(&gate->list) &&
+	       gate->list.next != gate->list.prev;
+}
+
+static int
+vpsadminos_sunrpc_gates_register(struct vpsadminos_sunrpc_tls_registry *registry)
+{
+	size_t i;
+	int ret;
+
+	if (WARN_ON_ONCE(vpsadminos_sunrpc_gates_registered) ||
+	    WARN_ON_ONCE(READ_ONCE(vpsadminos_sunrpc_gate_registry)) ||
+	    WARN_ON_ONCE(atomic_read(&vpsadminos_sunrpc_gate_inflight)))
+		return -EBUSY;
+
+	/*
+	 * Removing the last child of an optimized aggregate kprobe can leave
+	 * an unused aggregate in the hash until the delayed optimizer runs.
+	 * Registering into that wrapper makes the new gate's list non-empty
+	 * even though it is the sole child, which looks like an occupied site
+	 * below.  Flush that core-owned cleanup first so aggregate membership
+	 * here represents a live peer probe.
+	 */
+	wait_for_kprobe_optimizer();
+
+	WRITE_ONCE(vpsadminos_sunrpc_gate_registry, registry);
+
+	/*
+	 * unregister_kprobe() retains the resolved address.  Clear it before
+	 * re-enabling a still-loaded livepatch so symbol-name lookup is used
+	 * again instead of presenting both an address and a name.
+	 */
+	for (i = 0; i < ARRAY_SIZE(vpsadminos_sunrpc_gates); i++) {
+		vpsadminos_sunrpc_gates[i]->addr = NULL;
+		vpsadminos_sunrpc_gates[i]->flags = KPROBE_FLAG_DISABLED;
+	}
+	ret = register_kprobes(vpsadminos_sunrpc_gates,
+			       ARRAY_SIZE(vpsadminos_sunrpc_gates));
+	if (ret)
+		goto err_clear_registry;
+
+	/*
+	 * Execution-changing kprobes cannot safely share this instruction:
+	 * an aggregate handler may suppress a later handler.  Refuse an
+	 * already occupied site instead of depending on handler order.
+	 */
+	for (i = 0; i < ARRAY_SIZE(vpsadminos_sunrpc_gates); i++) {
+		if (vpsadminos_sunrpc_gate_has_peer(vpsadminos_sunrpc_gates[i])) {
+			ret = -EBUSY;
+			goto err_unregister;
+		}
+	}
+
+	/*
+	 * Keep both handlers pass-through until both sites are armed.  This
+	 * prevents a partial enable failure from admitting module text which
+	 * the failed livepatch activation could subsequently unload.
+	 */
+	for (i = 0; i < ARRAY_SIZE(vpsadminos_sunrpc_gates); i++) {
+		ret = enable_kprobe(vpsadminos_sunrpc_gates[i]);
+		if (ret)
+			goto err_unregister;
+	}
+	WRITE_ONCE(vpsadminos_sunrpc_gates_registered, true);
+	/* Publishes the initialized registry after both probes are armed. */
+	smp_store_release(&vpsadminos_sunrpc_gates_active, true);
+	return 0;
+
+err_unregister:
+	unregister_kprobes(vpsadminos_sunrpc_gates,
+			   ARRAY_SIZE(vpsadminos_sunrpc_gates));
+err_clear_registry:
+	WRITE_ONCE(vpsadminos_sunrpc_gate_registry, NULL);
+	return ret;
+}
+
+static void
+vpsadminos_sunrpc_gates_unregister(struct vpsadminos_sunrpc_tls_registry *registry)
+{
+	if (!READ_ONCE(vpsadminos_sunrpc_gates_registered))
+		return;
+
+	/* Stops new redirections before either probe is disarmed. */
+	smp_store_release(&vpsadminos_sunrpc_gates_active, false);
+	WRITE_ONCE(vpsadminos_sunrpc_gates_registered, false);
+	unregister_kprobes(vpsadminos_sunrpc_gates,
+			   ARRAY_SIZE(vpsadminos_sunrpc_gates));
+
+	/*
+	 * unregister_kprobes() drains handlers, but a redirected producer or
+	 * worker may already be executing or sleeping in module text after
+	 * its handler returned.  Do not let failed activation unload that
+	 * text, or let a completed transition retire this gate registry,
+	 * until every admitted invocation has returned through its target.
+	 */
+	wait_var_event(&vpsadminos_sunrpc_gate_inflight,
+		       !atomic_read(&vpsadminos_sunrpc_gate_inflight));
+	WARN_ON_ONCE(READ_ONCE(vpsadminos_sunrpc_gate_registry) != registry);
+	WRITE_ONCE(vpsadminos_sunrpc_gate_registry, NULL);
+}
+#else
+static int
+vpsadminos_sunrpc_gates_register(struct vpsadminos_sunrpc_tls_registry *registry)
+{
+	(void)registry;
+	return -EOPNOTSUPP;
+}
+
+static void
+vpsadminos_sunrpc_gates_unregister(struct vpsadminos_sunrpc_tls_registry *registry)
+{
+	(void)registry;
+}
+#endif
+
+static void
+vpsadminos_sunrpc_tls_fail_connect(struct sock_xprt *transport, int status)
+{
+	struct rpc_xprt *xprt = &transport->xprt;
+
+	WRITE_ONCE(transport->clnt, NULL);
+	clear_bit(XPRT_SOCK_CONNECTING, &transport->sock_state);
+	xprt_clear_connecting(xprt);
+	xprt_wake_pending_tasks(xprt, status);
+	xs_run_error_worker(transport, XPRT_SOCK_WAKE_PENDING);
+	xprt_unlock_connect(xprt, transport);
+}
+
+static void
+vpsadminos_sunrpc_tls_release_work(struct vpsadminos_sunrpc_tls_work *state)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry = state->registry;
+	struct sock_xprt *transport = state->transport;
+	struct rpc_clnt *clnt = state->clnt;
+	bool wake = false;
+
+	WARN_ON_ONCE(state->owner != VPSADMINOS_SUNRPC_TLS_WORKER);
+	spin_lock(&registry->lock);
+	klp_shadow_free(transport, VPSADMINOS_SUNRPC_TLS_SHADOW_ID, NULL);
+	if (WARN_ON_ONCE(!registry->inflight))
+		registry->inflight = 0;
+	else if (!--registry->inflight)
+		wake = true;
+	spin_unlock(&registry->lock);
+
+	rpc_release_client(clnt);
+	if (wake) {
+		/* Pairs the zero transition with wait_var_event(). */
+		smp_mb();
+		wake_up_var(&registry->inflight);
+	}
+}
+
+static noinline void vpsadminos_sunrpc_cb_release(struct vpsadminos_sunrpc_tls_work *state)
+{
+	struct sock_xprt *transport = state->transport;
+	struct rpc_clnt *clnt = state->clnt;
+
+	WARN_ON_ONCE(state->owner != VPSADMINOS_SUNRPC_TLS_CALLBACK);
+	klp_shadow_free(transport, VPSADMINOS_SUNRPC_TLS_SHADOW_ID, NULL);
+	rpc_release_client(clnt);
+}
+
+static struct vpsadminos_sunrpc_tls_work *
+vpsadminos_sunrpc_tls_alloc_locked(struct vpsadminos_sunrpc_tls_registry *registry,
+				   struct sock_xprt *transport,
+				   struct rpc_clnt *clnt)
+{
+	struct vpsadminos_sunrpc_tls_work_init init = {
+		.registry = registry,
+		.transport = transport,
+		.clnt = clnt,
+	};
+	struct vpsadminos_sunrpc_tls_work *state;
+
+	lockdep_assert_held(&registry->lock);
+	if (klp_shadow_get(transport, VPSADMINOS_SUNRPC_TLS_SHADOW_ID))
+		return ERR_PTR(-EBUSY);
+
+	state = klp_shadow_alloc(transport, VPSADMINOS_SUNRPC_TLS_SHADOW_ID,
+				 sizeof(*state), GFP_ATOMIC,
+				 vpsadminos_sunrpc_tls_work_ctor, &init);
+	if (!state)
+		return ERR_PTR(-ENOMEM);
+
+	list_add_tail(&state->node, &registry->queued);
+	return state;
+}
+
+/*
+ * Return 0 for ordinary boot semantics, 1 for a shadow-owned operation, and
+ * a negative error for work queued by the unpatched producer.
+ */
+static int
+vpsadminos_sunrpc_tls_claim_work(struct sock_xprt *transport,
+				 struct vpsadminos_sunrpc_tls_work **statep)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+	struct vpsadminos_sunrpc_tls_work *state;
+	bool release_stale = false;
+	int ret = 1;
+
+	registry = READ_ONCE(vpsadminos_sunrpc_tls_registry);
+	if (!registry)
+		return 0;
+
+	spin_lock(&registry->lock);
+	state = klp_shadow_get(transport, VPSADMINOS_SUNRPC_TLS_SHADOW_ID);
+	if (!state) {
+		ret = -ESTALE;
+	} else if (WARN_ON_ONCE(state->registry != registry)) {
+		ret = -EUCLEAN;
+	} else if (READ_ONCE(transport->clnt) != state->clnt) {
+		if (state->owner == VPSADMINOS_SUNRPC_TLS_QUEUED) {
+			list_del_init(&state->node);
+			state->owner = VPSADMINOS_SUNRPC_TLS_WORKER;
+			registry->inflight++;
+			release_stale = true;
+		}
+		ret = -ESTALE;
+	} else if (state->owner == VPSADMINOS_SUNRPC_TLS_QUEUED) {
+		list_del_init(&state->node);
+		state->owner = VPSADMINOS_SUNRPC_TLS_WORKER;
+		registry->inflight++;
+	} else if (state->owner == VPSADMINOS_SUNRPC_TLS_CALLBACK) {
+		ret = -ECANCELED;
+	} else {
+		WARN_ON_ONCE(1);
+		ret = -EUCLEAN;
+	}
+	spin_unlock(&registry->lock);
+
+	if (release_stale)
+		vpsadminos_sunrpc_tls_release_work(state);
+	if (ret > 0)
+		*statep = state;
+	return ret;
+}
+
+static int
+vpsadminos_sunrpc_tls_queue_work(struct sock_xprt *transport,
+				 struct rpc_clnt *clnt,
+				 unsigned long delay)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+	struct vpsadminos_sunrpc_tls_work *state;
+	bool queued;
+	int ret = 0;
+
+	rpc_hold_client(clnt);
+	registry = READ_ONCE(vpsadminos_sunrpc_tls_registry);
+	if (!registry) {
+		WRITE_ONCE(transport->clnt, clnt);
+		queued = queue_delayed_work(xprtiod_workqueue,
+					    &transport->connect_worker, delay);
+		if (WARN_ON_ONCE(!queued)) {
+			WRITE_ONCE(transport->clnt, NULL);
+			ret = -EBUSY;
+			goto out_release;
+		}
+		return 0;
+	}
+
+	state = NULL;
+	spin_lock(&registry->lock);
+	if (registry->gated) {
+		ret = -EAGAIN;
+	} else {
+		state = vpsadminos_sunrpc_tls_alloc_locked(registry, transport,
+							   clnt);
+		if (IS_ERR(state)) {
+			ret = PTR_ERR(state);
+			state = NULL;
+		} else {
+			WRITE_ONCE(transport->clnt, clnt);
+			queued = queue_delayed_work(xprtiod_workqueue,
+						    &transport->connect_worker,
+						    delay);
+			if (WARN_ON_ONCE(!queued)) {
+				list_del_init(&state->node);
+				WRITE_ONCE(transport->clnt, NULL);
+				klp_shadow_free(transport,
+						VPSADMINOS_SUNRPC_TLS_SHADOW_ID,
+						NULL);
+				state = NULL;
+				ret = -EBUSY;
+			}
+		}
+	}
+	spin_unlock(&registry->lock);
+
+	if (!ret)
+		return 0;
+
+out_release:
+	rpc_release_client(clnt);
+	return ret;
+}
+
+static struct vpsadminos_sunrpc_tls_work *
+vpsadminos_sunrpc_tls_take_work(struct vpsadminos_sunrpc_tls_registry *registry,
+				bool only_completed)
+{
+	struct vpsadminos_sunrpc_tls_work *state;
+
+	spin_lock(&registry->lock);
+	list_for_each_entry(state, &registry->queued, node) {
+		if (only_completed &&
+		    READ_ONCE(state->transport->clnt))
+			continue;
+		list_del_init(&state->node);
+		state->owner = VPSADMINOS_SUNRPC_TLS_CALLBACK;
+		spin_unlock(&registry->lock);
+		return state;
+	}
+	spin_unlock(&registry->lock);
+	return NULL;
+}
+
+static void
+vpsadminos_sunrpc_tls_reap_completed(struct vpsadminos_sunrpc_tls_registry *registry)
+{
+	struct vpsadminos_sunrpc_tls_work *state;
+
+	while ((state = vpsadminos_sunrpc_tls_take_work(registry, true)))
+		vpsadminos_sunrpc_cb_release(state);
+}
+
+static void
+vpsadminos_sunrpc_tls_drain(struct vpsadminos_sunrpc_tls_registry *registry)
+{
+	struct vpsadminos_sunrpc_tls_work *state;
+	bool canceled;
+
+	spin_lock(&registry->lock);
+	registry->gated = true;
+	spin_unlock(&registry->lock);
+
+	while ((state = vpsadminos_sunrpc_tls_take_work(registry, false))) {
+		canceled = cancel_delayed_work_sync
+				(&state->transport->connect_worker);
+		if (canceled ||
+		    READ_ONCE(state->transport->clnt) == state->clnt)
+			vpsadminos_sunrpc_tls_fail_connect(state->transport,
+							   -ECANCELED);
+		vpsadminos_sunrpc_cb_release(state);
+	}
+}
+
+int vpsadminos_sunrpc_livepatch_pre_patch(void)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+	struct klp_state *prev_state;
+	bool busy;
+	int ret;
+
+	prev_state = klp_get_prev_state(VPSADMINOS_SUNRPC_TLS_STATE_ID);
+	registry = prev_state ? READ_ONCE(prev_state->data) : NULL;
+	if (registry && READ_ONCE(registry->active))
+		goto publish;
+
+	registry = kzalloc(sizeof(*registry), GFP_KERNEL);
+	if (!registry)
+		return -ENOMEM;
+	spin_lock_init(&registry->lock);
+	INIT_LIST_HEAD(&registry->queued);
+
+publish:
+	WRITE_ONCE(vpsadminos_sunrpc_tls_state.data, registry);
+	WRITE_ONCE(vpsadminos_sunrpc_tls_registry, registry);
+
+	/*
+	 * A compatible active predecessor has already completed its boot-code
+	 * transition and owns the same shadow ABI.  Only a first activation
+	 * needs to interpose the boot producer and capture its published work.
+	 */
+	if (prev_state && READ_ONCE(registry->active))
+		return 0;
+
+	ret = vpsadminos_sunrpc_gates_register(registry);
+	if (ret)
+		goto err_free;
+
+	/*
+	 * xs_connect() has no voluntary scheduling point.  Once the gate is
+	 * installed, an RCU Tasks grace period therefore proves that every
+	 * producer already past +0x5 has either returned after publishing its
+	 * raw client or no longer exists. Queued workers will enter through the
+	 * worker gate and fail closed without reading that pointer. Reject the
+	 * activation only if an old worker is already past the worker gate;
+	 * stop_machine() makes that direct stack test race-free.
+	 */
+	synchronize_rcu_tasks();
+	ret = vpsadminos_sunrpc_validate_worker_stacks();
+	if (!ret)
+		return 0;
+
+	vpsadminos_sunrpc_gates_unregister(registry);
+	vpsadminos_sunrpc_tls_drain(registry);
+	wait_var_event(&registry->inflight,
+		       !READ_ONCE(registry->inflight));
+	spin_lock(&registry->lock);
+	busy = !list_empty(&registry->queued) || registry->inflight;
+	WARN_ON_ONCE(busy);
+	spin_unlock(&registry->lock);
+	if (busy)
+		goto err_clear;
+err_free:
+	kfree(registry);
+err_clear:
+	WRITE_ONCE(vpsadminos_sunrpc_tls_state.data, NULL);
+	WRITE_ONCE(vpsadminos_sunrpc_tls_registry, NULL);
+	return ret;
+}
+
+void vpsadminos_sunrpc_livepatch_post_patch(void)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+	struct klp_state *prev_state;
+
+	registry = READ_ONCE(vpsadminos_sunrpc_tls_registry);
+	if (WARN_ON_ONCE(!registry))
+		return;
+
+	vpsadminos_sunrpc_gates_unregister(registry);
+	vpsadminos_sunrpc_tls_reap_completed(registry);
+
+	spin_lock(&registry->lock);
+	registry->active = true;
+	registry->gated = false;
+	spin_unlock(&registry->lock);
+
+	prev_state = klp_get_prev_state(VPSADMINOS_SUNRPC_TLS_STATE_ID);
+	if (prev_state && READ_ONCE(prev_state->data) == registry)
+		WRITE_ONCE(prev_state->data, NULL);
+}
+
+void vpsadminos_sunrpc_livepatch_pre_unpatch(void)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+
+	registry = READ_ONCE(vpsadminos_sunrpc_tls_registry);
+	if (registry)
+		vpsadminos_sunrpc_tls_drain(registry);
+}
+
+void vpsadminos_sunrpc_livepatch_post_unpatch(void)
+{
+	struct vpsadminos_sunrpc_tls_registry *registry;
+	struct klp_state *prev_state;
+	bool busy;
+
+	registry = READ_ONCE(vpsadminos_sunrpc_tls_registry);
+	if (!registry)
+		return;
+
+	vpsadminos_sunrpc_gates_unregister(registry);
+	prev_state = klp_get_prev_state(VPSADMINOS_SUNRPC_TLS_STATE_ID);
+	if (prev_state && READ_ONCE(prev_state->data) == registry &&
+	    READ_ONCE(registry->active)) {
+		WRITE_ONCE(vpsadminos_sunrpc_tls_state.data, NULL);
+		WRITE_ONCE(vpsadminos_sunrpc_tls_registry, NULL);
+		return;
+	}
+
+	vpsadminos_sunrpc_tls_drain(registry);
+	spin_lock(&registry->lock);
+	registry->active = false;
+	busy = !list_empty(&registry->queued) || registry->inflight;
+	WARN_ON_ONCE(busy);
+	spin_unlock(&registry->lock);
+
+	WRITE_ONCE(vpsadminos_sunrpc_tls_state.data, NULL);
+	WRITE_ONCE(vpsadminos_sunrpc_tls_registry, NULL);
+	if (!busy)
+		kfree(registry);
+}
+#endif
+
 /**
  * xs_tcp_tls_setup_socket - establish a TLS session on a TCP socket
  * @work: queued work item
@@ -2685,29 +3465,44 @@ static void xs_tcp_tls_setup_socket(struct work_struct *work)
 {
 	struct sock_xprt *upper_transport =
 		container_of(work, struct sock_xprt, connect_worker.work);
-	struct rpc_clnt *upper_clnt = upper_transport->clnt;
 	struct rpc_xprt *upper_xprt = &upper_transport->xprt;
-	struct rpc_create_args args = {
-		.net		= upper_xprt->xprt_net,
-		.protocol	= upper_xprt->prot,
-		.address	= (struct sockaddr *)&upper_xprt->addr,
-		.addrsize	= upper_xprt->addrlen,
-		.timeout	= upper_clnt->cl_timeout,
-		.servername	= upper_xprt->servername,
-		.program	= upper_clnt->cl_program,
-		.prognumber	= upper_clnt->cl_prog,
-		.version	= upper_clnt->cl_vers,
-		.authflavor	= RPC_AUTH_TLS,
-		.cred		= upper_clnt->cl_cred,
-		.xprtsec	= {
-			.policy		= RPC_XPRTSEC_NONE,
-		},
-		.stats		= upper_clnt->cl_stats,
-	};
+	struct rpc_create_args args = { 0 };
+	struct rpc_clnt *upper_clnt;
 	unsigned int pflags = current->flags;
 	struct rpc_clnt *lower_clnt;
 	struct rpc_xprt *lower_xprt;
+#ifdef CONFIG_LIVEPATCH
+	struct vpsadminos_sunrpc_tls_work *livepatch_state = NULL;
+	int livepatch_work;
+#endif
 	int status;
+
+#ifdef CONFIG_LIVEPATCH
+	livepatch_work = vpsadminos_sunrpc_tls_claim_work(upper_transport,
+							  &livepatch_state);
+	if (livepatch_work < 0) {
+		vpsadminos_sunrpc_tls_fail_connect(upper_transport, -EAGAIN);
+		return;
+	}
+	if (livepatch_state)
+		upper_clnt = livepatch_state->clnt;
+	else
+#endif
+		upper_clnt = READ_ONCE(upper_transport->clnt);
+
+	args.net = upper_xprt->xprt_net;
+	args.protocol = upper_xprt->prot;
+	args.address = (struct sockaddr *)&upper_xprt->addr;
+	args.addrsize = upper_xprt->addrlen;
+	args.timeout = upper_clnt->cl_timeout;
+	args.servername = upper_xprt->servername;
+	args.program = upper_clnt->cl_program;
+	args.prognumber = upper_clnt->cl_prog;
+	args.version = upper_clnt->cl_vers;
+	args.authflavor = RPC_AUTH_TLS;
+	args.cred = upper_clnt->cl_cred;
+	args.xprtsec.policy = RPC_XPRTSEC_NONE;
+	args.stats = upper_clnt->cl_stats;
 
 	if (atomic_read(&upper_xprt->swapper))
 		current->flags |= PF_MEMALLOC;
@@ -2766,8 +3561,17 @@ static void xs_tcp_tls_setup_socket(struct work_struct *work)
 
 out_unlock:
 	current_restore_flags(pflags, PF_MEMALLOC);
-	upper_transport->clnt = NULL;
-	rpc_release_client(upper_clnt);
+	WRITE_ONCE(upper_transport->clnt, NULL);
+#ifdef CONFIG_LIVEPATCH
+	if (livepatch_state) {
+		if (livepatch_state->owner ==
+		    VPSADMINOS_SUNRPC_TLS_WORKER)
+			vpsadminos_sunrpc_tls_release_work(livepatch_state);
+		upper_clnt = NULL;
+	}
+#endif
+	if (upper_clnt)
+		rpc_release_client(upper_clnt);
 	xprt_unlock_connect(upper_xprt, upper_transport);
 	return;
 
@@ -2802,6 +3606,9 @@ static void xs_connect(struct rpc_xprt *xprt, struct rpc_task *task)
 {
 	struct sock_xprt *transport = container_of(xprt, struct sock_xprt, xprt);
 	unsigned long delay = 0;
+#ifdef CONFIG_LIVEPATCH
+	int status;
+#endif
 
 	WARN_ON_ONCE(!xprt_lock_connect(xprt, task, transport));
 
@@ -2821,8 +3628,17 @@ static void xs_connect(struct rpc_xprt *xprt, struct rpc_task *task)
 	 * cl_xprt and prevent xprt destruction.
 	 */
 	if (xprt->xprtsec.policy != RPC_XPRTSEC_NONE) {
+#ifdef CONFIG_LIVEPATCH
+		status = vpsadminos_sunrpc_tls_queue_work(transport,
+							  task->tk_client,
+							  delay);
+		if (status)
+			vpsadminos_sunrpc_tls_fail_connect(transport, status);
+		return;
+#else
 		rpc_hold_client(task->tk_client);
 		transport->clnt = task->tk_client;
+#endif
 	}
 	queue_delayed_work(xprtiod_workqueue,
 			&transport->connect_worker,
@@ -3777,3 +4593,7 @@ module_param_named(tcp_max_slot_table_entries, xprt_max_tcp_slot_table_entries,
 		   max_slot_table_size, 0644);
 module_param_named(udp_slot_table_entries, xprt_udp_slot_table_entries,
 		   slot_table_size, 0644);
+
+#ifdef CONFIG_LIVEPATCH
+KPATCH_IGNORE_FUNCTION(xs_setup_xprt)
+#endif

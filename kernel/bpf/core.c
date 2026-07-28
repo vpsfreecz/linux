@@ -929,19 +929,30 @@ struct vpsadminos_pre_unpatch_callback {
 	char *objname;
 };
 
+struct vpsadminos_post_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
 /*
  * Kpatch accepts only one callback of each type for a target object.  Keep all
  * vmlinux transition work in these coordinators.
  */
 static int vpsadminos_livepatch_pre_patch(struct klp_object *obj)
 {
+	int ret;
+
 	(void)obj;
-	return vpsadminos_xfrm_livepatch_pre_patch();
+	ret = vpsadminos_xfrm_livepatch_pre_patch();
+	if (ret)
+		return ret;
+	return vpsadminos_sunrpc_livepatch_pre_patch();
 }
 
 static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
 {
 	(void)obj;
+	vpsadminos_sunrpc_livepatch_post_patch();
 	vpsadminos_xfrm_livepatch_post_patch();
 	vpsadminos_bpf_jit_ibpb();
 	vpsadminos_livepatch_flush_tlb_all();
@@ -950,7 +961,14 @@ static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
 static void vpsadminos_livepatch_pre_unpatch(struct klp_object *obj)
 {
 	(void)obj;
+	vpsadminos_sunrpc_livepatch_pre_unpatch();
 	vpsadminos_xfrm_livepatch_pre_unpatch();
+}
+
+static void vpsadminos_livepatch_post_unpatch(struct klp_object *obj)
+{
+	(void)obj;
+	vpsadminos_sunrpc_livepatch_post_unpatch();
 }
 
 static struct vpsadminos_pre_patch_callback vpsadminos_pre_patch_data
@@ -968,6 +986,12 @@ __section(".kpatch.callbacks.post_patch") __used = {
 static struct vpsadminos_pre_unpatch_callback vpsadminos_pre_unpatch_data
 __section(".kpatch.callbacks.pre_unpatch") __used = {
 	.fn = vpsadminos_livepatch_pre_unpatch,
+	.objname = NULL,
+};
+
+static struct vpsadminos_post_unpatch_callback vpsadminos_post_unpatch_data
+__section(".kpatch.callbacks.post_unpatch") __used = {
+	.fn = vpsadminos_livepatch_post_unpatch,
 	.objname = NULL,
 };
 #endif
