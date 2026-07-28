@@ -32,7 +32,12 @@
 #include <linux/cgroup-defs.h>
 #include <linux/rhashtable.h>
 #include <linux/jhash.h>
+#ifdef CONFIG_LIVEPATCH
+#include <linux/livepatch.h>
+#include <linux/rtnetlink.h>
+#endif
 #include <net/gso.h>
+#include <net/net_namespace.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
 #include <net/netfilter/nf_queue.h>
@@ -1237,6 +1242,9 @@ dev_cmp(struct nf_queue_entry *entry, unsigned long ifindex)
 {
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
 	int physinif, physoutif;
+#ifdef CONFIG_LIVEPATCH
+	struct net_device **bridge_dev;
+#endif
 
 	physinif = nf_bridge_get_physinif(entry->skb);
 	physoutif = nf_bridge_get_physoutif(entry->skb);
@@ -1244,8 +1252,15 @@ dev_cmp(struct nf_queue_entry *entry, unsigned long ifindex)
 	if (physinif == ifindex || physoutif == ifindex)
 		return 1;
 
+#ifdef CONFIG_LIVEPATCH
+	bridge_dev = klp_shadow_get(entry,
+				    VPSADMINOS_NFQUEUE_BRIDGE_SHADOW_ID);
+	if (bridge_dev && (*bridge_dev)->ifindex == ifindex)
+		return 1;
+#else
 	if (entry->bridge_dev && entry->bridge_dev->ifindex == ifindex)
 		return 1;
+#endif
 #endif
 	if (entry->skb_dev && entry->skb_dev->ifindex == ifindex)
 		return 1;
@@ -1759,6 +1774,145 @@ static const struct nfnetlink_subsystem nfqnl_subsys = {
 	.cb_count	= NFQNL_MSG_MAX,
 	.cb		= nfqnl_cb,
 };
+
+#ifdef CONFIG_LIVEPATCH
+struct vpsadminos_nfqueue_pre_patch_callback {
+	int (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nfqueue_post_patch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nfqueue_pre_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nfqueue_post_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+static bool vpsadminos_nfqueue_transition_quiesced;
+
+static void vpsadminos_nfqueue_drain_all(void)
+{
+	struct net *net;
+
+	rcu_read_lock();
+	for_each_net_rcu(net)
+		nfqnl_nf_hook_drop(net);
+	rcu_read_unlock();
+}
+
+static int
+vpsadminos_nfqueue_livepatch_quiesce(struct klp_object *obj)
+{
+	int ret = -EBUSY;
+
+	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
+		return 0;
+	if (WARN_ON_ONCE(vpsadminos_nfqueue_transition_quiesced))
+		return -EBUSY;
+
+	if (!down_write_trylock(&pernet_ops_rwsem))
+		return -EBUSY;
+	if (!rtnl_trylock())
+		goto out_unlock_pernet;
+
+	ret = vpsadminos_nfnl_try_unregister(&nfqnl_subsys);
+	if (ret)
+		goto out_unlock_rtnl;
+
+	nf_unregister_queue_handler();
+	synchronize_net();
+	vpsadminos_nfqueue_drain_all();
+	rcu_barrier();
+	flush_workqueue(nfq_cleanup_wq);
+
+	WRITE_ONCE(vpsadminos_nfqueue_transition_quiesced, true);
+	rtnl_unlock();
+	up_write(&pernet_ops_rwsem);
+	return 0;
+
+out_unlock_rtnl:
+	rtnl_unlock();
+out_unlock_pernet:
+	up_write(&pernet_ops_rwsem);
+	return ret;
+}
+
+static void
+vpsadminos_nfqueue_livepatch_quiesce_blocking(struct klp_object *obj)
+{
+	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
+		return;
+	if (WARN_ON_ONCE(vpsadminos_nfqueue_transition_quiesced))
+		return;
+
+	down_write(&pernet_ops_rwsem);
+	rtnl_lock();
+	nfnetlink_subsys_unregister(&nfqnl_subsys);
+	nf_unregister_queue_handler();
+	synchronize_net();
+	vpsadminos_nfqueue_drain_all();
+	rcu_barrier();
+	flush_workqueue(nfq_cleanup_wq);
+
+	WRITE_ONCE(vpsadminos_nfqueue_transition_quiesced, true);
+	rtnl_unlock();
+	up_write(&pernet_ops_rwsem);
+}
+
+static void
+vpsadminos_nfqueue_livepatch_restore(struct klp_object *obj)
+{
+	int ret;
+
+	if (!READ_ONCE(vpsadminos_nfqueue_transition_quiesced))
+		return;
+
+	ret = nfnetlink_subsys_register(&nfqnl_subsys);
+	if (ret) {
+		pr_err("livepatch failed to restore NFNETLINK_QUEUE: %d\n",
+		       ret);
+	} else {
+		nf_register_queue_handler(&nfqh);
+	}
+	WRITE_ONCE(vpsadminos_nfqueue_transition_quiesced, false);
+}
+
+static struct vpsadminos_nfqueue_pre_patch_callback
+vpsadminos_nfqueue_pre_patch_data
+__section(".kpatch.callbacks.pre_patch") __used = {
+	.fn = vpsadminos_nfqueue_livepatch_quiesce,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nfqueue_post_patch_callback
+vpsadminos_nfqueue_post_patch_data
+__section(".kpatch.callbacks.post_patch") __used = {
+	.fn = vpsadminos_nfqueue_livepatch_restore,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nfqueue_pre_unpatch_callback
+vpsadminos_nfqueue_pre_unpatch_data
+__section(".kpatch.callbacks.pre_unpatch") __used = {
+	.fn = vpsadminos_nfqueue_livepatch_quiesce_blocking,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nfqueue_post_unpatch_callback
+vpsadminos_nfqueue_post_unpatch_data
+__section(".kpatch.callbacks.post_unpatch") __used = {
+	.fn = vpsadminos_nfqueue_livepatch_restore,
+	.objname = NULL,
+};
+#endif
 
 #ifdef CONFIG_PROC_FS
 struct iter_state {

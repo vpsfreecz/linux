@@ -15,6 +15,10 @@
 #include <linux/netfilter_bridge.h>
 #include <linux/seq_file.h>
 #include <linux/rcupdate.h>
+#if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
+#include <linux/livepatch.h>
+#include <linux/vpsadminos-livepatch.h>
+#endif
 #include <net/protocol.h>
 #include <net/netfilter/nf_queue.h>
 #include <net/dst.h>
@@ -22,6 +26,40 @@
 #include "nf_internals.h"
 
 static const struct nf_queue_handler __rcu *nf_queue_handler;
+
+#ifdef CONFIG_LIVEPATCH
+#define VPSADMINOS_NFQUEUE_STATE_ID	0x0f02b3341af9ad9aUL
+#define VPSADMINOS_NFQUEUE_STATE_ACTIVE	((void *)1UL)
+
+static struct klp_state vpsadminos_nfqueue_state
+__section(".kpatch.system_states") __used
+__aligned(__alignof__(struct klp_state)) = {
+	.id = VPSADMINOS_NFQUEUE_STATE_ID,
+	.version = 1,
+};
+
+void vpsadminos_nfqueue_livepatch_post_patch(void)
+{
+	struct klp_state *prev_state;
+
+	WRITE_ONCE(vpsadminos_nfqueue_state.data,
+		   VPSADMINOS_NFQUEUE_STATE_ACTIVE);
+	prev_state = klp_get_prev_state(VPSADMINOS_NFQUEUE_STATE_ID);
+	if (prev_state &&
+	    READ_ONCE(prev_state->data) == VPSADMINOS_NFQUEUE_STATE_ACTIVE)
+		WRITE_ONCE(prev_state->data, NULL);
+}
+
+void vpsadminos_nfqueue_livepatch_post_unpatch(void)
+{
+	/*
+	 * A compatible predecessor keeps its own active marker and shadow
+	 * contract.  This patch owns only its marker, so both a reversed
+	 * transition and a clean removal clear the same local field.
+	 */
+	WRITE_ONCE(vpsadminos_nfqueue_state.data, NULL);
+}
+#endif
 
 /*
  * Hook for nfnetlink_queue to register its queue handler.
@@ -58,6 +96,9 @@ static void nf_queue_sock_put(struct sock *sk)
 static void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
 {
 	struct nf_hook_state *state = &entry->state;
+#if IS_ENABLED(CONFIG_BRIDGE_NETFILTER) && defined(CONFIG_LIVEPATCH)
+	struct net_device **bridge_dev;
+#endif
 
 	/* Release those devices we held, or Alexey will kill me. */
 	dev_put(entry->skb_dev);
@@ -67,7 +108,15 @@ static void nf_queue_entry_release_refs(struct nf_queue_entry *entry)
 		nf_queue_sock_put(state->sk);
 
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
+#ifdef CONFIG_LIVEPATCH
+	bridge_dev = klp_shadow_get(entry,
+				    VPSADMINOS_NFQUEUE_BRIDGE_SHADOW_ID);
+	if (bridge_dev)
+		dev_put(*bridge_dev);
+	klp_shadow_free(entry, VPSADMINOS_NFQUEUE_BRIDGE_SHADOW_ID, NULL);
+#else
 	dev_put(entry->bridge_dev);
+#endif
 	dev_put(entry->physin);
 	dev_put(entry->physout);
 #endif
@@ -84,8 +133,10 @@ static void __nf_queue_entry_init_physdevs(struct nf_queue_entry *entry)
 {
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
 	const struct sk_buff *skb = entry->skb;
+#if !defined(CONFIG_LIVEPATCH)
 	struct dst_entry *dst = skb_dst(skb);
 	struct net_device *dev = NULL;
+#endif
 
 	if (nf_bridge_info_exists(skb)) {
 		entry->physin = nf_bridge_get_physindev(skb, entry->state.net);
@@ -95,6 +146,7 @@ static void __nf_queue_entry_init_physdevs(struct nf_queue_entry *entry)
 		entry->physout = NULL;
 	}
 
+#if !defined(CONFIG_LIVEPATCH)
 	if (entry->state.pf == NFPROTO_BRIDGE &&
 	    dst && (dst->flags & DST_FAKE_RTABLE))
 		dev = dst_dev_rcu(dst);
@@ -105,12 +157,39 @@ static void __nf_queue_entry_init_physdevs(struct nf_queue_entry *entry)
 	 */
 	entry->bridge_dev = dev;
 #endif
+#endif
 }
+
+#if IS_ENABLED(CONFIG_BRIDGE_NETFILTER) && defined(CONFIG_LIVEPATCH)
+static struct net_device *
+vpsadminos_nfqueue_bridge_dev(const struct nf_queue_entry *entry)
+{
+	struct dst_entry *dst = skb_dst(entry->skb);
+
+	if (entry->state.pf == NFPROTO_BRIDGE &&
+	    dst && (dst->flags & DST_FAKE_RTABLE))
+		return dst_dev_rcu(dst);
+	return NULL;
+}
+
+static int vpsadminos_nfqueue_bridge_shadow_ctor(void *obj, void *shadow_data,
+						 void *ctor_data)
+{
+	struct net_device **bridge_dev = shadow_data;
+
+	*bridge_dev = ctor_data;
+	return 0;
+}
+#endif
 
 /* Bump dev refs so they don't vanish while packet is out */
 bool nf_queue_entry_get_refs(struct nf_queue_entry *entry)
 {
 	struct nf_hook_state *state = &entry->state;
+#if IS_ENABLED(CONFIG_BRIDGE_NETFILTER) && defined(CONFIG_LIVEPATCH)
+	struct net_device **bridge_shadow;
+	struct net_device *bridge_dev;
+#endif
 
 	if (state->sk && !refcount_inc_not_zero(&state->sk->sk_refcnt))
 		return false;
@@ -120,9 +199,29 @@ bool nf_queue_entry_get_refs(struct nf_queue_entry *entry)
 	dev_hold(state->out);
 
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
+#ifdef CONFIG_LIVEPATCH
+	dev_hold(entry->physin);
+	dev_hold(entry->physout);
+
+	bridge_dev = vpsadminos_nfqueue_bridge_dev(entry);
+	if (bridge_dev) {
+		dev_hold(bridge_dev);
+		bridge_shadow = klp_shadow_alloc
+				(entry, VPSADMINOS_NFQUEUE_BRIDGE_SHADOW_ID,
+				 sizeof(*bridge_shadow), GFP_ATOMIC,
+				 vpsadminos_nfqueue_bridge_shadow_ctor,
+				 bridge_dev);
+		if (!bridge_shadow) {
+			dev_put(bridge_dev);
+			nf_queue_entry_release_refs(entry);
+			return false;
+		}
+	}
+#else
 	dev_hold(entry->bridge_dev);
 	dev_hold(entry->physin);
 	dev_hold(entry->physout);
+#endif
 #endif
 	return true;
 }

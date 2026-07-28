@@ -952,6 +952,7 @@ static int vpsadminos_livepatch_pre_patch(struct klp_object *obj)
 static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
 {
 	(void)obj;
+	vpsadminos_nfqueue_livepatch_post_patch();
 	vpsadminos_sunrpc_livepatch_post_patch();
 	vpsadminos_xfrm_livepatch_post_patch();
 	vpsadminos_bpf_jit_ibpb();
@@ -969,6 +970,7 @@ static void vpsadminos_livepatch_post_unpatch(struct klp_object *obj)
 {
 	(void)obj;
 	vpsadminos_sunrpc_livepatch_post_unpatch();
+	vpsadminos_nfqueue_livepatch_post_unpatch();
 }
 
 static struct vpsadminos_pre_patch_callback vpsadminos_pre_patch_data

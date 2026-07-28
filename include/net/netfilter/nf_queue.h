@@ -18,7 +18,9 @@ struct nf_queue_entry {
 	unsigned int		id;
 	unsigned int		hook_index;	/* index in hook_entries->hook[] */
 #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
+#if !defined(CONFIG_LIVEPATCH)
 	struct net_device	*bridge_dev;
+#endif
 	struct net_device	*physin;
 	struct net_device	*physout;
 #endif
@@ -28,6 +30,10 @@ struct nf_queue_entry {
 
 	/* extra space to store route keys */
 };
+
+#ifdef CONFIG_LIVEPATCH
+#define VPSADMINOS_NFQUEUE_BRIDGE_SHADOW_ID	0xc0318879138399d1UL
+#endif
 
 #define nf_queue_entry_reroute(x) ((void *)x + sizeof(struct nf_queue_entry))
 
