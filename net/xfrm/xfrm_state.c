@@ -27,8 +27,16 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
+#include <linux/vpsadminos-livepatch.h>
+#include <linux/livepatch.h>
+#endif
 
 #include <crypto/aead.h>
+
+#if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
+#include <net/net_namespace.h>
+#endif
 
 #include "xfrm_hash.h"
 
@@ -57,6 +65,31 @@ static inline bool xfrm_state_hold_rcu(struct xfrm_state __rcu *x)
 {
 	return refcount_inc_not_zero(&x->refcnt);
 }
+
+#ifdef CONFIG_LIVEPATCH
+#define VPSADMINOS_XFRM_INPUT_CACHE_STATE_ID	0xddd3d0132920319aUL
+#define VPSADMINOS_XFRM_INPUT_CACHE_RETIRED	((void *)1UL)
+
+static bool vpsadminos_xfrm_input_cache_retired;
+
+static struct klp_state vpsadminos_xfrm_input_cache_state
+__section(".kpatch.system_states") __used
+__aligned(__alignof__(struct klp_state)) = {
+	.id = VPSADMINOS_XFRM_INPUT_CACHE_STATE_ID,
+	.version = 1,
+};
+
+static bool vpsadminos_xfrm_input_cache_is_retired(void)
+{
+	/* Pair with the callback release stores publishing cache state. */
+	return smp_load_acquire(&vpsadminos_xfrm_input_cache_retired);
+}
+#else
+static bool vpsadminos_xfrm_input_cache_is_retired(void)
+{
+	return false;
+}
+#endif
 
 static inline unsigned int xfrm_dst_hash(struct net *net,
 					 const xfrm_address_t *daddr,
@@ -748,7 +781,10 @@ EXPORT_SYMBOL(__xfrm_state_destroy);
 int __xfrm_state_delete(struct xfrm_state *x)
 {
 	struct net *net = xs_net(x);
+	bool input_cache_retired;
 	int err = -ESRCH;
+
+	input_cache_retired = vpsadminos_xfrm_input_cache_is_retired();
 
 	if (x->km.state != XFRM_STATE_DEAD) {
 		x->km.state = XFRM_STATE_DEAD;
@@ -761,7 +797,10 @@ int __xfrm_state_delete(struct xfrm_state *x)
 			hlist_del_init_rcu(&x->byseq);
 		if (!hlist_unhashed(&x->state_cache))
 			hlist_del_rcu(&x->state_cache);
-		if (!hlist_unhashed(&x->state_cache_input))
+		if (input_cache_retired ||
+		    vpsadminos_xfrm_input_cache_is_retired())
+			INIT_HLIST_NODE(&x->state_cache_input);
+		else if (!hlist_unhashed(&x->state_cache_input))
 			hlist_del_rcu(&x->state_cache_input);
 
 		if (!hlist_unhashed(&x->byspi))
@@ -1141,32 +1180,35 @@ struct xfrm_state *xfrm_input_state_lookup(struct net *net, u32 mark,
 					   unsigned short family)
 {
 	struct xfrm_hash_state_ptrs state_ptrs;
-	struct hlist_head *state_cache_input;
+	struct hlist_head *state_cache_input = NULL;
 	struct xfrm_state *x = NULL;
 
 	/* BH is always disabled on the input path. */
 	lockdep_assert_in_softirq();
 
-	state_cache_input = raw_cpu_ptr(net->xfrm.state_cache_input);
+	if (!vpsadminos_xfrm_input_cache_is_retired())
+		state_cache_input = raw_cpu_ptr(net->xfrm.state_cache_input);
 
-	hlist_for_each_entry_rcu(x, state_cache_input, state_cache_input) {
-		if (x->props.family != family ||
-		    x->id.spi       != spi ||
-		    x->id.proto     != proto ||
-		    !xfrm_addr_equal(&x->id.daddr, daddr, family))
-			continue;
+	if (state_cache_input)
+		hlist_for_each_entry_rcu(x, state_cache_input,
+					 state_cache_input) {
+			if (x->props.family != family ||
+			    x->id.spi       != spi ||
+			    x->id.proto     != proto ||
+			    !xfrm_addr_equal(&x->id.daddr, daddr, family))
+				continue;
 
-		if ((mark & x->mark.m) != x->mark.v)
-			continue;
-		if (!xfrm_state_hold_rcu(x))
-			continue;
-		goto out;
-	}
+			if ((mark & x->mark.m) != x->mark.v)
+				continue;
+			if (!xfrm_state_hold_rcu(x))
+				continue;
+			goto out;
+		}
 
 	xfrm_hash_ptrs_get(net, &state_ptrs);
 
 	x = __xfrm_state_lookup(&state_ptrs, mark, daddr, spi, proto, family);
-	if (x) {
+	if (x && state_cache_input) {
 		spin_lock(&net->xfrm.xfrm_state_lock);
 		if (x->km.state != XFRM_STATE_VALID) {
 			/*
@@ -3414,3 +3456,83 @@ void xfrm_audit_state_icvfail(struct xfrm_state *x,
 }
 EXPORT_SYMBOL_GPL(xfrm_audit_state_icvfail);
 #endif /* CONFIG_AUDITSYSCALL */
+
+#ifdef CONFIG_LIVEPATCH
+static void vpsadminos_xfrm_input_cache_reset(bool restore_nodes)
+{
+	struct xfrm_state_walk *walk;
+	struct xfrm_state *state;
+	struct net *net;
+	int cpu;
+
+	down_read(&net_rwsem);
+	for_each_net(net) {
+		spin_lock_bh(&net->xfrm.xfrm_state_lock);
+
+		for_each_possible_cpu(cpu)
+			INIT_HLIST_HEAD(per_cpu_ptr(net->xfrm.state_cache_input,
+						    cpu));
+
+		if (restore_nodes) {
+			/*
+			 * state_all also contains active walk cursors.  They
+			 * use XFRM_STATE_DEAD and are not embedded in an
+			 * xfrm_state.
+			 */
+			list_for_each_entry(walk, &net->xfrm.state_all, all) {
+				if (walk->state == XFRM_STATE_DEAD)
+					continue;
+
+				state = container_of(walk, struct xfrm_state, km);
+				INIT_HLIST_NODE(&state->state_cache_input);
+			}
+		}
+
+		spin_unlock_bh(&net->xfrm.xfrm_state_lock);
+	}
+	up_read(&net_rwsem);
+}
+
+int vpsadminos_xfrm_livepatch_pre_patch(void)
+{
+	struct klp_state *prev_state;
+	bool inherited;
+
+	prev_state = klp_get_prev_state(VPSADMINOS_XFRM_INPUT_CACHE_STATE_ID);
+	inherited = prev_state &&
+		    READ_ONCE(prev_state->data) ==
+		    VPSADMINOS_XFRM_INPUT_CACHE_RETIRED;
+	/* Publish the inherited contract before replacement functions run. */
+	smp_store_release(&vpsadminos_xfrm_input_cache_retired, inherited);
+
+	return 0;
+}
+
+void vpsadminos_xfrm_livepatch_post_patch(void)
+{
+	/* Stop new cache users before draining readers which saw false. */
+	smp_store_release(&vpsadminos_xfrm_input_cache_retired, true);
+
+	/*
+	 * Input lookups run in network RCU read-side sections.  Drain every
+	 * lookup which observed the non-retired state before abandoning the
+	 * cache heads.
+	 */
+	synchronize_net();
+	vpsadminos_xfrm_input_cache_reset(false);
+	WRITE_ONCE(vpsadminos_xfrm_input_cache_state.data,
+		   VPSADMINOS_XFRM_INPUT_CACHE_RETIRED);
+}
+
+void vpsadminos_xfrm_livepatch_pre_unpatch(void)
+{
+	/*
+	 * Lookups still bypass the cache here.  Repair the empty heads and
+	 * every live node before either replacement or boot code may use it.
+	 */
+	vpsadminos_xfrm_input_cache_reset(true);
+	/* Publish the repaired heads and nodes before allowing cache use. */
+	smp_store_release(&vpsadminos_xfrm_input_cache_retired, false);
+	WRITE_ONCE(vpsadminos_xfrm_input_cache_state.data, NULL);
+}
+#endif

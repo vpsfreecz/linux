@@ -38,6 +38,7 @@
 #include <linux/bpf_mem_alloc.h>
 #include <linux/memcontrol.h>
 #include <linux/execmem.h>
+#include <linux/vpsadminos-livepatch.h>
 
 #include <asm/barrier.h>
 #include <linux/unaligned.h>
@@ -913,25 +914,60 @@ static inline void vpsadminos_livepatch_flush_tlb_all(void)
 
 struct klp_object;
 
+struct vpsadminos_pre_patch_callback {
+	int (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
 struct vpsadminos_post_patch_callback {
 	void (*fn)(struct klp_object *obj);
 	char *objname;
 };
 
+struct vpsadminos_pre_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
 /*
- * Kpatch accepts only one callback of each type for a target object.  Keep
- * all vmlinux post-patch transition work in this coordinator.
+ * Kpatch accepts only one callback of each type for a target object.  Keep all
+ * vmlinux transition work in these coordinators.
  */
+static int vpsadminos_livepatch_pre_patch(struct klp_object *obj)
+{
+	(void)obj;
+	return vpsadminos_xfrm_livepatch_pre_patch();
+}
+
 static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
 {
 	(void)obj;
+	vpsadminos_xfrm_livepatch_post_patch();
 	vpsadminos_bpf_jit_ibpb();
 	vpsadminos_livepatch_flush_tlb_all();
 }
 
+static void vpsadminos_livepatch_pre_unpatch(struct klp_object *obj)
+{
+	(void)obj;
+	vpsadminos_xfrm_livepatch_pre_unpatch();
+}
+
+static struct vpsadminos_pre_patch_callback vpsadminos_pre_patch_data
+__section(".kpatch.callbacks.pre_patch") __used = {
+	.fn = vpsadminos_livepatch_pre_patch,
+	.objname = NULL,
+};
+
 static struct vpsadminos_post_patch_callback vpsadminos_post_patch_data
 __section(".kpatch.callbacks.post_patch") __used = {
 	.fn = vpsadminos_livepatch_post_patch,
+	.objname = NULL,
+};
+
+static struct vpsadminos_pre_unpatch_callback vpsadminos_pre_unpatch_data
+__section(".kpatch.callbacks.pre_unpatch") __used = {
+	.fn = vpsadminos_livepatch_pre_unpatch,
 	.objname = NULL,
 };
 #endif
