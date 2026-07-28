@@ -38,7 +38,6 @@
 #include <linux/bpf_mem_alloc.h>
 #include <linux/memcontrol.h>
 #include <linux/execmem.h>
-#include <linux/static_call.h>
 
 #include <asm/barrier.h>
 #include <linux/unaligned.h>
@@ -893,14 +892,38 @@ void bpf_jit_fill_hole_with_zero(void *area, unsigned int size)
 	memset(area, 0, size);
 }
 
-DEFINE_STATIC_CALL_NULL(bpf_arch_pred_flush, bpf_arch_pred_flush);
+#if defined(CONFIG_X86) && defined(CONFIG_BPF_JIT)
+void vpsadminos_bpf_jit_ibpb(void);
+#else
+static inline void vpsadminos_bpf_jit_ibpb(void)
+{
+}
+#endif
+
+#ifdef CONFIG_LIVEPATCH
+struct klp_object;
+
+struct vpsadminos_post_patch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
 
 /*
- * Enabled once bpf_arch_pred_flush points at a real flush routine. Lets the
- * pack allocator test "is a predictor flush wired up at all" with a cheap
- * static branch instead of repeatedly querying the static call target.
+ * Kpatch accepts only one callback of each type for a target object.  Keep
+ * all vmlinux post-patch transition work in this coordinator.
  */
-DEFINE_STATIC_KEY_FALSE(bpf_pred_flush_enabled);
+static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
+{
+	(void)obj;
+	vpsadminos_bpf_jit_ibpb();
+}
+
+static struct vpsadminos_post_patch_callback vpsadminos_post_patch_data
+__section(".kpatch.callbacks.post_patch") __used = {
+	.fn = vpsadminos_livepatch_post_patch,
+	.objname = NULL,
+};
+#endif
 
 #define BPF_PROG_SIZE_TO_NBITS(size)	(round_up(size, BPF_PROG_CHUNK_SIZE) / BPF_PROG_CHUNK_SIZE)
 
@@ -961,14 +984,6 @@ void *bpf_prog_pack_alloc(u32 size, bpf_jit_fill_hole_t bpf_fill_ill_insns)
 
 	mutex_lock(&pack_mutex);
 	if (size > BPF_PROG_PACK_SIZE) {
-		/*
-		 * Allocations larger than a pack get their own pages, and
-		 * predictors are not flushed for such allocation. This is only
-		 * safe because cBPF programs (the unprivileged attack surface)
-		 * are bounded well below a pack size.
-		 */
-		if (static_branch_unlikely(&bpf_pred_flush_enabled))
-			pr_warn_once("BPF: Predictors not flushed for allocations greater than BPF_PROG_PACK_SIZE\n");
 		size = round_up(size, PAGE_SIZE);
 		ptr = bpf_jit_alloc_exec(size);
 		if (ptr) {
@@ -999,7 +1014,7 @@ void *bpf_prog_pack_alloc(u32 size, bpf_jit_fill_hole_t bpf_fill_ill_insns)
 	pos = 0;
 
 found_free_area:
-	static_call_cond(bpf_arch_pred_flush)();
+	vpsadminos_bpf_jit_ibpb();
 	bitmap_set(pack->bitmap, pos, nbits);
 	ptr = (void *)(pack->ptr) + (pos << BPF_PROG_CHUNK_SHIFT);
 
