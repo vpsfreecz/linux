@@ -66,6 +66,18 @@ static struct fuse_req *fuse_request_alloc(struct fuse_mount *fm, gfp_t flags)
 
 static void fuse_request_free(struct fuse_req *req)
 {
+	struct fuse_iqueue *fiq = &req->fm->fc->iq;
+
+	/*
+	 * A request resent before a livepatch transition can still have its
+	 * interrupt entry linked after the old pending-removal path drops the
+	 * queue reference.  Serialize with interrupt dequeue before freeing it.
+	 */
+	if (test_bit(FR_INTERRUPTED, &req->flags)) {
+		spin_lock(&fiq->lock);
+		list_del_init(&req->intr_entry);
+		spin_unlock(&fiq->lock);
+	}
 	WARN_ON(!list_empty(&req->intr_entry));
 	kmem_cache_free(fuse_req_cachep, req);
 }
