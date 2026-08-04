@@ -338,6 +338,12 @@ static __net_init void preinit_net(struct net *net, struct user_namespace *user_
 	preinit_net_sysctl(net);
 }
 
+/* Make setup_net() and cleanup_net() livepatch transition anchors. */
+static noinline void vpsadminos_netns_lifecycle_barrier(void)
+{
+	barrier();
+}
+
 /*
  * setup_net runs the initializers for the network namespace object.
  */
@@ -348,6 +354,8 @@ static __net_init int setup_net(struct net *net)
 	LIST_HEAD(net_exit_list);
 	LIST_HEAD(dev_kill_list);
 	int error = 0;
+
+	vpsadminos_netns_lifecycle_barrier();
 
 	preempt_disable();
 	net->net_cookie = gen_cookie_next(&net_cookie);
@@ -590,6 +598,8 @@ static void cleanup_net(struct work_struct *work)
 	struct llist_node *net_kill_list;
 	LIST_HEAD(net_exit_list);
 	LIST_HEAD(dev_kill_list);
+
+	vpsadminos_netns_lifecycle_barrier();
 
 	/* Atomically snapshot the list of namespaces to cleanup */
 	net_kill_list = llist_del_all(&cleanup_list);
