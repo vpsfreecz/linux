@@ -788,10 +788,9 @@ static int ceph_x_update_authorizer(
 		ret = ceph_x_build_authorizer(ac, th, au);
 		if (ret)
 			return ret;
-
-		auth->authorizer_buf = au->buf->vec.iov_base;
-		auth->authorizer_buf_len = au->buf->vec.iov_len;
 	}
+	auth->authorizer_buf = au->buf->vec.iov_base;
+	auth->authorizer_buf_len = au->buf->vec.iov_len;
 	return 0;
 }
 

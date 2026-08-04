@@ -412,6 +412,38 @@ static int prepare_write_connect(struct ceph_connection *con)
 	return 0;
 }
 
+static int validate_connect_authorizer(struct ceph_connection *con)
+{
+	struct ceph_auth_handshake *auth;
+	struct kvec *auth_kvec;
+	size_t auth_len;
+	int auth_proto;
+
+	if (con->state != CEPH_CON_S_V1_CONNECT_MSG || !con->v1.auth)
+		return 0;
+	if (!con->ops->get_authorizer || !con->v1.out_kvec_left)
+		return -ESTALE;
+
+	auth = con->ops->get_authorizer(con, &auth_proto, 0);
+	if (IS_ERR(auth))
+		return PTR_ERR(auth);
+	if (auth != con->v1.auth ||
+	    le32_to_cpu(con->v1.out_connect.authorizer_protocol) != auth_proto)
+		return -ESTALE;
+
+	auth_len = auth->authorizer_buf_len;
+	if (le32_to_cpu(con->v1.out_connect.authorizer_len) != auth_len)
+		return -ESTALE;
+
+	auth_kvec = &con->v1.out_kvec_cur[con->v1.out_kvec_left - 1];
+	if (auth_kvec->iov_len > auth_len ||
+	    auth_kvec->iov_base != (char *)auth->authorizer_buf +
+				   auth_len - auth_kvec->iov_len)
+		return -ESTALE;
+
+	return 0;
+}
+
 /*
  * write as much of pending kvecs to the socket as we can.
  *  1 -> done
@@ -421,6 +453,10 @@ static int prepare_write_connect(struct ceph_connection *con)
 static int write_partial_kvec(struct ceph_connection *con)
 {
 	int ret;
+
+	ret = validate_connect_authorizer(con);
+	if (ret)
+		return ret;
 
 	dout("write_partial_kvec %p %d left\n", con, con->v1.out_kvec_bytes);
 	while (con->v1.out_kvec_bytes > 0) {
