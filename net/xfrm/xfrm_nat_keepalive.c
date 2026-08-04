@@ -9,13 +9,9 @@
 #include <net/ip6_checksum.h>
 #include <net/xfrm.h>
 
-static DEFINE_PER_CPU(struct sock_bh_locked, nat_keepalive_sk_ipv4) = {
-	.bh_lock = INIT_LOCAL_LOCK(bh_lock),
-};
+static DEFINE_PER_CPU(struct sock *, nat_keepalive_sk_ipv4);
 #if IS_ENABLED(CONFIG_IPV6)
-static DEFINE_PER_CPU(struct sock_bh_locked, nat_keepalive_sk_ipv6) = {
-	.bh_lock = INIT_LOCAL_LOCK(bh_lock),
-};
+static DEFINE_PER_CPU(struct sock *, nat_keepalive_sk_ipv6);
 #endif
 
 struct nat_keepalive {
@@ -62,12 +58,10 @@ static int nat_keepalive_send_ipv4(struct sk_buff *skb,
 
 	skb_dst_set(skb, &rt->dst);
 
-	local_lock_nested_bh(&nat_keepalive_sk_ipv4.bh_lock);
-	sk = this_cpu_read(nat_keepalive_sk_ipv4.sock);
+	sk = *this_cpu_ptr(&nat_keepalive_sk_ipv4);
 	sock_net_set(sk, net);
 	err = ip_build_and_send_pkt(skb, sk, fl4.saddr, fl4.daddr, NULL, tos);
 	sock_net_set(sk, &init_net);
-	local_unlock_nested_bh(&nat_keepalive_sk_ipv4.bh_lock);
 	return err;
 }
 
@@ -97,12 +91,10 @@ static int nat_keepalive_send_ipv6(struct sk_buff *skb,
 	fl6.fl6_sport = ka->encap_sport;
 	fl6.fl6_dport = ka->encap_dport;
 
-	local_lock_nested_bh(&nat_keepalive_sk_ipv6.bh_lock);
-	sk = this_cpu_read(nat_keepalive_sk_ipv6.sock);
+	sk = *this_cpu_ptr(&nat_keepalive_sk_ipv6);
 	sock_net_set(sk, net);
 	dst = ipv6_stub->ipv6_dst_lookup_flow(net, sk, &fl6, NULL);
 	if (IS_ERR(dst)) {
-		local_unlock_nested_bh(&nat_keepalive_sk_ipv6.bh_lock);
 		kfree_skb(skb);
 		return PTR_ERR(dst);
 	}
@@ -110,7 +102,6 @@ static int nat_keepalive_send_ipv6(struct sk_buff *skb,
 	skb_dst_set(skb, dst);
 	err = ipv6_stub->ip6_xmit(sk, skb, &fl6, skb->mark, NULL, 0, 0);
 	sock_net_set(sk, &init_net);
-	local_unlock_nested_bh(&nat_keepalive_sk_ipv6.bh_lock);
 	return err;
 }
 #endif
@@ -215,7 +206,7 @@ static void nat_keepalive_work(struct work_struct *work)
 				      (ctx.next_run - ctx.now) * HZ);
 }
 
-static int nat_keepalive_sk_init(struct sock_bh_locked __percpu *socks,
+static int nat_keepalive_sk_init(struct sock * __percpu *socks,
 				 unsigned short family)
 {
 	struct sock *sk;
@@ -227,22 +218,22 @@ static int nat_keepalive_sk_init(struct sock_bh_locked __percpu *socks,
 		if (err < 0)
 			goto err;
 
-		per_cpu_ptr(socks, i)->sock = sk;
+		*per_cpu_ptr(socks, i) = sk;
 	}
 
 	return 0;
 err:
 	for_each_possible_cpu(i)
-		inet_ctl_sock_destroy(per_cpu_ptr(socks, i)->sock);
+		inet_ctl_sock_destroy(*per_cpu_ptr(socks, i));
 	return err;
 }
 
-static void nat_keepalive_sk_fini(struct sock_bh_locked __percpu *socks)
+static void nat_keepalive_sk_fini(struct sock * __percpu *socks)
 {
 	int i;
 
 	for_each_possible_cpu(i)
-		inet_ctl_sock_destroy(per_cpu_ptr(socks, i)->sock);
+		inet_ctl_sock_destroy(*per_cpu_ptr(socks, i));
 }
 
 void xfrm_nat_keepalive_state_updated(struct xfrm_state *x)
