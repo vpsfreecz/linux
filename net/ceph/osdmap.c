@@ -10,6 +10,9 @@
 #include <linux/ceph/decode.h>
 #include <linux/crush/hash.h>
 #include <linux/crush/mapper.h>
+#ifdef CONFIG_LIVEPATCH
+#include "kpatch-macros.h"
+#endif
 
 static __printf(2, 3)
 void osdmap_info(const struct ceph_osdmap *map, const char *fmt, ...)
@@ -3113,3 +3116,8 @@ int ceph_get_crush_locality(struct ceph_osdmap *osdmap, int id,
 			return type_id;
 	}
 }
+
+#ifdef CONFIG_LIVEPATCH
+KPATCH_IGNORE_FUNCTION(ceph_osds_copy)
+KPATCH_IGNORE_FUNCTION(ceph_pg_to_up_acting_osds)
+#endif
