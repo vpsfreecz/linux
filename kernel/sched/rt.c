@@ -1861,7 +1861,7 @@ static struct task_struct *pick_next_pushable_task(struct rq *rq)
 
 	plist_for_each_entry(i, head, pushable_tasks) {
 		/* make sure task isn't on_cpu (possible with proxy-exec) */
-		if (!task_on_cpu(rq, i)) {
+		if (!task_on_cpu(rq, i) && !task_current_donor(rq, i)) {
 			p = i;
 			break;
 		}
