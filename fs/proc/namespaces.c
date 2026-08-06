@@ -59,6 +59,15 @@ static const char *proc_ns_get_link(struct dentry *dentry,
 	if (!dentry)
 		return ERR_PTR(-ECHILD);
 
+	switch (proc_kernfs_filter_inode_decide(inode, MAY_READ)) {
+	case VPSA_KERNFS_FILTER_DECISION_HIDE:
+		return ERR_PTR(-ENOENT);
+	case VPSA_KERNFS_FILTER_DECISION_DENY:
+		return ERR_PTR(-EACCES);
+	default:
+		break;
+	}
+
 	task = get_proc_task(inode);
 	if (!task)
 		return ERR_PTR(-EACCES);
@@ -100,6 +109,15 @@ static int proc_ns_readlink(struct dentry *dentry, char __user *buffer, int bufl
 	char name[50];
 	int res = -EACCES;
 
+	switch (proc_kernfs_filter_inode_decide(inode, MAY_READ)) {
+	case VPSA_KERNFS_FILTER_DECISION_HIDE:
+		return -ENOENT;
+	case VPSA_KERNFS_FILTER_DECISION_DENY:
+		return -EACCES;
+	default:
+		break;
+	}
+
 	task = get_proc_task(inode);
 	if (!task)
 		return res;
@@ -135,12 +153,14 @@ static const struct inode_operations proc_ns_link_inode_operations = {
 	.readlink	= proc_ns_readlink,
 	.get_link	= proc_ns_get_link,
 	.setattr	= proc_nochmod_setattr,
+	.permission	= proc_kernfs_filter_permission,
 };
 
 static struct dentry *proc_ns_instantiate(struct dentry *dentry,
 	struct task_struct *task, const void *ptr)
 {
 	const struct proc_ns_operations *ns_ops = ptr;
+	struct dentry *result;
 	struct inode *inode;
 	struct proc_inode *ei;
 
@@ -153,7 +173,8 @@ static struct dentry *proc_ns_instantiate(struct dentry *dentry,
 	ei->ns_ops = ns_ops;
 	pid_update_inode(task, inode);
 
-	return d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	result = d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	return proc_kernfs_filter_lookup_stamp(result, dentry);
 }
 
 static int proc_ns_dir_readdir(struct file *file, struct dir_context *ctx)
@@ -185,6 +206,8 @@ out:
 
 const struct file_operations proc_ns_dir_operations = {
 	.read		= generic_read_dir,
+	.open		= proc_kernfs_filter_dir_open,
+	.release	= proc_kernfs_filter_dir_release,
 	.iterate_shared	= proc_ns_dir_readdir,
 	.llseek		= generic_file_llseek,
 };
@@ -192,11 +215,17 @@ const struct file_operations proc_ns_dir_operations = {
 static struct dentry *proc_ns_dir_lookup(struct inode *dir,
 				struct dentry *dentry, unsigned int flags)
 {
-	struct task_struct *task = get_proc_task(dir);
+	struct task_struct *task;
 	const struct proc_ns_operations *const *entry, *const *last;
 	unsigned int len = dentry->d_name.len;
 	struct dentry *res = ERR_PTR(-ENOENT);
 
+	if (proc_kernfs_filter_dentry_decide(dentry->d_parent,
+					     &dentry->d_name, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return res;
+
+	task = get_proc_task(dir);
 	if (!task)
 		goto out_no_task;
 
@@ -221,4 +250,5 @@ const struct inode_operations proc_ns_dir_inode_operations = {
 	.lookup		= proc_ns_dir_lookup,
 	.getattr	= pid_getattr,
 	.setattr	= proc_nochmod_setattr,
+	.permission	= proc_kernfs_filter_permission,
 };
