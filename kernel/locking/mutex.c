@@ -210,6 +210,41 @@ __mutex_remove_waiter(struct mutex *lock, struct mutex_waiter *waiter)
 	hung_task_clear_blocker();
 }
 
+static struct mutex_waiter *__mutex_proxy_donor_waiter(struct mutex *lock)
+{
+	struct mutex_waiter *donor_waiter = NULL, *first_waiter = NULL, *waiter;
+	struct task_struct *donor, *handoff_waiter;
+	bool has_ww_ctx = false;
+
+	donor = sched_proxy_exec_current_donor();
+	handoff_waiter = sched_proxy_exec_current_handoff_waiter();
+	if (!donor || !handoff_waiter)
+		return NULL;
+
+	list_for_each_entry(waiter, &lock->wait_list, list) {
+		if (!first_waiter)
+			first_waiter = waiter;
+		if (waiter->ww_ctx)
+			has_ww_ctx = true;
+
+		if (waiter->task == handoff_waiter)
+			donor_waiter = waiter;
+	}
+
+	if (donor_waiter) {
+		/*
+		 * Active wound/wait queues already encode stamp/deadlock
+		 * ordering.  A proxy donor may use the existing first waiter,
+		 * but must not jump ahead of another ww-ordered waiter.
+		 */
+		if (has_ww_ctx && donor_waiter != first_waiter)
+			return NULL;
+		return donor_waiter;
+	}
+
+	return NULL;
+}
+
 /*
  * Give up ownership to a specific task, when @task = NULL, this is equivalent
  * to a regular unlock. Sets PICKUP on a handoff, clears HANDOFF, preserves
@@ -622,6 +657,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 
 	debug_mutex_lock_common(lock, &waiter);
 	waiter.task = current;
+	waiter.ww_ctx = NULL;
 	if (use_ww_ctx)
 		waiter.ww_ctx = ww_ctx;
 
@@ -930,6 +966,9 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 	DEFINE_WAKE_Q(wake_q);
 	unsigned long owner;
 	unsigned long flags;
+	bool proxy_unlock = false;
+	bool proxy_owner_held = false;
+	bool proxy_donor_waiter = false;
 
 	mutex_release(&lock->dep_map, ip);
 
@@ -948,6 +987,19 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 		if (owner & MUTEX_FLAG_HANDOFF)
 			break;
 
+		/*
+		 * A lock owner can be preempted in this loop and later resume as
+		 * a proxy owner after waiters appeared, so sample proxy state
+		 * after each failed owner cmpxchg.
+		 */
+		if (sched_proxy_exec())
+			proxy_unlock = sched_proxy_exec_current_donor();
+
+		if ((owner & MUTEX_FLAG_WAITERS) && proxy_unlock) {
+			proxy_owner_held = true;
+			break;
+		}
+
 		if (atomic_long_try_cmpxchg_release(&lock->owner, &owner, __owner_flags(owner))) {
 			if (owner & MUTEX_FLAG_WAITERS)
 				break;
@@ -958,11 +1010,23 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 
 	raw_spin_lock_irqsave(&lock->wait_lock, flags);
 	debug_mutex_unlock(lock);
+	if (proxy_owner_held)
+		proxy_unlock = sched_proxy_exec_current_donor();
 	if (!list_empty(&lock->wait_list)) {
-		/* get the first entry from the wait-list: */
-		struct mutex_waiter *waiter =
-			list_first_entry(&lock->wait_list,
-					 struct mutex_waiter, list);
+		struct mutex_waiter *waiter;
+
+		if (!(owner & MUTEX_FLAG_HANDOFF) && proxy_owner_held && proxy_unlock)
+			waiter = __mutex_proxy_donor_waiter(lock);
+		else
+			waiter = NULL;
+
+		if (waiter) {
+			proxy_donor_waiter = true;
+		} else {
+			/* get the first entry from the wait-list: */
+			waiter = list_first_entry(&lock->wait_list,
+						  struct mutex_waiter, list);
+		}
 
 		next = waiter->task;
 
@@ -971,8 +1035,23 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 		wake_q_add(&wake_q, next);
 	}
 
-	if (owner & MUTEX_FLAG_HANDOFF)
+	/*
+	 * Proxy execution relies on a blocked waiter donating CPU to the lock
+	 * holder.  If the proxy owner immediately reacquires the mutex before
+	 * the woken waiter can run, the waiter can still observe the full
+	 * lock-holder tail across repeated critical sections.  Handoff only
+	 * to an existing first-waiter handoff request or to the exact proxy
+	 * chain waiter that is waiting on this mutex.  For a direct chain that
+	 * is the root donor; for a nested chain it is the immediate predecessor
+	 * owner.  If this proxy owner is unlocking some other contended mutex,
+	 * release normally instead of donating that lock to an unrelated FIFO
+	 * waiter.
+	 */
+	if ((owner & MUTEX_FLAG_HANDOFF) ||
+	    proxy_donor_waiter)
 		__mutex_handoff(lock, next);
+	else if (proxy_owner_held)
+		__mutex_handoff(lock, NULL);
 
 	raw_spin_unlock_irqrestore_wake(&lock->wait_lock, flags, &wake_q);
 }
