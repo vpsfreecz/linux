@@ -2200,6 +2200,7 @@ __latent_entropy struct task_struct *copy_process(
 
 	p->blocked_on = NULL; /* not blocked yet */
 	p->blocked_donor = NULL; /* nobody is boosting p yet */
+	p->blocked_on_type = SCHED_PROXY_BLOCKED_ON_NONE;
 
 #ifdef CONFIG_BCACHE
 	p->sequential_io	= 0;
