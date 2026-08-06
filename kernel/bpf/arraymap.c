@@ -4,6 +4,7 @@
  */
 #include <linux/bpf.h>
 #include <linux/btf.h>
+#include <linux/cgroup.h>
 #include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
@@ -1361,7 +1362,25 @@ static void *cgroup_fd_array_get_ptr(struct bpf_map *map,
 				     struct file *map_file /* not used */,
 				     int fd)
 {
-	return cgroup_get_from_fd(fd);
+	struct cgroup *cgrp;
+
+	cgrp = cgroup_get_from_fd(fd);
+	if (IS_ERR(cgrp))
+		return cgrp;
+
+	if (bpf_token_is_container(map->token) &&
+	    !bpf_token_task_match(map->token, current)) {
+		cgroup_put(cgrp);
+		return ERR_PTR(-EACCES);
+	}
+
+	if (bpf_token_current_container_member() &&
+	    !cgroup_is_descendant_of_current_cgns(cgrp)) {
+		cgroup_put(cgrp);
+		return ERR_PTR(-EACCES);
+	}
+
+	return cgrp;
 }
 
 static void cgroup_fd_array_put_ptr(struct bpf_map *map, void *ptr, bool need_defer)
