@@ -73,11 +73,14 @@ struct nameidata;
 struct nsproxy;
 struct perf_event_context;
 struct perf_ctx_data;
+struct percpu_rw_semaphore;
 struct pid_namespace;
 struct pipe_inode_info;
 struct rcu_node;
 struct reclaim_state;
 struct robust_list_head;
+struct rt_mutex_base;
+struct rw_semaphore;
 struct root_domain;
 struct rq;
 struct sched_attr;
@@ -1267,7 +1270,8 @@ struct task_struct {
 	struct rt_mutex_waiter		*pi_blocked_on;
 #endif
 
-	struct mutex			*blocked_on;	/* lock we're blocked on */
+	struct mutex			*blocked_on;	/* proxy-exec lock pointer */
+	unsigned int			blocked_on_type; /* enum sched_proxy_blocked_on_type */
 	raw_spinlock_t			blocked_lock;
 
 #ifdef CONFIG_DETECT_HUNG_TASK_BLOCKER
@@ -1710,10 +1714,29 @@ static inline bool sched_proxy_exec(void)
 {
 	return static_branch_likely(&__sched_proxy_exec);
 }
+
+struct task_struct *sched_proxy_exec_current_donor(void);
+struct task_struct *sched_proxy_exec_current_handoff_waiter(void);
+int sched_proxy_exec_lock_owner_score(struct task_struct *p);
 #else
 static inline bool sched_proxy_exec(void)
 {
 	return false;
+}
+
+static inline struct task_struct *sched_proxy_exec_current_donor(void)
+{
+	return NULL;
+}
+
+static inline struct task_struct *sched_proxy_exec_current_handoff_waiter(void)
+{
+	return NULL;
+}
+
+static inline int sched_proxy_exec_lock_owner_score(struct task_struct *p)
+{
+	return 0;
 }
 #endif
 
@@ -2188,6 +2211,15 @@ extern int __cond_resched_rwlock_write(rwlock_t *lock);
 	__cond_resched_rwlock_write(lock);					\
 })
 
+enum sched_proxy_blocked_on_type {
+	SCHED_PROXY_BLOCKED_ON_NONE,
+	SCHED_PROXY_BLOCKED_ON_MUTEX,
+	SCHED_PROXY_BLOCKED_ON_RWSEM,
+	SCHED_PROXY_BLOCKED_ON_PERCPU_RWSEM,
+	SCHED_PROXY_BLOCKED_ON_RTMUTEX,
+	SCHED_PROXY_BLOCKED_ON_WAKING,
+};
+
 #ifndef CONFIG_PREEMPT_RT
 
 /*
@@ -2199,29 +2231,95 @@ extern int __cond_resched_rwlock_write(rwlock_t *lock);
  */
 #define PROXY_WAKING ((struct mutex *)(-1L))
 
+static inline bool __task_blocked_on_matches(struct task_struct *p,
+					     enum sched_proxy_blocked_on_type type,
+					     const void *lock)
+{
+	lockdep_assert_held_once(&p->blocked_lock);
+
+	if (p->blocked_on == PROXY_WAKING)
+		return type == SCHED_PROXY_BLOCKED_ON_WAKING;
+
+	return p->blocked_on_type == type &&
+	       p->blocked_on == (struct mutex *)lock;
+}
+
 static inline struct mutex *__get_task_blocked_on(struct task_struct *p)
 {
 	lockdep_assert_held_once(&p->blocked_lock);
-	return p->blocked_on == PROXY_WAKING ? NULL : p->blocked_on;
+
+	if (p->blocked_on == PROXY_WAKING ||
+	    p->blocked_on_type != SCHED_PROXY_BLOCKED_ON_MUTEX)
+		return NULL;
+	return p->blocked_on;
 }
 
-static inline void __set_task_blocked_on(struct task_struct *p, struct mutex *m)
+static inline enum sched_proxy_blocked_on_type
+__get_task_blocked_on_type(struct task_struct *p)
 {
-	WARN_ON_ONCE(!m);
-	/* The task should only be setting itself as blocked */
-	WARN_ON_ONCE(p != current);
+	lockdep_assert_held_once(&p->blocked_lock);
+
+	if (p->blocked_on == PROXY_WAKING)
+		return SCHED_PROXY_BLOCKED_ON_WAKING;
+	return p->blocked_on_type;
+}
+
+static inline void
+__set_task_blocked_on_type(struct task_struct *p,
+			   enum sched_proxy_blocked_on_type type,
+			   const void *lock)
+{
+	WARN_ON_ONCE(!lock);
+	WARN_ON_ONCE(type == SCHED_PROXY_BLOCKED_ON_NONE ||
+		     type == SCHED_PROXY_BLOCKED_ON_WAKING);
+	/*
+	 * Mutex, rwsem and percpu-rwsem waiters publish only their own
+	 * blocked state. Rtmutex PI paths may update another task while
+	 * manipulating that task's waiter state.
+	 */
+	WARN_ON_ONCE(type != SCHED_PROXY_BLOCKED_ON_RTMUTEX && p != current);
 	/* Currently we serialize blocked_on under the task::blocked_lock */
 	lockdep_assert_held_once(&p->blocked_lock);
 	/*
 	 * Check ensure we don't overwrite existing mutex value
-	 * with a different mutex. Note, setting it to the same
-	 * lock repeatedly is ok.
+	 * with a different lock. Note, setting it to the same
+	 * lock and type repeatedly is ok.
 	 */
-	WARN_ON_ONCE(p->blocked_on && p->blocked_on != m);
-	p->blocked_on = m;
+	WARN_ON_ONCE(p->blocked_on && p->blocked_on != PROXY_WAKING &&
+		     (p->blocked_on != (struct mutex *)lock ||
+		      p->blocked_on_type != type));
+	p->blocked_on = (struct mutex *)lock;
+	p->blocked_on_type = type;
 }
 
-static inline void __clear_task_blocked_on(struct task_struct *p, struct mutex *m)
+static inline void __set_task_blocked_on(struct task_struct *p, struct mutex *m)
+{
+	__set_task_blocked_on_type(p, SCHED_PROXY_BLOCKED_ON_MUTEX, m);
+}
+
+static inline void
+__set_task_blocked_on_rwsem(struct task_struct *p, struct rw_semaphore *sem)
+{
+	__set_task_blocked_on_type(p, SCHED_PROXY_BLOCKED_ON_RWSEM, sem);
+}
+
+static inline void
+__set_task_blocked_on_rtmutex(struct task_struct *p, struct rt_mutex_base *lock)
+{
+	__set_task_blocked_on_type(p, SCHED_PROXY_BLOCKED_ON_RTMUTEX, lock);
+}
+
+static inline void
+__set_task_blocked_on_percpu_rwsem(struct task_struct *p,
+				   struct percpu_rw_semaphore *sem)
+{
+	__set_task_blocked_on_type(p, SCHED_PROXY_BLOCKED_ON_PERCPU_RWSEM, sem);
+}
+
+static inline void
+__clear_task_blocked_on_type(struct task_struct *p,
+			     enum sched_proxy_blocked_on_type type,
+			     const void *lock)
 {
 	/* Currently we serialize blocked_on under the task::blocked_lock */
 	lockdep_assert_held_once(&p->blocked_lock);
@@ -2230,8 +2328,16 @@ static inline void __clear_task_blocked_on(struct task_struct *p, struct mutex *
 	 * blocked_on relationships, but make sure we are not
 	 * clearing the relationship with a different lock.
 	 */
-	WARN_ON_ONCE(m && p->blocked_on && p->blocked_on != m && p->blocked_on != PROXY_WAKING);
+	WARN_ON_ONCE(lock && p->blocked_on && p->blocked_on != PROXY_WAKING &&
+		     (p->blocked_on != (struct mutex *)lock ||
+		      p->blocked_on_type != type));
 	p->blocked_on = NULL;
+	p->blocked_on_type = SCHED_PROXY_BLOCKED_ON_NONE;
+}
+
+static inline void __clear_task_blocked_on(struct task_struct *p, struct mutex *m)
+{
+	__clear_task_blocked_on_type(p, SCHED_PROXY_BLOCKED_ON_MUTEX, m);
 }
 
 static inline void clear_task_blocked_on(struct task_struct *p, struct mutex *m)
@@ -2240,13 +2346,57 @@ static inline void clear_task_blocked_on(struct task_struct *p, struct mutex *m)
 	__clear_task_blocked_on(p, m);
 }
 
-static inline void __set_task_blocked_on_waking(struct task_struct *p, struct mutex *m)
+static inline void
+__clear_task_blocked_on_rwsem(struct task_struct *p, struct rw_semaphore *sem)
+{
+	__clear_task_blocked_on_type(p, SCHED_PROXY_BLOCKED_ON_RWSEM, sem);
+}
+
+static inline void
+clear_task_blocked_on_rwsem(struct task_struct *p, struct rw_semaphore *sem)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__clear_task_blocked_on_rwsem(p, sem);
+}
+
+static inline void
+__clear_task_blocked_on_rtmutex(struct task_struct *p, struct rt_mutex_base *lock)
+{
+	__clear_task_blocked_on_type(p, SCHED_PROXY_BLOCKED_ON_RTMUTEX, lock);
+}
+
+static inline void
+clear_task_blocked_on_rtmutex(struct task_struct *p, struct rt_mutex_base *lock)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__clear_task_blocked_on_rtmutex(p, lock);
+}
+
+static inline void
+__clear_task_blocked_on_percpu_rwsem(struct task_struct *p,
+				     struct percpu_rw_semaphore *sem)
+{
+	__clear_task_blocked_on_type(p, SCHED_PROXY_BLOCKED_ON_PERCPU_RWSEM, sem);
+}
+
+static inline void
+clear_task_blocked_on_percpu_rwsem(struct task_struct *p,
+				   struct percpu_rw_semaphore *sem)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__clear_task_blocked_on_percpu_rwsem(p, sem);
+}
+
+static inline void
+__set_task_blocked_on_waking_type(struct task_struct *p,
+				  enum sched_proxy_blocked_on_type type,
+				  const void *lock)
 {
 	/* Currently we serialize blocked_on under the task::blocked_lock */
 	lockdep_assert_held_once(&p->blocked_lock);
 
 	if (!sched_proxy_exec()) {
-		__clear_task_blocked_on(p, m);
+		__clear_task_blocked_on_type(p, type, lock);
 		return;
 	}
 
@@ -2258,14 +2408,63 @@ static inline void __set_task_blocked_on_waking(struct task_struct *p, struct mu
 	 * already set to waking, but make sure we are not changing
 	 * the relationship with a different lock.
 	 */
-	WARN_ON_ONCE(m && p->blocked_on != m && p->blocked_on != PROXY_WAKING);
+	WARN_ON_ONCE(lock && p->blocked_on != (struct mutex *)lock &&
+		     p->blocked_on != PROXY_WAKING);
 	p->blocked_on = PROXY_WAKING;
+	p->blocked_on_type = SCHED_PROXY_BLOCKED_ON_WAKING;
+}
+
+static inline void __set_task_blocked_on_waking(struct task_struct *p,
+						struct mutex *m)
+{
+	__set_task_blocked_on_waking_type(p, SCHED_PROXY_BLOCKED_ON_MUTEX, m);
 }
 
 static inline void set_task_blocked_on_waking(struct task_struct *p, struct mutex *m)
 {
 	guard(raw_spinlock_irqsave)(&p->blocked_lock);
 	__set_task_blocked_on_waking(p, m);
+}
+
+static inline void
+__set_task_blocked_on_rwsem_waking(struct task_struct *p, struct rw_semaphore *sem)
+{
+	__set_task_blocked_on_waking_type(p, SCHED_PROXY_BLOCKED_ON_RWSEM, sem);
+}
+
+static inline void
+set_task_blocked_on_rwsem_waking(struct task_struct *p, struct rw_semaphore *sem)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__set_task_blocked_on_rwsem_waking(p, sem);
+}
+
+static inline void
+__set_task_blocked_on_rtmutex_waking(struct task_struct *p, struct rt_mutex_base *lock)
+{
+	__set_task_blocked_on_waking_type(p, SCHED_PROXY_BLOCKED_ON_RTMUTEX, lock);
+}
+
+static inline void
+set_task_blocked_on_rtmutex_waking(struct task_struct *p, struct rt_mutex_base *lock)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__set_task_blocked_on_rtmutex_waking(p, lock);
+}
+
+static inline void
+__set_task_blocked_on_percpu_rwsem_waking(struct task_struct *p,
+					  struct percpu_rw_semaphore *sem)
+{
+	__set_task_blocked_on_waking_type(p, SCHED_PROXY_BLOCKED_ON_PERCPU_RWSEM, sem);
+}
+
+static inline void
+set_task_blocked_on_percpu_rwsem_waking(struct task_struct *p,
+					struct percpu_rw_semaphore *sem)
+{
+	guard(raw_spinlock_irqsave)(&p->blocked_lock);
+	__set_task_blocked_on_percpu_rwsem_waking(p, sem);
 }
 
 #else
@@ -2282,6 +2481,38 @@ static inline void __set_task_blocked_on_waking(struct task_struct *p, struct rt
 }
 
 static inline void set_task_blocked_on_waking(struct task_struct *p, struct rt_mutex *m)
+{
+}
+
+static inline void __set_task_blocked_on_rtmutex(struct task_struct *p,
+						 struct rt_mutex_base *lock)
+{
+}
+
+static inline void __clear_task_blocked_on_rtmutex(struct task_struct *p,
+						   struct rt_mutex_base *lock)
+{
+}
+
+static inline void clear_task_blocked_on_rtmutex(struct task_struct *p,
+						 struct rt_mutex_base *lock)
+{
+}
+
+static inline void set_task_blocked_on_rtmutex_waking(struct task_struct *p,
+						      struct rt_mutex_base *lock)
+{
+}
+
+static inline void
+clear_task_blocked_on_percpu_rwsem(struct task_struct *p,
+				   struct percpu_rw_semaphore *sem)
+{
+}
+
+static inline void
+set_task_blocked_on_percpu_rwsem_waking(struct task_struct *p,
+					struct percpu_rw_semaphore *sem)
 {
 }
 #endif /* !CONFIG_PREEMPT_RT */

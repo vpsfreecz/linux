@@ -1171,6 +1171,7 @@ struct rq {
 #ifdef CONFIG_SCHED_PROXY_EXEC
 	struct task_struct __rcu	*donor;  /* Scheduling context */
 	struct task_struct __rcu	*curr;   /* Execution context */
+	struct task_struct	*proxy_exec_handoff_waiter;
 #else
 	union {
 		struct task_struct __rcu *donor; /* Scheduler context */
@@ -1367,6 +1368,7 @@ static inline u32 sched_rng(void)
 static inline void rq_set_donor(struct rq *rq, struct task_struct *t)
 {
 	rcu_assign_pointer(rq->donor, t);
+	WRITE_ONCE(rq->proxy_exec_handoff_waiter, NULL);
 }
 #else
 static inline void rq_set_donor(struct rq *rq, struct task_struct *t)
@@ -2306,7 +2308,7 @@ static inline bool task_is_blocked(struct task_struct *p)
 	if (!sched_proxy_exec())
 		return false;
 
-	return !!p->blocked_on;
+	return !!READ_ONCE(p->blocked_on);
 }
 
 static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
@@ -2542,6 +2544,7 @@ extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
 extern const struct sched_class fair_sched_class;
 extern const struct sched_class idle_sched_class;
+bool fair_task_hierarchy_throttled(struct task_struct *p, int cpu);
 
 /*
  * Iterate only active classes. SCX can take over all fair tasks or be
@@ -3889,6 +3892,7 @@ static inline
 bool task_is_pushable(struct rq *rq, struct task_struct *p, int cpu)
 {
 	if (!task_on_cpu(rq, p) &&
+	    !task_current_donor(rq, p) &&
 	    cpumask_test_cpu(cpu, &p->cpus_mask))
 		return true;
 

@@ -6831,6 +6831,31 @@ bool cfs_task_bw_constrained(struct task_struct *p)
 #endif
 #endif /* !CONFIG_CFS_BANDWIDTH */
 
+bool fair_task_hierarchy_throttled(struct task_struct *p, int cpu)
+{
+	struct cfs_rq *cfs_rq;
+	bool throttled = false;
+
+	if (READ_ONCE(p->sched_class) != &fair_sched_class)
+		return false;
+
+	rcu_read_lock();
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	{
+		struct task_group *tg = READ_ONCE(p->sched_task_group);
+
+		cfs_rq = tg ? READ_ONCE(tg->cfs_rq[cpu]) : NULL;
+	}
+#else
+	cfs_rq = &cpu_rq(cpu)->cfs;
+#endif
+	if (cfs_rq)
+		throttled = throttled_hierarchy(cfs_rq);
+	rcu_read_unlock();
+
+	return throttled;
+}
+
 #if !defined(CONFIG_CFS_BANDWIDTH) || !defined(CONFIG_NO_HZ_FULL)
 static inline void sched_fair_update_stop_tick(struct rq *rq, struct task_struct *p) {}
 #endif
@@ -9561,7 +9586,7 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	 * 3) cannot be migrated to this CPU due to cpus_ptr, or
 	 * 4) running (obviously), or
 	 * 5) are cache-hot on their current CPU, or
-	 * 6) are blocked on mutexes (if SCHED_PROXY_EXEC is enabled)
+	 * 6) are blocked on proxy-exec lock classes
 	 */
 	if ((p->se.sched_delayed) && (env->migration_type != migrate_load))
 		return 0;
@@ -13433,14 +13458,7 @@ bool cfs_prio_less(const struct task_struct *a, const struct task_struct *b,
 
 static int task_is_throttled_fair(struct task_struct *p, int cpu)
 {
-	struct cfs_rq *cfs_rq;
-
-#ifdef CONFIG_FAIR_GROUP_SCHED
-	cfs_rq = task_group(p)->cfs_rq[cpu];
-#else
-	cfs_rq = &cpu_rq(cpu)->cfs;
-#endif
-	return throttled_hierarchy(cfs_rq);
+	return fair_task_hierarchy_throttled(p, cpu);
 }
 #else /* !CONFIG_SCHED_CORE: */
 static inline void task_tick_core(struct rq *rq, struct task_struct *curr) {}

@@ -10,16 +10,85 @@
 #include <linux/lockdep.h>
 #include <linux/cleanup.h>
 
+struct task_struct;
+
+#ifdef CONFIG_SCHED_PROXY_EXEC
+struct percpu_rwsem_proxy_reader_slot {
+	unsigned long task;
+	unsigned int count;
+};
+#endif
+
 struct percpu_rw_semaphore {
 	struct rcu_sync		rss;
 	unsigned int __percpu	*read_count;
 	struct rcuwait		writer;
 	wait_queue_head_t	waiters;
 	atomic_t		block;
+#ifdef CONFIG_SCHED_PROXY_EXEC
+	struct task_struct	*proxy_owner;
+	bool			proxy_writer_waiting_readers;
+	struct percpu_rwsem_proxy_reader_slot proxy_readers[4];
+	atomic_t		proxy_readers_next;
+#endif
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map	dep_map;
 #endif
 };
+
+#ifdef CONFIG_SCHED_PROXY_EXEC
+#define __PERCPU_RWSEM_PROXY_INIT			\
+	.proxy_owner = NULL,				\
+	.proxy_writer_waiting_readers = false,		\
+	.proxy_readers = { { 0, 0 } },			\
+	.proxy_readers_next = ATOMIC_INIT(0),
+void percpu_rwsem_proxy_read_acquire(struct percpu_rw_semaphore *sem);
+bool
+percpu_rwsem_proxy_read_try_acquire(struct percpu_rw_semaphore *sem);
+bool
+percpu_rwsem_proxy_read_current_is_tracked(struct percpu_rw_semaphore *sem);
+bool
+percpu_rwsem_proxy_read_try_release(struct percpu_rw_semaphore *sem);
+void
+percpu_rwsem_proxy_read_wake_acquire(struct percpu_rw_semaphore *sem,
+				     struct task_struct *reader);
+void percpu_rwsem_proxy_read_release(struct percpu_rw_semaphore *sem);
+#else
+#define __PERCPU_RWSEM_PROXY_INIT
+static inline void
+percpu_rwsem_proxy_read_acquire(struct percpu_rw_semaphore *sem)
+{
+}
+
+static inline bool
+percpu_rwsem_proxy_read_try_acquire(struct percpu_rw_semaphore *sem)
+{
+	return false;
+}
+
+static inline bool
+percpu_rwsem_proxy_read_current_is_tracked(struct percpu_rw_semaphore *sem)
+{
+	return false;
+}
+
+static inline bool
+percpu_rwsem_proxy_read_try_release(struct percpu_rw_semaphore *sem)
+{
+	return true;
+}
+
+static inline void
+percpu_rwsem_proxy_read_wake_acquire(struct percpu_rw_semaphore *sem,
+				     struct task_struct *reader)
+{
+}
+
+static inline void
+percpu_rwsem_proxy_read_release(struct percpu_rw_semaphore *sem)
+{
+}
+#endif
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 #define __PERCPU_RWSEM_DEP_MAP_INIT(lockname)	.dep_map = { .name = #lockname },
@@ -35,6 +104,7 @@ is_static struct percpu_rw_semaphore name = {				\
 	.writer = __RCUWAIT_INITIALIZER(name.writer),			\
 	.waiters = __WAIT_QUEUE_HEAD_INITIALIZER(name.waiters),		\
 	.block = ATOMIC_INIT(0),					\
+	__PERCPU_RWSEM_PROXY_INIT					\
 	__PERCPU_RWSEM_DEP_MAP_INIT(name)				\
 }
 
@@ -48,6 +118,8 @@ extern bool __percpu_down_read(struct percpu_rw_semaphore *, bool, bool);
 static inline void percpu_down_read_internal(struct percpu_rw_semaphore *sem,
 					     bool freezable)
 {
+	bool proxy_reader;
+
 	might_sleep();
 
 	rwsem_acquire_read(&sem->dep_map, 0, 0, _RET_IP_);
@@ -65,11 +137,14 @@ static inline void percpu_down_read_internal(struct percpu_rw_semaphore *sem,
 		this_cpu_inc(*sem->read_count);
 	else
 		__percpu_down_read(sem, false, freezable); /* Unconditional memory barrier */
+	proxy_reader = percpu_rwsem_proxy_read_try_acquire(sem);
 	/*
 	 * The preempt_enable() prevents the compiler from
 	 * bleeding the critical section out.
 	 */
 	preempt_enable();
+	if (!proxy_reader)
+		percpu_rwsem_proxy_read_acquire(sem);
 }
 
 static inline void percpu_down_read(struct percpu_rw_semaphore *sem)
@@ -85,6 +160,8 @@ static inline void percpu_down_read_freezable(struct percpu_rw_semaphore *sem,
 
 static inline bool percpu_down_read_trylock(struct percpu_rw_semaphore *sem)
 {
+	bool proxy_reader = false;
+	bool proxy_reader_nested = false;
 	bool ret = true;
 
 	preempt_disable();
@@ -95,7 +172,14 @@ static inline bool percpu_down_read_trylock(struct percpu_rw_semaphore *sem)
 		this_cpu_inc(*sem->read_count);
 	else
 		ret = __percpu_down_read(sem, true, false); /* Unconditional memory barrier */
+	if (ret) {
+		proxy_reader_nested =
+			percpu_rwsem_proxy_read_current_is_tracked(sem);
+		proxy_reader = percpu_rwsem_proxy_read_try_acquire(sem);
+	}
 	preempt_enable();
+	if (ret && proxy_reader_nested && !proxy_reader)
+		percpu_rwsem_proxy_read_acquire(sem);
 	/*
 	 * The barrier() from preempt_enable() prevents the compiler from
 	 * bleeding the critical section out.
@@ -109,7 +193,14 @@ static inline bool percpu_down_read_trylock(struct percpu_rw_semaphore *sem)
 
 static inline void percpu_up_read(struct percpu_rw_semaphore *sem)
 {
+	bool proxy_reader;
+
 	rwsem_release(&sem->dep_map, _RET_IP_);
+
+	/* Never leave a stale representative after read_count reaches 0. */
+	proxy_reader = percpu_rwsem_proxy_read_try_release(sem);
+	if (!proxy_reader)
+		percpu_rwsem_proxy_read_release(sem);
 
 	preempt_disable();
 	/*
@@ -154,6 +245,24 @@ extern int __percpu_init_rwsem(struct percpu_rw_semaphore *,
 				const char *, struct lock_class_key *);
 
 extern void percpu_free_rwsem(struct percpu_rw_semaphore *);
+
+#ifdef CONFIG_SCHED_PROXY_EXEC
+enum percpu_rwsem_proxy_owner_state {
+	PERCPU_RWSEM_PROXY_OWNER_WRITER,
+	PERCPU_RWSEM_PROXY_OWNER_READER_REPRESENTATIVE,
+	PERCPU_RWSEM_PROXY_OWNER_OWNERLESS,
+	PERCPU_RWSEM_PROXY_OWNER_READER_UNTRACKED,
+	PERCPU_RWSEM_PROXY_OWNER_UNKNOWN,
+};
+
+/*
+ * Returns a refcounted task when an owner is found. The caller must drop it
+ * with put_task_struct().
+ */
+extern struct task_struct *
+percpu_rwsem_proxy_owner(struct percpu_rw_semaphore *sem,
+			 enum percpu_rwsem_proxy_owner_state *state);
+#endif
 
 #define percpu_init_rwsem(sem)					\
 ({								\
