@@ -622,6 +622,7 @@ __mutex_lock_common(struct mutex *lock, unsigned int state, unsigned int subclas
 
 	debug_mutex_lock_common(lock, &waiter);
 	waiter.task = current;
+	waiter.ww_ctx = NULL;
 	if (use_ww_ctx)
 		waiter.ww_ctx = ww_ctx;
 
