@@ -1505,6 +1505,11 @@ static int nfs_fs_context_validate(struct fs_context *fc)
 	int port = 0;
 	int ret;
 
+	if (fc->user_ns != &init_user_ns &&
+	    !(ctx->flags & NFS_MOUNT_SOFTERR)) {
+		ctx->flags |= NFS_MOUNT_SOFT;
+	}
+
 	if (!fc->source)
 		goto out_no_device_name;
 
@@ -1770,7 +1775,8 @@ struct file_system_type nfs_fs_type = {
 	.kill_sb		= nfs_kill_super,
 	.fs_flags		= FS_RENAME_DOES_D_MOVE	|
 				  FS_BINARY_MOUNTDATA	|
-				  FS_USERNS_DELEGATABLE,
+				  FS_USERNS_DELEGATABLE	|
+				  FS_USERNS_MOUNT,
 };
 MODULE_ALIAS_FS("nfs");
 EXPORT_SYMBOL_GPL(nfs_fs_type);
@@ -1784,7 +1790,8 @@ struct file_system_type nfs4_fs_type = {
 	.kill_sb		= nfs_kill_super,
 	.fs_flags		= FS_RENAME_DOES_D_MOVE	|
 				  FS_BINARY_MOUNTDATA	|
-				  FS_USERNS_DELEGATABLE,
+				  FS_USERNS_DELEGATABLE	|
+				  FS_USERNS_MOUNT,
 };
 MODULE_ALIAS_FS("nfs4");
 MODULE_ALIAS("nfs4");
