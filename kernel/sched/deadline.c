@@ -2794,7 +2794,7 @@ static struct task_struct *pick_next_pushable_dl_task(struct rq *rq)
 	while (next_node) {
 		i = __node_2_pdl(next_node);
 		/* make sure task isn't on_cpu (possible with proxy-exec) */
-		if (!task_on_cpu(rq, i)) {
+		if (!task_on_cpu(rq, i) && !task_current_donor(rq, i)) {
 			p = i;
 			break;
 		}
