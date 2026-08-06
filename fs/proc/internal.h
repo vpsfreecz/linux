@@ -13,11 +13,11 @@
 #include <linux/binfmts.h>
 #include <linux/sched/coredump.h>
 #include <linux/sched/task.h>
+#include <linux/vpsadminos.h>
 #include <linux/mm.h>
 
 struct ctl_table_header;
 struct mempolicy;
-
 /*
  * This is not completely implemented yet. The idea is to
  * create an in-memory tree (like the actual /proc filesystem
@@ -125,6 +125,57 @@ struct proc_inode {
 	const struct proc_ns_operations *ns_ops;
 	struct inode vfs_inode;
 } __randomize_layout;
+
+struct proc_kernfs_filter_dir_state {
+	struct vpsa_kernfs_filter_view *view;
+	unsigned long cookie;
+};
+
+static inline struct proc_kernfs_filter_dir_state *
+proc_kernfs_filter_dir_state(const struct file *file)
+{
+	return file ? file->private_data : NULL;
+}
+
+static inline const struct vpsa_kernfs_filter_view *
+proc_kernfs_filter_dir_view(const struct file *file)
+{
+	struct proc_kernfs_filter_dir_state *state = proc_kernfs_filter_dir_state(file);
+
+	return state ? state->view : NULL;
+}
+
+static inline unsigned long proc_kernfs_filter_dir_cookie(const struct file *file)
+{
+	struct proc_kernfs_filter_dir_state *state = proc_kernfs_filter_dir_state(file);
+
+	return state ? state->cookie : 0;
+}
+
+static inline void proc_kernfs_filter_dir_set_cookie(struct file *file, unsigned long cookie)
+{
+	struct proc_kernfs_filter_dir_state *state = proc_kernfs_filter_dir_state(file);
+
+	if (state)
+		state->cookie = cookie;
+}
+
+int proc_kernfs_filter_dir_open(struct inode *inode, struct file *file);
+int proc_kernfs_filter_dir_release(struct inode *inode, struct file *file);
+enum vpsa_kernfs_filter_decision
+proc_kernfs_filter_dentry_decide_view(const struct dentry *dentry,
+				      const struct qstr *leaf,
+				      unsigned int mask,
+				      const struct vpsa_kernfs_filter_view *view);
+enum vpsa_kernfs_filter_decision
+proc_kernfs_filter_dentry_decide(const struct dentry *dentry,
+				 const struct qstr *leaf, unsigned int mask);
+enum vpsa_kernfs_filter_decision
+proc_kernfs_filter_inode_decide(struct inode *inode, unsigned int mask);
+struct dentry *proc_kernfs_filter_lookup_stamp(struct dentry *ret,
+					       struct dentry *lookup);
+int proc_kernfs_filter_permission(struct mnt_idmap *idmap,
+				  struct inode *inode, int mask);
 
 /*
  * General functions

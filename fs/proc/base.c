@@ -51,8 +51,10 @@
 #include <linux/uaccess.h>
 
 #include <linux/errno.h>
+#include <linux/dcache.h>
 #include <linux/time.h>
 #include <linux/proc_fs.h>
+#include <linux/vpsadminos.h>
 #include <linux/stat.h>
 #include <linux/task_io_accounting_ops.h>
 #include <linux/init.h>
@@ -116,6 +118,17 @@
 
 static u8 nlink_tid __ro_after_init;
 static u8 nlink_tgid __ro_after_init;
+
+#define VPSA_PROC_FILTER_MAX_DEPTH	128
+
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_name_decide(const char *name, u16 len, unsigned int mask);
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_name_decide_view(const char *name, u16 len,
+				    unsigned int mask,
+				 const struct vpsa_kernfs_filter_view *view);
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_inode_decide(struct inode *inode, unsigned int mask);
 
 enum proc_mem_force {
 	PROC_MEM_FORCE_ALWAYS,
@@ -744,13 +757,144 @@ static bool has_pid_permissions(struct proc_fs_info *fs_info,
 	return ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS);
 }
 
+static bool vpsa_proc_dentry_path_build(const struct dentry *dentry,
+					const struct qstr *leaf,
+				const char **segments,
+				u16 *lens,
+				u16 *depth)
+{
+	const char *tmp_name;
+	u16 tmp_len;
+	u16 count = 0;
+	u16 i;
+
+	if (leaf && leaf->len) {
+		if (!leaf->name || leaf->len > U16_MAX ||
+		    count >= VPSA_PROC_FILTER_MAX_DEPTH)
+			return false;
+		segments[count] = leaf->name;
+		lens[count] = leaf->len;
+		count++;
+	}
+
+	while (dentry && !IS_ROOT(dentry)) {
+		if (!dentry->d_name.name || dentry->d_name.len > U16_MAX ||
+		    count >= VPSA_PROC_FILTER_MAX_DEPTH)
+			return false;
+
+		segments[count] = dentry->d_name.name;
+		lens[count] = dentry->d_name.len;
+		count++;
+		dentry = dentry->d_parent;
+	}
+
+	for (i = 0; i < count / 2; i++) {
+		tmp_name = segments[i];
+		tmp_len = lens[i];
+		segments[i] = segments[count - 1 - i];
+		lens[i] = lens[count - 1 - i];
+		segments[count - 1 - i] = tmp_name;
+		lens[count - 1 - i] = tmp_len;
+	}
+
+	*depth = count;
+	return true;
+}
+
+enum vpsa_kernfs_filter_decision
+proc_kernfs_filter_dentry_decide_view(const struct dentry *dentry,
+				      const struct qstr *leaf,
+				      unsigned int mask,
+				      const struct vpsa_kernfs_filter_view *view)
+{
+	const char *segments[VPSA_PROC_FILTER_MAX_DEPTH];
+	u16 lens[VPSA_PROC_FILTER_MAX_DEPTH];
+	u16 depth;
+
+	if (!dentry)
+		return vpsa_kernfs_filter_path_unavailable(mask, view);
+	if (!view && !vpsa_kernfs_filter_subject_restricted_current())
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (!vpsa_proc_dentry_path_build(dentry, leaf, segments, lens, &depth))
+		return vpsa_kernfs_filter_path_unavailable(mask, view);
+	if (!depth)
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+	if (view)
+		return vpsa_kernfs_filter_proc_path_decide_view(segments, lens, depth, mask,
+						    view);
+
+	return vpsa_kernfs_filter_proc_path_decide(segments, lens, depth, mask);
+}
+
+enum vpsa_kernfs_filter_decision
+proc_kernfs_filter_dentry_decide(const struct dentry *dentry,
+				 const struct qstr *leaf, unsigned int mask)
+{
+	return proc_kernfs_filter_dentry_decide_view(dentry, leaf, mask, NULL);
+}
+
+struct dentry *proc_kernfs_filter_lookup_stamp(struct dentry *ret,
+					       struct dentry *lookup)
+{
+	struct dentry *target;
+
+	if (IS_ERR(ret))
+		return ret;
+
+	target = ret ? ret : lookup;
+	if (target)
+		vpsa_kernfs_filter_dentry_set_visibility_token(target);
+
+	return ret;
+}
+
+enum vpsa_kernfs_filter_decision
+proc_kernfs_filter_inode_decide(struct inode *inode, unsigned int mask)
+{
+	struct dentry *alias;
+	enum vpsa_kernfs_filter_decision decision;
+
+	if (!inode)
+		return vpsa_kernfs_filter_path_unavailable(mask, NULL);
+	if (!vpsa_kernfs_filter_subject_restricted_current())
+		return VPSA_KERNFS_FILTER_DECISION_ALLOW;
+
+	alias = d_find_any_alias(inode);
+	if (!alias)
+		return vpsa_proc_pid_root_inode_decide(inode, mask);
+
+	decision = proc_kernfs_filter_dentry_decide(alias, NULL, mask);
+	dput(alias);
+	return decision;
+}
+
+int proc_kernfs_filter_permission(struct mnt_idmap *idmap,
+				  struct inode *inode, int mask)
+{
+	enum vpsa_kernfs_filter_decision decision;
+
+	decision = proc_kernfs_filter_inode_decide(inode, mask);
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+	if (decision == VPSA_KERNFS_FILTER_DECISION_DENY)
+		return -EACCES;
+
+	return generic_permission(&nop_mnt_idmap, inode, mask);
+}
 
 static int proc_pid_permission(struct mnt_idmap *idmap,
 			       struct inode *inode, int mask)
 {
 	struct proc_fs_info *fs_info = proc_sb_info(inode->i_sb);
 	struct task_struct *task;
+	enum vpsa_kernfs_filter_decision decision;
 	bool has_perms;
+
+	decision = proc_kernfs_filter_inode_decide(inode, mask);
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+	if (decision == VPSA_KERNFS_FILTER_DECISION_DENY)
+		return -EACCES;
 
 	task = get_proc_task(inode);
 	if (!task)
@@ -778,6 +922,7 @@ static int proc_pid_permission(struct mnt_idmap *idmap,
 
 static const struct inode_operations proc_def_inode_operations = {
 	.setattr	= proc_nochmod_setattr,
+	.permission	= proc_kernfs_filter_permission,
 };
 
 static int proc_single_show(struct seq_file *m, void *v)
@@ -1844,6 +1989,16 @@ static const char *proc_pid_get_link(struct dentry *dentry,
 
 	if (!dentry)
 		return ERR_PTR(-ECHILD);
+
+	switch (proc_kernfs_filter_inode_decide(inode, MAY_READ)) {
+	case VPSA_KERNFS_FILTER_DECISION_HIDE:
+		return ERR_PTR(-ENOENT);
+	case VPSA_KERNFS_FILTER_DECISION_DENY:
+		return ERR_PTR(-EACCES);
+	default:
+		break;
+	}
+
 	error = call_proc_get_link(dentry, inode, &path);
 	if (!error)
 		error = nd_jump_link(&path);
@@ -1880,6 +2035,15 @@ static int proc_pid_readlink(struct dentry * dentry, char __user * buffer, int b
 	struct inode *inode = d_inode(dentry);
 	struct path path;
 
+	switch (proc_kernfs_filter_inode_decide(inode, MAY_READ)) {
+	case VPSA_KERNFS_FILTER_DECISION_HIDE:
+		return -ENOENT;
+	case VPSA_KERNFS_FILTER_DECISION_DENY:
+		return -EACCES;
+	default:
+		break;
+	}
+
 	error = call_proc_get_link(dentry, inode, &path);
 	if (!error) {
 		error = do_proc_readlink(&path, buffer, buflen);
@@ -1892,6 +2056,7 @@ const struct inode_operations proc_pid_link_inode_operations = {
 	.readlink	= proc_pid_readlink,
 	.get_link	= proc_pid_get_link,
 	.setattr	= proc_nochmod_setattr,
+	.permission	= proc_kernfs_filter_permission,
 };
 
 
@@ -2045,7 +2210,13 @@ int pid_getattr(struct mnt_idmap *idmap, const struct path *path,
 {
 	struct inode *inode = d_inode(path->dentry);
 	struct proc_fs_info *fs_info = proc_sb_info(inode->i_sb);
+	enum vpsa_kernfs_filter_decision decision;
 	struct task_struct *task;
+
+	decision = proc_kernfs_filter_dentry_decide(path->dentry, NULL,
+						    MAY_READ);
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
 
 	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
 
@@ -2093,6 +2264,8 @@ static int pid_revalidate(struct inode *dir, const struct qstr *name,
 	struct task_struct *task;
 	int ret = 0;
 
+	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
+		return 0;
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
@@ -2147,11 +2320,17 @@ bool proc_fill_cache(struct file *file, struct dir_context *ctx,
 	const char *name, unsigned int len,
 	instantiate_t instantiate, struct task_struct *task, const void *ptr)
 {
+	const struct vpsa_kernfs_filter_view *view = proc_kernfs_filter_dir_view(file);
 	struct dentry *child, *dir = file->f_path.dentry;
 	struct qstr qname = QSTR_INIT(name, len);
 	struct inode *inode;
 	unsigned type = DT_UNKNOWN;
 	ino_t ino = 1;
+
+	if (proc_kernfs_filter_dentry_decide_view(dir, &qname, MAY_READ,
+						  view) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return true;
 
 	child = try_lookup_noperm(&qname, dir);
 	if (IS_ERR(child))
@@ -2175,8 +2354,15 @@ bool proc_fill_cache(struct file *file, struct dir_context *ctx,
 		}
 	}
 	inode = d_inode(child);
-	ino = inode->i_ino;
-	type = inode->i_mode >> 12;
+	if (inode) {
+		unsigned long visibility_token =
+			vpsa_kernfs_filter_view_visibility_token(view);
+
+		vpsa_kernfs_filter_dentry_set_visibility_token_value(child,
+								     visibility_token);
+		ino = inode->i_ino;
+		type = inode->i_mode >> 12;
+	}
 	dput(child);
 end_instantiate:
 	return dir_emit(ctx, name, len, ino, type);
@@ -2236,6 +2422,9 @@ static int map_files_d_revalidate(struct inode *dir, const struct qstr *name,
 
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
+
+	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
+		return 0;
 
 	inode = d_inode(dentry);
 	task = get_proc_task(inode);
@@ -2341,6 +2530,7 @@ static const struct inode_operations proc_map_files_link_inode_operations = {
 	.readlink	= proc_pid_readlink,
 	.get_link	= proc_map_files_get_link,
 	.setattr	= proc_nochmod_setattr,
+	.permission	= proc_kernfs_filter_permission,
 };
 
 static struct dentry *
@@ -2348,6 +2538,7 @@ proc_map_files_instantiate(struct dentry *dentry,
 			   struct task_struct *task, const void *ptr)
 {
 	fmode_t mode = (fmode_t)(unsigned long)ptr;
+	struct dentry *result;
 	struct proc_inode *ei;
 	struct inode *inode;
 
@@ -2363,8 +2554,9 @@ proc_map_files_instantiate(struct dentry *dentry,
 	inode->i_op = &proc_map_files_link_inode_operations;
 	inode->i_size = 64;
 
-	return proc_splice_unmountable(inode, dentry,
-				       &tid_map_files_dentry_operations);
+	result = proc_splice_unmountable(inode, dentry,
+					 &tid_map_files_dentry_operations);
+	return proc_kernfs_filter_lookup_stamp(result, dentry);
 }
 
 static struct dentry *proc_map_files_lookup(struct inode *dir,
@@ -2377,6 +2569,11 @@ static struct dentry *proc_map_files_lookup(struct inode *dir,
 	struct mm_struct *mm;
 
 	result = ERR_PTR(-ENOENT);
+	if (proc_kernfs_filter_dentry_decide(dentry->d_parent,
+					     &dentry->d_name, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		goto out;
+
 	task = get_proc_task(dir);
 	if (!task)
 		goto out;
@@ -2515,6 +2712,8 @@ out:
 
 static const struct file_operations proc_map_files_operations = {
 	.read		= generic_read_dir,
+	.open		= proc_kernfs_filter_dir_open,
+	.release	= proc_kernfs_filter_dir_release,
 	.iterate_shared	= proc_map_files_readdir,
 	.llseek		= generic_file_llseek,
 };
@@ -2709,6 +2908,7 @@ static struct dentry *proc_pident_instantiate(struct dentry *dentry,
 	struct task_struct *task, const void *ptr)
 {
 	const struct pid_entry *p = ptr;
+	struct dentry *result;
 	struct inode *inode;
 	struct proc_inode *ei;
 
@@ -2725,7 +2925,8 @@ static struct dentry *proc_pident_instantiate(struct dentry *dentry,
 		inode->i_fop = p->fop;
 	ei->op = p->op;
 	pid_update_inode(task, inode);
-	return d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	result = d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	return proc_kernfs_filter_lookup_stamp(result, dentry);
 }
 
 static struct dentry *proc_pident_lookup(struct inode *dir, 
@@ -2733,9 +2934,15 @@ static struct dentry *proc_pident_lookup(struct inode *dir,
 					 const struct pid_entry *p,
 					 const struct pid_entry *end)
 {
-	struct task_struct *task = get_proc_task(dir);
+	struct task_struct *task;
 	struct dentry *res = ERR_PTR(-ENOENT);
 
+	if (proc_kernfs_filter_dentry_decide(dentry->d_parent,
+					     &dentry->d_name, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		goto out_no_task;
+
+	task = get_proc_task(dir);
 	if (!task)
 		goto out_no_task;
 
@@ -2888,6 +3095,8 @@ static int proc_##LSM##_attr_dir_iterate(struct file *filp, \
 \
 static const struct file_operations proc_##LSM##_attr_dir_ops = { \
 	.read		= generic_read_dir, \
+	.open		= proc_kernfs_filter_dir_open, \
+	.release	= proc_kernfs_filter_dir_release, \
 	.iterate_shared	= proc_##LSM##_attr_dir_iterate, \
 	.llseek		= default_llseek, \
 }; \
@@ -2904,6 +3113,7 @@ static const struct inode_operations proc_##LSM##_attr_dir_inode_ops = { \
 	.lookup		= proc_##LSM##_attr_dir_lookup, \
 	.getattr	= pid_getattr, \
 	.setattr	= proc_nochmod_setattr, \
+	.permission	= proc_pid_permission, \
 }
 
 #ifdef CONFIG_SECURITY_SMACK
@@ -2947,6 +3157,8 @@ static int proc_attr_dir_readdir(struct file *file, struct dir_context *ctx)
 
 static const struct file_operations proc_attr_dir_operations = {
 	.read		= generic_read_dir,
+	.open		= proc_kernfs_filter_dir_open,
+	.release	= proc_kernfs_filter_dir_release,
 	.iterate_shared	= proc_attr_dir_readdir,
 	.llseek		= generic_file_llseek,
 };
@@ -2963,6 +3175,7 @@ static const struct inode_operations proc_attr_dir_inode_operations = {
 	.lookup		= proc_attr_dir_lookup,
 	.getattr	= pid_getattr,
 	.setattr	= proc_nochmod_setattr,
+	.permission	= proc_pid_permission,
 };
 
 #endif
@@ -3456,6 +3669,8 @@ static int proc_tgid_base_readdir(struct file *file, struct dir_context *ctx)
 
 static const struct file_operations proc_tgid_base_operations = {
 	.read		= generic_read_dir,
+	.open		= proc_kernfs_filter_dir_open,
+	.release	= proc_kernfs_filter_dir_release,
 	.iterate_shared	= proc_tgid_base_readdir,
 	.llseek		= generic_file_llseek,
 };
@@ -3509,6 +3724,7 @@ void proc_flush_pid(struct pid *pid)
 static struct dentry *proc_pid_instantiate(struct dentry * dentry,
 				   struct task_struct *task, const void *ptr)
 {
+	struct dentry *result;
 	struct inode *inode;
 
 	inode = proc_pid_make_base_inode(dentry->d_sb, task,
@@ -3523,7 +3739,8 @@ static struct dentry *proc_pid_instantiate(struct dentry * dentry,
 	set_nlink(inode, nlink_tgid);
 	pid_update_inode(task, inode);
 
-	return d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	result = d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	return proc_kernfs_filter_lookup_stamp(result, dentry);
 }
 
 struct dentry *proc_pid_lookup(struct dentry *dentry, unsigned int flags)
@@ -3533,6 +3750,10 @@ struct dentry *proc_pid_lookup(struct dentry *dentry, unsigned int flags)
 	struct proc_fs_info *fs_info;
 	struct pid_namespace *ns;
 	struct dentry *result = ERR_PTR(-ENOENT);
+
+	if (vpsa_proc_pid_root_name_decide(dentry->d_name.name, dentry->d_name.len,
+					   MAY_READ) == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		goto out;
 
 	tgid = name_to_int(&dentry->d_name);
 	if (tgid == ~0U)
@@ -3594,9 +3815,57 @@ retry:
 
 #define TGID_OFFSET (FIRST_PROCESS_ENTRY + 2)
 
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_name_decide_view(const char *name, u16 len,
+				    unsigned int mask,
+				 const struct vpsa_kernfs_filter_view *view)
+{
+	const char *segments[1] = { name };
+	u16 lens[1] = { len };
+
+	if (!name || !len)
+		return vpsa_kernfs_filter_path_unavailable(mask, view);
+	if (view)
+		return vpsa_kernfs_filter_proc_path_decide_view(segments, lens, 1, mask,
+						    view);
+	return vpsa_kernfs_filter_proc_path_decide(segments, lens, 1, mask);
+}
+
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_name_decide(const char *name, u16 len, unsigned int mask)
+{
+	return vpsa_proc_pid_root_name_decide_view(name, len, mask, NULL);
+}
+
+static enum vpsa_kernfs_filter_decision
+vpsa_proc_pid_root_inode_decide(struct inode *inode, unsigned int mask)
+{
+	struct pid_namespace *ns;
+	struct pid *pid;
+	char name[11];
+	unsigned int tgid;
+	int len;
+
+	if (!inode)
+		return vpsa_kernfs_filter_path_unavailable(mask, NULL);
+
+	pid = proc_pid(inode);
+	if (!pid)
+		return vpsa_kernfs_filter_path_unavailable(mask, NULL);
+
+	ns = proc_pid_ns(inode->i_sb);
+	tgid = pid_nr_ns(pid, ns);
+	if (!tgid)
+		return vpsa_kernfs_filter_path_unavailable(mask, NULL);
+
+	len = snprintf(name, sizeof(name), "%u", tgid);
+	return vpsa_proc_pid_root_name_decide(name, len, mask);
+}
+
 /* for the /proc/ directory itself, after non-process stuff has been done */
 int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 {
+	const struct vpsa_kernfs_filter_view *view = proc_kernfs_filter_dir_view(file);
 	struct tgid_iter iter;
 	struct proc_fs_info *fs_info = proc_sb_info(file_inode(file)->i_sb);
 	struct pid_namespace *ns = proc_pid_ns(file_inode(file)->i_sb);
@@ -3607,14 +3876,24 @@ int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 
 	if (pos == TGID_OFFSET - 2) {
 		struct inode *inode = d_inode(fs_info->proc_self);
-		if (!dir_emit(ctx, "self", 4, inode->i_ino, DT_LNK))
-			return 0;
+
+		if (vpsa_proc_pid_root_name_decide_view("self", 4, MAY_READ,
+							view) !=
+		    VPSA_KERNFS_FILTER_DECISION_HIDE) {
+			if (!dir_emit(ctx, "self", 4, inode->i_ino, DT_LNK))
+				return 0;
+		}
 		ctx->pos = pos = pos + 1;
 	}
 	if (pos == TGID_OFFSET - 1) {
 		struct inode *inode = d_inode(fs_info->proc_thread_self);
-		if (!dir_emit(ctx, "thread-self", 11, inode->i_ino, DT_LNK))
-			return 0;
+
+		if (vpsa_proc_pid_root_name_decide_view("thread-self", 11,
+							MAY_READ, view) !=
+		    VPSA_KERNFS_FILTER_DECISION_HIDE) {
+			if (!dir_emit(ctx, "thread-self", 11, inode->i_ino, DT_LNK))
+				return 0;
+		}
 		ctx->pos = pos = pos + 1;
 	}
 	iter.tgid = pos - TGID_OFFSET;
@@ -3630,6 +3909,10 @@ int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 			continue;
 
 		len = snprintf(name, sizeof(name), "%u", iter.tgid);
+		if (vpsa_proc_pid_root_name_decide_view(name, len, MAY_READ,
+							view) ==
+		    VPSA_KERNFS_FILTER_DECISION_HIDE)
+			continue;
 		ctx->pos = iter.tgid + TGID_OFFSET;
 		if (!proc_fill_cache(file, ctx, name, len,
 				     proc_pid_instantiate, iter.task, NULL)) {
@@ -3656,8 +3939,15 @@ int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 static int proc_tid_comm_permission(struct mnt_idmap *idmap,
 				    struct inode *inode, int mask)
 {
+	enum vpsa_kernfs_filter_decision decision;
 	bool is_same_tgroup;
 	struct task_struct *task;
+
+	decision = proc_kernfs_filter_inode_decide(inode, mask);
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+	if (decision == VPSA_KERNFS_FILTER_DECISION_DENY)
+		return -EACCES;
 
 	task = get_proc_task(inode);
 	if (!task)
@@ -3799,6 +4089,8 @@ static struct dentry *proc_tid_base_lookup(struct inode *dir, struct dentry *den
 
 static const struct file_operations proc_tid_base_operations = {
 	.read		= generic_read_dir,
+	.open		= proc_kernfs_filter_dir_open,
+	.release	= proc_kernfs_filter_dir_release,
 	.iterate_shared	= proc_tid_base_readdir,
 	.llseek		= generic_file_llseek,
 };
@@ -3807,12 +4099,15 @@ static const struct inode_operations proc_tid_base_inode_operations = {
 	.lookup		= proc_tid_base_lookup,
 	.getattr	= pid_getattr,
 	.setattr	= proc_nochmod_setattr,
+	.permission	= proc_pid_permission,
 };
 
 static struct dentry *proc_task_instantiate(struct dentry *dentry,
 	struct task_struct *task, const void *ptr)
 {
+	struct dentry *result;
 	struct inode *inode;
+
 	inode = proc_pid_make_base_inode(dentry->d_sb, task,
 					 S_IFDIR | S_IRUGO | S_IXUGO);
 	if (!inode)
@@ -3825,7 +4120,8 @@ static struct dentry *proc_task_instantiate(struct dentry *dentry,
 	set_nlink(inode, nlink_tid);
 	pid_update_inode(task, inode);
 
-	return d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	result = d_splice_alias_ops(inode, dentry, &pid_dentry_operations);
+	return proc_kernfs_filter_lookup_stamp(result, dentry);
 }
 
 static struct dentry *proc_task_lookup(struct inode *dir, struct dentry * dentry, unsigned int flags)
@@ -3839,6 +4135,11 @@ static struct dentry *proc_task_lookup(struct inode *dir, struct dentry * dentry
 
 	if (!leader)
 		goto out_no_task;
+
+	if (proc_kernfs_filter_dentry_decide(dentry->d_parent,
+					     &dentry->d_name, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		goto out;
 
 	tid = name_to_int(&dentry->d_name);
 	if (tid == ~0U)
@@ -3957,8 +4258,8 @@ static int proc_task_readdir(struct file *file, struct dir_context *ctx)
 	 * return and lseek resets it to 0.
 	 */
 	ns = proc_pid_ns(inode->i_sb);
-	tid = (int)(intptr_t)file->private_data;
-	file->private_data = NULL;
+	tid = (int)proc_kernfs_filter_dir_cookie(file);
+	proc_kernfs_filter_dir_set_cookie(file, 0);
 	for (task = first_tid(proc_pid(inode), tid, ctx->pos - 2, ns);
 	     task;
 	     task = next_tid(task), ctx->pos++) {
@@ -3973,7 +4274,7 @@ static int proc_task_readdir(struct file *file, struct dir_context *ctx)
 				proc_task_instantiate, task, NULL)) {
 			/* returning this tgid failed, save it as the first
 			 * pid for the next readir call */
-			file->private_data = (void *)(intptr_t)tid;
+			proc_kernfs_filter_dir_set_cookie(file, tid);
 			put_task_struct(task);
 			break;
 		}
@@ -3987,7 +4288,13 @@ static int proc_task_getattr(struct mnt_idmap *idmap,
 			     u32 request_mask, unsigned int query_flags)
 {
 	struct inode *inode = d_inode(path->dentry);
-	struct task_struct *p = get_proc_task(inode);
+	struct task_struct *p;
+
+	if (proc_kernfs_filter_dentry_decide(path->dentry, NULL, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+
+	p = get_proc_task(inode);
 	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
 
 	if (p) {
@@ -3999,20 +4306,20 @@ static int proc_task_getattr(struct mnt_idmap *idmap,
 }
 
 /*
- * proc_task_readdir() set @file->private_data to a positive integer
- * value, so casting that to u64 is safe. generic_llseek_cookie() will
- * set @cookie to 0, so casting to an int is safe. The WARN_ON_ONCE() is
- * here to catch any unexpected change in behavior either in
- * proc_task_readdir() or generic_llseek_cookie().
+ * proc_task_readdir() persists the next TID cookie in the per-open
+ * proc_kernfs_filter_dir_state, so casting that to u64 is safe.
+ * generic_llseek_cookie() will set @cookie to 0, so casting to an int is
+ * safe. The WARN_ON_ONCE() is here to catch any unexpected change in
+ * behavior either in proc_task_readdir() or generic_llseek_cookie().
  */
 static loff_t proc_dir_llseek(struct file *file, loff_t offset, int whence)
 {
-	u64 cookie = (u64)(intptr_t)file->private_data;
+	u64 cookie = proc_kernfs_filter_dir_cookie(file);
 	loff_t off;
 
 	off = generic_llseek_cookie(file, offset, whence, &cookie);
 	WARN_ON_ONCE(cookie > INT_MAX);
-	file->private_data = (void *)(intptr_t)cookie; /* serialized by f_pos_lock */
+	proc_kernfs_filter_dir_set_cookie(file, cookie); /* serialized by f_pos_lock */
 	return off;
 }
 
@@ -4025,6 +4332,8 @@ static const struct inode_operations proc_task_inode_operations = {
 
 static const struct file_operations proc_task_operations = {
 	.read		= generic_read_dir,
+	.open		= proc_kernfs_filter_dir_open,
+	.release	= proc_kernfs_filter_dir_release,
 	.iterate_shared	= proc_task_readdir,
 	.llseek		= proc_dir_llseek,
 };
