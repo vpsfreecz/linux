@@ -190,6 +190,10 @@ int kernfs_iop_getattr(struct mnt_idmap *idmap,
 	struct kernfs_node *kn = inode->i_private;
 	struct kernfs_root *root = kernfs_root(kn);
 
+	if (kernfs_vpsa_kernfs_filter_kn_decide(kn, NULL, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+
 	down_read(&root->kernfs_iattr_rwsem);
 	kernfs_refresh_inode(kn, inode);
 	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
@@ -285,6 +289,15 @@ int kernfs_iop_permission(struct mnt_idmap *idmap,
 
 	kn = inode->i_private;
 	root = kernfs_root(kn);
+
+	switch (kernfs_vpsa_kernfs_filter_kn_decide(kn, NULL, mask)) {
+	case VPSA_KERNFS_FILTER_DECISION_HIDE:
+		return -ENOENT;
+	case VPSA_KERNFS_FILTER_DECISION_DENY:
+		return -EACCES;
+	default:
+		break;
+	}
 
 	down_read(&root->kernfs_iattr_rwsem);
 	kernfs_refresh_inode(kn, inode);

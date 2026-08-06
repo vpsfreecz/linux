@@ -86,8 +86,16 @@ static int proc_fdinfo_permission(struct mnt_idmap *idmap, struct inode *inode,
 				  int mask)
 {
 	bool allowed = false;
-	struct task_struct *task = get_proc_task(inode);
+	struct task_struct *task;
+	enum vpsa_kernfs_filter_decision decision;
 
+	decision = proc_kernfs_filter_inode_decide(inode, mask);
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+	if (decision == VPSA_KERNFS_FILTER_DECISION_DENY)
+		return -EACCES;
+
+	task = get_proc_task(inode);
 	if (!task)
 		return -ESRCH;
 
@@ -156,6 +164,9 @@ static int tid_fd_revalidate(struct inode *dir, const struct qstr *name,
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
+	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
+		return 0;
+
 	inode = d_inode(dentry);
 	task = get_proc_task(inode);
 	fd = proc_fd(inode);
@@ -203,6 +214,7 @@ static struct dentry *proc_fd_instantiate(struct dentry *dentry,
 	struct task_struct *task, const void *ptr)
 {
 	const struct fd_data *data = ptr;
+	struct dentry *result;
 	struct proc_inode *ei;
 	struct inode *inode;
 
@@ -219,18 +231,25 @@ static struct dentry *proc_fd_instantiate(struct dentry *dentry,
 	ei->op.proc_get_link = proc_fd_link;
 	tid_fd_update_inode(task, inode, data->mode);
 
-	return proc_splice_unmountable(inode, dentry,
-				       &tid_fd_dentry_operations);
+	result = proc_splice_unmountable(inode, dentry,
+					 &tid_fd_dentry_operations);
+	return proc_kernfs_filter_lookup_stamp(result, dentry);
 }
 
 static struct dentry *proc_lookupfd_common(struct inode *dir,
 					   struct dentry *dentry,
 					   instantiate_t instantiate)
 {
-	struct task_struct *task = get_proc_task(dir);
+	struct task_struct *task;
 	struct fd_data data = {.fd = name_to_int(&dentry->d_name)};
 	struct dentry *result = ERR_PTR(-ENOENT);
 
+	if (proc_kernfs_filter_dentry_decide(dentry->d_parent,
+					     &dentry->d_name, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return result;
+
+	task = get_proc_task(dir);
 	if (!task)
 		goto out_no_task;
 	if (data.fd == ~0U)
@@ -314,6 +333,8 @@ static int proc_fd_iterate(struct file *file, struct dir_context *ctx)
 
 const struct file_operations proc_fd_operations = {
 	.read		= generic_read_dir,
+	.open		= proc_kernfs_filter_dir_open,
+	.release	= proc_kernfs_filter_dir_release,
 	.iterate_shared	= proc_fd_iterate,
 	.llseek		= generic_file_llseek,
 };
@@ -332,7 +353,14 @@ int proc_fd_permission(struct mnt_idmap *idmap,
 		       struct inode *inode, int mask)
 {
 	struct task_struct *p;
+	enum vpsa_kernfs_filter_decision decision;
 	int rv;
+
+	decision = proc_kernfs_filter_inode_decide(inode, mask);
+	if (decision == VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+	if (decision == VPSA_KERNFS_FILTER_DECISION_DENY)
+		return -EACCES;
 
 	rv = generic_permission(&nop_mnt_idmap, inode, mask);
 	if (rv == 0)
@@ -353,6 +381,10 @@ static int proc_fd_getattr(struct mnt_idmap *idmap,
 {
 	struct inode *inode = d_inode(path->dentry);
 
+	if (proc_kernfs_filter_dentry_decide(path->dentry, NULL, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
+
 	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
 	return proc_readfd_count(inode, &stat->size);
 }
@@ -368,6 +400,7 @@ static struct dentry *proc_fdinfo_instantiate(struct dentry *dentry,
 	struct task_struct *task, const void *ptr)
 {
 	const struct fd_data *data = ptr;
+	struct dentry *result;
 	struct proc_inode *ei;
 	struct inode *inode;
 
@@ -383,8 +416,9 @@ static struct dentry *proc_fdinfo_instantiate(struct dentry *dentry,
 	inode->i_fop = &proc_fdinfo_file_operations;
 	tid_fd_update_inode(task, inode, 0);
 
-	return proc_splice_unmountable(inode, dentry,
-				       &tid_fd_dentry_operations);
+	result = proc_splice_unmountable(inode, dentry,
+					 &tid_fd_dentry_operations);
+	return proc_kernfs_filter_lookup_stamp(result, dentry);
 }
 
 static struct dentry *
@@ -407,6 +441,8 @@ const struct inode_operations proc_fdinfo_inode_operations = {
 
 const struct file_operations proc_fdinfo_operations = {
 	.read		= generic_read_dir,
+	.open		= proc_kernfs_filter_dir_open,
+	.release	= proc_kernfs_filter_dir_release,
 	.iterate_shared	= proc_fdinfo_iterate,
 	.llseek		= generic_file_llseek,
 };

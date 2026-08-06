@@ -152,6 +152,12 @@ enum kernfs_root_flag {
 	 * Renames must not change the parent node.
 	 */
 	KERNFS_ROOT_INVARIANT_PARENT		= 0x0010,
+
+	/*
+	 * Route visibility decisions for this root through the vpsAdminOS
+	 * namespace fs policy engine.
+	 */
+	KERNFS_ROOT_FILTER_VISIBILITY		= 0x0020,
 };
 
 /* type-specific structures for kernfs_node union members */
