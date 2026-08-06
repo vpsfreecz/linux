@@ -2087,6 +2087,11 @@ bpf_base_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_get_ns_current_pid_tgid_proto;
 	case BPF_FUNC_get_current_uid_gid:
 		return &bpf_get_current_uid_gid_proto;
+	case BPF_FUNC_loop:
+		if (bpf_token_is_container(prog->aux->token) &&
+		    prog->type == BPF_PROG_TYPE_CGROUP_SYSCTL)
+			return &bpf_loop_proto;
+		break;
 	default:
 		break;
 	}
