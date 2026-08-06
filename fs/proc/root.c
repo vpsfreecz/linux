@@ -433,6 +433,8 @@ static int proc_root_readdir(struct file *file, struct dir_context *ctx)
  */
 static const struct file_operations proc_root_operations = {
 	.read		 = generic_read_dir,
+	.open		 = proc_kernfs_filter_dir_open,
+	.release	 = proc_kernfs_filter_dir_release,
 	.iterate_shared	 = proc_root_readdir,
 	.llseek		= generic_file_llseek,
 };
