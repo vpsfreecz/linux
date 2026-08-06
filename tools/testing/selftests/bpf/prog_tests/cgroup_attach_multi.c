@@ -77,6 +77,7 @@ static int prog_load_cnt(int verdict, int val)
 void serial_test_cgroup_attach_multi(void)
 {
 	__u32 prog_ids[4], prog_cnt = 0, attach_flags, saved_prog_id;
+	__u32 allow_prog_ids[7];
 	int cg1 = 0, cg2 = 0, cg3 = 0, cg4 = 0, cg5 = 0, key = 0;
 	DECLARE_LIBBPF_OPTS(bpf_prog_attach_opts, attach_opts);
 	int allow_prog[7] = {-1};
@@ -85,10 +86,19 @@ void serial_test_cgroup_attach_multi(void)
 	int i = 0;
 
 	for (i = 0; i < ARRAY_SIZE(allow_prog); i++) {
+		struct bpf_prog_info info = {};
+		__u32 info_len = sizeof(info);
+
 		allow_prog[i] = prog_load_cnt(1, 1 << i);
 		if (CHECK(allow_prog[i] < 0, "prog_load",
 			  "verifier output:\n%s\n-------\n", bpf_log_buf))
 			goto err;
+		if (CHECK(bpf_prog_get_info_by_fd(allow_prog[i], &info, &info_len),
+			  "prog_info", "errno=%d\n", errno))
+			goto err;
+		if (CHECK(!info.id, "prog_id", "program %d has ID 0\n", i))
+			goto err;
+		allow_prog_ids[i] = info.id;
 	}
 
 	if (CHECK_FAIL(setup_cgroup_environment()))
@@ -161,6 +171,10 @@ void serial_test_cgroup_attach_multi(void)
 				  prog_ids, &prog_cnt));
 	CHECK_FAIL(prog_cnt != 4);
 	CHECK_FAIL(attach_flags != 0);
+	CHECK_FAIL(prog_ids[0] != allow_prog_ids[5]);
+	CHECK_FAIL(prog_ids[1] != allow_prog_ids[3]);
+	CHECK_FAIL(prog_ids[2] != allow_prog_ids[1]);
+	CHECK_FAIL(prog_ids[3] != allow_prog_ids[0]);
 	saved_prog_id = prog_ids[0];
 	/* check enospc handling */
 	prog_ids[0] = 0;
@@ -275,6 +289,9 @@ void serial_test_cgroup_attach_multi(void)
 				  prog_ids, &prog_cnt));
 	CHECK_FAIL(prog_cnt != 3);
 	CHECK_FAIL(attach_flags != 0);
+	CHECK_FAIL(prog_ids[0] != allow_prog_ids[2]);
+	CHECK_FAIL(prog_ids[1] != allow_prog_ids[1]);
+	CHECK_FAIL(prog_ids[2] != allow_prog_ids[6]);
 	CHECK_FAIL(bpf_prog_query(cg5, BPF_CGROUP_INET_EGRESS, 0, NULL,
 				  prog_ids, &prog_cnt));
 	CHECK_FAIL(prog_cnt != 0);
