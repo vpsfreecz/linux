@@ -24,7 +24,7 @@
  */
 #define TMP_STR_BUF_LEN 320
 /* Patch buffer size */
-#define INSN_BUF_SIZE 32
+#define INSN_BUF_SIZE 80
 
 #define ITER_PREFIX "bpf_iter_"
 

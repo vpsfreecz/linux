@@ -329,6 +329,7 @@ static bool bpf_token_allow_helper(const struct bpf_token *token,
 	case BPF_FUNC_ktime_get_boot_ns:
 	case BPF_FUNC_ktime_get_tai_ns:
 	case BPF_FUNC_jiffies64:
+	case BPF_FUNC_skb_load_bytes:
 	case BPF_FUNC_ringbuf_output:
 	case BPF_FUNC_ringbuf_reserve:
 	case BPF_FUNC_ringbuf_submit:
@@ -347,11 +348,16 @@ static bool bpf_token_allow_helper(const struct bpf_token *token,
 	case BPF_FUNC_snprintf:
 	case BPF_FUNC_loop:
 	case BPF_FUNC_get_current_pid_tgid:
+	case BPF_FUNC_get_current_cgroup_id:
+	case BPF_FUNC_current_task_under_cgroup:
 	case BPF_FUNC_get_ns_current_pid_tgid:
 	case BPF_FUNC_get_current_uid_gid:
 	case BPF_FUNC_get_current_comm:
 	case BPF_FUNC_probe_read_user:
 	case BPF_FUNC_probe_read_user_str:
+	case BPF_FUNC_sysctl_get_name:
+	case BPF_FUNC_sysctl_get_current_value:
+	case BPF_FUNC_sysctl_get_new_value:
 	case BPF_FUNC_perf_event_output:
 	case BPF_FUNC_get_attach_cookie:
 		return true;
@@ -390,8 +396,12 @@ bool bpf_token_allow_prog_helper(const struct bpf_prog *prog,
 	if (!bpf_token_is_container(prog->aux->token))
 		return true;
 
-	return bpf_token_allow_helper(prog->aux->token, func_id) ||
-	       bpf_token_allow_tracing_prog_helper(prog, func_id);
+	if (bpf_token_allow_helper(prog->aux->token, func_id))
+		return true;
+	if (bpf_token_allow_tracing_prog_helper(prog, func_id))
+		return true;
+
+	return false;
 }
 
 bool bpf_token_capable(const struct bpf_token *token, int cap)

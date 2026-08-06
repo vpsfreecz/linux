@@ -212,6 +212,31 @@ static int ref_set_non_owning(struct bpf_verifier_env *env,
 static void specialize_kfunc(struct bpf_verifier_env *env,
 			     u32 func_id, u16 offset, unsigned long *addr);
 static bool is_trusted_reg(const struct bpf_reg_state *reg);
+static bool verifier_container_cgroup_bind_prog(const struct bpf_prog *prog)
+{
+	return bpf_token_is_container(prog->aux->token) &&
+	       prog->type == BPF_PROG_TYPE_CGROUP_SOCK_ADDR &&
+	       (prog->expected_attach_type == BPF_CGROUP_INET4_BIND ||
+		prog->expected_attach_type == BPF_CGROUP_INET6_BIND);
+}
+
+static bool verifier_container_cgroup_sysctl_prog(const struct bpf_prog *prog)
+{
+	return bpf_token_is_container(prog->aux->token) &&
+	       prog->type == BPF_PROG_TYPE_CGROUP_SYSCTL &&
+	       prog->expected_attach_type == BPF_CGROUP_SYSCTL;
+}
+
+static bool verifier_zero_inits_stack(const struct bpf_prog *prog)
+{
+	return verifier_container_cgroup_sysctl_prog(prog);
+}
+
+static bool verifier_allows_scalar_precision(const struct bpf_verifier_env *env)
+{
+	return env->bpf_capable ||
+	       verifier_container_cgroup_bind_prog(env->prog);
+}
 
 static bool bpf_map_ptr_poisoned(const struct bpf_insn_aux_data *aux)
 {
@@ -297,7 +322,9 @@ struct bpf_call_arg_meta {
 	u32 ret_btf_id;
 	u32 subprogno;
 	struct btf_field *kptr_field;
-	s64 const_map_key;
+	bool map_key_range_known;
+	u64 map_key_min;
+	u64 map_key_max;
 	bool container_spill_ptr;
 	struct btf *container_spill_btf;
 	u32 container_spill_btf_id;
@@ -2203,7 +2230,7 @@ static void __mark_reg_const_zero(const struct bpf_verifier_env *env, struct bpf
 	/* all scalars are assumed imprecise initially (unless unprivileged,
 	 * in which case everything is forced to be precise)
 	 */
-	reg->precise = !env->bpf_capable;
+	reg->precise = !verifier_allows_scalar_precision(env);
 }
 
 static void mark_reg_known_zero(struct bpf_verifier_env *env,
@@ -2842,13 +2869,13 @@ static void __mark_reg_unknown_imprecise(struct bpf_reg_state *reg)
 }
 
 /* Mark a register as having a completely unknown (scalar) value,
- * initialize .precise as true when not bpf capable.
+ * initialize .precise as true when precision tracking is not available.
  */
 static void __mark_reg_unknown(const struct bpf_verifier_env *env,
 			       struct bpf_reg_state *reg)
 {
 	__mark_reg_unknown_imprecise(reg);
-	reg->precise = !env->bpf_capable;
+	reg->precise = !verifier_allows_scalar_precision(env);
 }
 
 static void mark_reg_unknown(struct bpf_verifier_env *env,
@@ -3513,7 +3540,9 @@ static int add_subprog_and_kfunc(struct bpf_verifier_env *env)
 		    !bpf_pseudo_kfunc_call(insn))
 			continue;
 
-		if (!env->bpf_capable) {
+		if (!env->bpf_capable &&
+		    (!verifier_container_cgroup_sysctl_prog(env->prog) ||
+		     !bpf_pseudo_func(insn))) {
 			verbose(env, "loading/calling other bpf or kernel functions are allowed for CAP_BPF and CAP_SYS_ADMIN\n");
 			return -EPERM;
 		}
@@ -4779,7 +4808,7 @@ static int __mark_chain_precision(struct bpf_verifier_env *env,
 	struct bpf_reg_state *reg;
 	int i, fr, err;
 
-	if (!env->bpf_capable)
+	if (!verifier_allows_scalar_precision(env))
 		return 0;
 
 	changed = changed ?: &tmp;
@@ -5179,7 +5208,8 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
 
 	check_fastcall_stack_contract(env, state, insn_idx, off);
 	mark_stack_slot_scratched(env, spi);
-	if (reg && !(off % BPF_REG_SIZE) && reg->type == SCALAR_VALUE && env->bpf_capable) {
+	if (reg && !(off % BPF_REG_SIZE) && reg->type == SCALAR_VALUE &&
+	    verifier_allows_scalar_precision(env)) {
 		bool reg_value_fits;
 
 		reg_value_fits = get_reg_width(reg) <= BITS_PER_BYTE * size;
@@ -5191,7 +5221,7 @@ static int check_stack_write_fixed_off(struct bpf_verifier_env *env,
 		if (!reg_value_fits)
 			state->stack[spi].spilled_ptr.id = 0;
 	} else if (!reg && !(off % BPF_REG_SIZE) && is_bpf_st_mem(insn) &&
-		   env->bpf_capable) {
+		   verifier_allows_scalar_precision(env)) {
 		struct bpf_reg_state *tmp_reg = &env->fake_reg[0];
 
 		memset(tmp_reg, 0, sizeof(*tmp_reg));
@@ -5286,6 +5316,13 @@ static int check_stack_write_var_off(struct bpf_verifier_env *env,
 	if ((value_reg && register_is_null(value_reg)) ||
 	    (!value_reg && is_bpf_st_mem(insn) && insn->imm == 0))
 		writing_zero = true;
+	if (verifier_container_cgroup_sysctl_prog(env->prog) &&
+	    !writing_zero) {
+		verbose(env,
+			"R%d variable stack writes in container cgroup/sysctl must store zero\n",
+			ptr_regno);
+		return -EACCES;
+	}
 
 	for (i = min_off; i < max_off; i++) {
 		int spi;
@@ -5307,7 +5344,10 @@ static int check_stack_write_var_off(struct bpf_verifier_env *env,
 		stype = &state->stack[spi].slot_type[slot % BPF_REG_SIZE];
 		mark_stack_slot_scratched(env, spi);
 
-		if (!env->allow_ptr_leaks && *stype != STACK_MISC && *stype != STACK_ZERO) {
+		if (!env->allow_ptr_leaks &&
+		    *stype != STACK_MISC && *stype != STACK_ZERO &&
+		    !(*stype == STACK_INVALID &&
+		      verifier_zero_inits_stack(env->prog))) {
 			/* Reject the write if range we may write to has not
 			 * been initialized beforehand. If we didn't reject
 			 * here, the ptr status would be erased below (even
@@ -5347,7 +5387,10 @@ static int check_stack_write_var_off(struct bpf_verifier_env *env,
 
 		/* Update the slot type. */
 		new_type = STACK_MISC;
-		if (writing_zero && *stype == STACK_ZERO) {
+		if (writing_zero &&
+		    (*stype == STACK_ZERO ||
+		     (*stype == STACK_INVALID &&
+		      verifier_zero_inits_stack(env->prog)))) {
 			new_type = STACK_ZERO;
 			zero_used = true;
 		}
@@ -5560,7 +5603,8 @@ static int check_stack_range_initialized(struct bpf_verifier_env *env,
 					 int regno, int off, int access_size,
 					 bool zero_size_allowed,
 					 enum bpf_access_type type,
-					 struct bpf_call_arg_meta *meta);
+					 struct bpf_call_arg_meta *meta,
+					 bool direct_var_access);
 
 static struct bpf_reg_state *reg_state(struct bpf_verifier_env *env, int regno)
 {
@@ -5592,7 +5636,7 @@ static int check_stack_read_var_off(struct bpf_verifier_env *env,
 	/* Note that we pass a NULL meta, so raw access will not be permitted.
 	 */
 	err = check_stack_range_initialized(env, ptr_regno, off, size,
-					    false, BPF_READ, NULL);
+					    false, BPF_READ, NULL, true);
 	if (err)
 		return err;
 
@@ -5682,7 +5726,7 @@ static int check_stack_write(struct bpf_verifier_env *env,
 		err = check_stack_write_fixed_off(env, state, off, size,
 						  value_regno, insn_idx);
 	} else {
-		/* Variable offset stack reads need more conservative handling
+		/* Variable offset stack writes need more conservative handling
 		 * than fixed offset ones.
 		 */
 		err = check_stack_write_var_off(env, state,
@@ -7642,6 +7686,27 @@ static int check_stack_access_within_bounds(
 	return grow_stack_state(env, state, -min_off /* size */);
 }
 
+static bool
+container_cgroup_sysctl_stack_var_access_allowed(struct bpf_verifier_env *env,
+						 const struct bpf_reg_state *reg,
+						 int off, int access_size)
+{
+	s64 min_off, max_off;
+
+	if (!verifier_container_cgroup_sysctl_prog(env->prog) ||
+	    base_type(reg->type) != PTR_TO_STACK ||
+	    tnum_is_const(reg->var_off) ||
+	    access_size <= 0 ||
+	    reg->smax_value >= BPF_MAX_VAR_OFF ||
+	    reg->smin_value <= -BPF_MAX_VAR_OFF)
+		return false;
+
+	min_off = reg->smin_value + off;
+	max_off = reg->smax_value + off + access_size;
+
+	return min_off >= -MAX_BPF_STACK && max_off <= 0;
+}
+
 static bool get_func_retval_range(struct bpf_prog *prog,
 				  struct bpf_retval_range *range)
 {
@@ -8155,7 +8220,8 @@ static int check_atomic(struct bpf_verifier_env *env, struct bpf_insn *insn)
 static int check_stack_range_initialized(
 		struct bpf_verifier_env *env, int regno, int off,
 		int access_size, bool zero_size_allowed,
-		enum bpf_access_type type, struct bpf_call_arg_meta *meta)
+		enum bpf_access_type type, struct bpf_call_arg_meta *meta,
+		bool direct_var_access)
 {
 	struct bpf_reg_state *reg = reg_state(env, regno);
 	struct bpf_func_state *state = func(env, reg);
@@ -8186,7 +8252,11 @@ static int check_stack_range_initialized(
 		 * Spectre masking for stack ALU.
 		 * See also retrieve_ptr_limit().
 		 */
-		if (!env->bypass_spec_v1) {
+		if (!env->bypass_spec_v1 &&
+		    (!direct_var_access || type != BPF_READ ||
+		     !container_cgroup_sysctl_stack_var_access_allowed(env, reg,
+								       off,
+								       access_size))) {
 			char tn_buf[48];
 
 			tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
@@ -8351,10 +8421,10 @@ static int check_helper_mem_access(struct bpf_verifier_env *env, int regno,
 					   access_size, zero_size_allowed,
 					   max_access);
 	case PTR_TO_STACK:
-		return check_stack_range_initialized(
-				env,
-				regno, reg->off, access_size,
-				zero_size_allowed, access_type, meta);
+		return check_stack_range_initialized(env, regno, reg->off,
+						     access_size,
+						     zero_size_allowed,
+						     access_type, meta, false);
 	case PTR_TO_BTF_ID:
 		return check_ptr_to_btf_access(env, regs, regno, reg->off,
 					       access_size, BPF_READ, -1);
@@ -9883,11 +9953,10 @@ static int check_reg_const_str(struct bpf_verifier_env *env,
 	return 0;
 }
 
-/* Returns constant key value in `value` if possible, else negative error */
-static int get_constant_map_key(struct bpf_verifier_env *env,
-				struct bpf_reg_state *key,
-				u32 key_size,
-				s64 *value)
+/* Returns a known u32 key range for stack-backed array map keys. */
+static int get_map_key_range(struct bpf_verifier_env *env,
+			     struct bpf_reg_state *key,
+			     u32 key_size, u64 *min, u64 *max)
 {
 	struct bpf_func_state *state = func(env, key);
 	struct bpf_reg_state *reg;
@@ -9898,7 +9967,9 @@ static int get_constant_map_key(struct bpf_verifier_env *env,
 	int i, err;
 	u8 *stype;
 
-	if (!env->bpf_capable)
+	if (!verifier_allows_scalar_precision(env))
+		return -EOPNOTSUPP;
+	if (key_size != sizeof(u32))
 		return -EOPNOTSUPP;
 	if (key->type != PTR_TO_STACK)
 		return -EOPNOTSUPP;
@@ -9911,15 +9982,14 @@ static int get_constant_map_key(struct bpf_verifier_env *env,
 	off = slot % BPF_REG_SIZE;
 	stype = state->stack[spi].slot_type;
 
-	/* First handle precisely tracked STACK_ZERO */
 	for (i = off; i >= 0 && stype[i] == STACK_ZERO; i--)
 		zero_size++;
 	if (zero_size >= key_size) {
-		*value = 0;
+		*min = 0;
+		*max = 0;
 		return 0;
 	}
 
-	/* Check that stack contains a scalar spill of expected size */
 	if (!is_spilled_scalar_reg(&state->stack[spi]))
 		return -EOPNOTSUPP;
 	for (i = off; i >= 0 && stype[i] == STACK_SPILL; i--)
@@ -9928,19 +9998,32 @@ static int get_constant_map_key(struct bpf_verifier_env *env,
 		return -EOPNOTSUPP;
 
 	reg = &state->stack[spi].spilled_ptr;
-	if (!tnum_is_const(reg->var_off))
-		/* Stack value not statically known */
+
+	if (env->bpf_capable && !tnum_is_const(reg->var_off))
 		return -EOPNOTSUPP;
 
-	/* We are relying on a constant value. So mark as precise
-	 * to prevent pruning on it.
-	 */
 	bt_set_frame_slot(&env->bt, key->frameno, spi);
 	err = mark_chain_precision_batch(env, env->cur_state);
 	if (err < 0)
 		return err;
 
-	*value = reg->var_off.value;
+	if (env->bpf_capable) {
+		/*
+		 * Preserve the upstream privileged contract: nullness
+		 * elision for a privileged program is based on a constant
+		 * key, not merely on verifier bounds.
+		 */
+		*min = reg->var_off.value;
+		*max = reg->var_off.value;
+	} else {
+		/*
+		 * Stock systemd socket-bind programs need bounded array
+		 * indexes.  This path is reachable only for the narrowly
+		 * admitted container cgroup bind shape.
+		 */
+		*min = reg->u32_min_value;
+		*max = reg->u32_max_value;
+	}
 	return 0;
 }
 
@@ -10113,13 +10196,16 @@ skip_type_check:
 		if (err)
 			return err;
 		if (can_elide_value_nullness(meta->map.ptr)) {
-			err = get_constant_map_key(env, reg, key_size, &meta->const_map_key);
+			err = get_map_key_range(env, reg, key_size,
+						&meta->map_key_min,
+						&meta->map_key_max);
 			if (err < 0) {
-				meta->const_map_key = -1;
 				if (err == -EOPNOTSUPP)
 					err = 0;
 				else
 					return err;
+			} else {
+				meta->map_key_range_known = true;
 			}
 		}
 		break;
@@ -11711,6 +11797,8 @@ static int get_helper_proto(struct bpf_verifier_env *env, int func_id,
 
 	if (!env->ops->get_func_proto)
 		return -EINVAL;
+	if (!bpf_token_allow_prog_helper(env->prog, func_id))
+		return -EACCES;
 
 	*ptr = env->ops->get_func_proto(func_id, env->prog);
 	return *ptr && (*ptr)->func ? 0 : -EINVAL;
@@ -12082,12 +12170,16 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 			verifier_bug(env, "unexpected null map_ptr");
 			return -EFAULT;
 		}
-
 		if (func_id == BPF_FUNC_map_lookup_elem &&
 		    can_elide_value_nullness(meta.map.ptr) &&
-		    meta.const_map_key >= 0 &&
-		    meta.const_map_key < meta.map.ptr->max_entries)
-			ret_flag &= ~PTR_MAYBE_NULL;
+		    meta.map_key_range_known) {
+			if (meta.map_key_max < meta.map.ptr->max_entries) {
+				ret_flag &= ~PTR_MAYBE_NULL;
+			} else if (meta.map_key_min >= meta.map.ptr->max_entries) {
+				__mark_reg_const_zero(env, &regs[BPF_REG_0]);
+				break;
+			}
+		}
 
 		regs[BPF_REG_0].map_ptr = meta.map.ptr;
 		regs[BPF_REG_0].map_uid = meta.map.uid;
@@ -14676,6 +14768,26 @@ struct bpf_sanitize_info {
 	bool mask_to_left;
 };
 
+static bool
+container_cgroup_sysctl_stack_alu_needs_nospec(const struct bpf_verifier_env *env,
+					       const struct bpf_insn *insn,
+					       const struct bpf_reg_state *ptr_reg)
+{
+	/* Stock systemd-networkd's cgroup/sysctl monitor indexes bounded
+	 * stack strings in loops. The same ADD can be revisited with a verifier
+	 * constant whose value differs between paths, or with a nonconstant, so
+	 * a single ALU mask cannot represent every path safely. Use the
+	 * verifier's upstream speculation-barrier fallback instead. Any later
+	 * speculative access which needs a narrower bound remains subject to
+	 * normal speculative-path verification and its own nospec barrier.
+	 */
+	return verifier_container_cgroup_sysctl_prog(env->prog) &&
+	       BPF_CLASS(insn->code) == BPF_ALU64 &&
+	       BPF_SRC(insn->code) == BPF_X &&
+	       BPF_OP(insn->code) == BPF_ADD &&
+	       base_type(ptr_reg->type) == PTR_TO_STACK;
+}
+
 static struct bpf_verifier_state *
 sanitize_speculative_path(struct bpf_verifier_env *env,
 			  const struct bpf_insn *insn,
@@ -14715,6 +14827,12 @@ static int sanitize_ptr_alu(struct bpf_verifier_env *env,
 	struct bpf_reg_state tmp;
 	bool ret;
 	int err;
+
+	if (container_cgroup_sysctl_stack_alu_needs_nospec(env, insn, ptr_reg)) {
+		cur_aux(env)->alu_state = 0;
+		cur_aux(env)->nospec = true;
+		return 0;
+	}
 
 	if (can_skip_alu_sanitation(env, insn))
 		return 0;
@@ -14863,12 +14981,17 @@ static int check_stack_access_for_ptr_arithmetic(
 	if (!tnum_is_const(reg->var_off)) {
 		char tn_buf[48];
 
+		if (container_cgroup_sysctl_stack_var_access_allowed(env, reg,
+								     off, 1))
+			return 0;
+
 		tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
 		verbose(env, "R%d variable stack access prohibited for !root, var_off=%s off=%d\n",
 			regno, tn_buf, off);
 		return -EACCES;
 	}
 
+	off += reg->var_off.value;
 	if (off >= 0 || off < -MAX_BPF_STACK) {
 		verbose(env, "R%d stack pointer arithmetic goes out of range, "
 			"prohibited for !root; off=%d\n", regno, off);
@@ -14893,7 +15016,7 @@ static int sanitize_check_bounds(struct bpf_verifier_env *env,
 	switch (dst_reg->type) {
 	case PTR_TO_STACK:
 		if (check_stack_access_for_ptr_arithmetic(env, dst, dst_reg,
-					dst_reg->off + dst_reg->var_off.value))
+					dst_reg->off))
 			return -EACCES;
 		break;
 	case PTR_TO_MAP_VALUE:
@@ -16087,13 +16210,18 @@ static int adjust_reg_min_max_vals(struct bpf_verifier_env *env,
 	 * So remember constant delta between r2 and r1 and update r1 after
 	 * 'if' condition.
 	 */
-	if (env->bpf_capable &&
-	    (BPF_OP(insn->code) == BPF_ADD || BPF_OP(insn->code) == BPF_SUB) &&
+	if (verifier_allows_scalar_precision(env) &&
+	    (BPF_OP(insn->code) == BPF_ADD ||
+	     (env->bpf_capable && BPF_OP(insn->code) == BPF_SUB)) &&
+	    (env->bpf_capable || !alu32) &&
 	    dst_reg->id && is_reg_const(src_reg, alu32) &&
 	    !(BPF_SRC(insn->code) == BPF_X && insn->src_reg == insn->dst_reg)) {
 		u64 val = reg_const_value(src_reg, alu32);
 		s32 off;
 
+		/* Keep container exceptions on nonnegative 64-bit ADD deltas. */
+		if (!env->bpf_capable && val > (u32)S32_MAX)
+			goto clear_id;
 		if (!alu32 && ((s64)val < S32_MIN || (s64)val > S32_MAX))
 			goto clear_id;
 
@@ -20217,7 +20345,8 @@ miss:
 	if (env->max_states_per_insn < states_cnt)
 		env->max_states_per_insn = states_cnt;
 
-	if (!env->bpf_capable && states_cnt > BPF_COMPLEXITY_LIMIT_STATES)
+	if (!verifier_allows_scalar_precision(env) &&
+	    states_cnt > BPF_COMPLEXITY_LIMIT_STATES)
 		return 0;
 
 	if (!add_new_state)
@@ -20242,7 +20371,7 @@ miss:
 	env->prev_insn_processed = env->insn_processed;
 
 	/* forget precise markings we inherited, see __mark_chain_precision */
-	if (env->bpf_capable)
+	if (verifier_allows_scalar_precision(env))
 		mark_all_scalars_imprecise(env, cur);
 
 	/* add new state to the head of linked list */
@@ -21448,6 +21577,35 @@ static int adjust_jmp_off(struct bpf_prog *prog, u32 tgt_idx, u32 delta)
 			insn->off = off;
 		}
 	}
+	return 0;
+}
+
+static int zero_init_subprog_stack(struct bpf_verifier_env *env, u32 subprog_start,
+				   u16 stack_depth)
+{
+	struct bpf_insn *patch = env->insn_buf;
+	struct bpf_prog *new_prog;
+	int cnt = 0, off;
+
+	stack_depth = round_up(stack_depth, BPF_REG_SIZE);
+	if (!stack_depth)
+		return 0;
+
+	for (off = -stack_depth; off < 0; off += BPF_REG_SIZE) {
+		if (cnt >= INSN_BUF_SIZE - 1) {
+			verifier_bug(env, "stack zero-init patch exceeds insn buffer");
+			return -EFAULT;
+		}
+		patch[cnt++] = BPF_ST_MEM(BPF_DW, BPF_REG_FP, off, 0);
+	}
+	patch[cnt++] = env->prog->insnsi[subprog_start];
+
+	new_prog = bpf_patch_insn_data(env, subprog_start, patch, cnt);
+	if (!new_prog)
+		return -ENOMEM;
+
+	env->prog = new_prog;
+	WARN_ON(adjust_jmp_off(env->prog, subprog_start, cnt - 1));
 	return 0;
 }
 
@@ -23533,6 +23691,16 @@ next_insn:
 		WARN_ON(adjust_jmp_off(env->prog, subprog_start, delta));
 	}
 
+	if (verifier_zero_inits_stack(prog)) {
+		for (i = 0; i < env->subprog_cnt; i++) {
+			ret = zero_init_subprog_stack(env, subprogs[i].start,
+						      subprogs[i].stack_depth);
+			if (ret)
+				return ret;
+			prog = env->prog;
+		}
+	}
+
 	/* Since poke tab is now finalized, publish aux to tracker. */
 	for (i = 0; i < prog->aux->size_poke_tab; i++) {
 		map_ptr = prog->aux->poke_tab[i].tail_call.map;
@@ -25173,7 +25341,8 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr, __u3
 	env->ops = bpf_verifier_ops[env->prog->type];
 
 	env->allow_ptr_leaks = bpf_allow_ptr_leaks(env->prog->aux->token);
-	env->allow_uninit_stack = bpf_allow_uninit_stack(env->prog->aux->token);
+	env->allow_uninit_stack = bpf_allow_uninit_stack(env->prog->aux->token) ||
+				  verifier_zero_inits_stack(env->prog);
 	env->bypass_spec_v1 = bpf_bypass_spec_v1(env->prog->aux->token);
 	env->bypass_spec_v4 = bpf_bypass_spec_v4(env->prog->aux->token);
 	env->bpf_capable = is_priv = bpf_token_capable(env->prog->aux->token, CAP_BPF);

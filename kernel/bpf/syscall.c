@@ -1400,8 +1400,11 @@ static bool bpf_container_map_type_allowed(enum bpf_map_type map_type)
 	case BPF_MAP_TYPE_PERCPU_HASH:
 	case BPF_MAP_TYPE_LRU_HASH:
 	case BPF_MAP_TYPE_LRU_PERCPU_HASH:
+	case BPF_MAP_TYPE_LPM_TRIE:
+	case BPF_MAP_TYPE_HASH_OF_MAPS:
 	case BPF_MAP_TYPE_PROG_ARRAY:
 	case BPF_MAP_TYPE_PERF_EVENT_ARRAY:
+	case BPF_MAP_TYPE_CGROUP_ARRAY:
 	case BPF_MAP_TYPE_RINGBUF:
 		return true;
 	default:
@@ -1412,16 +1415,63 @@ static bool bpf_container_map_type_allowed(enum bpf_map_type map_type)
 static bool bpf_container_prog_type_allowed(enum bpf_prog_type prog_type,
 					    enum bpf_attach_type attach_type)
 {
-	(void)attach_type;
-
 	switch (prog_type) {
 	case BPF_PROG_TYPE_KPROBE:
 	case BPF_PROG_TYPE_TRACEPOINT:
 	case BPF_PROG_TYPE_PERF_EVENT:
 		return true;
+	case BPF_PROG_TYPE_CGROUP_SKB:
+		return !attach_type ||
+		       attach_type == BPF_CGROUP_INET_INGRESS ||
+		       attach_type == BPF_CGROUP_INET_EGRESS;
+	case BPF_PROG_TYPE_CGROUP_SOCK:
+		return attach_type == BPF_CGROUP_INET_SOCK_CREATE;
+	case BPF_PROG_TYPE_CGROUP_SOCK_ADDR:
+		return attach_type == BPF_CGROUP_INET4_BIND ||
+		       attach_type == BPF_CGROUP_INET6_BIND;
+	case BPF_PROG_TYPE_CGROUP_DEVICE:
+		return !attach_type || attach_type == BPF_CGROUP_DEVICE;
+	case BPF_PROG_TYPE_CGROUP_SYSCTL:
+		return !attach_type || attach_type == BPF_CGROUP_SYSCTL;
+	case BPF_PROG_TYPE_LSM:
 	default:
 		return false;
 	}
+}
+
+static bool
+bpf_container_cgroup_attach_type_allowed(enum bpf_attach_type attach_type)
+{
+	switch (attach_type) {
+	case BPF_CGROUP_INET_INGRESS:
+	case BPF_CGROUP_INET_EGRESS:
+	case BPF_CGROUP_INET_SOCK_CREATE:
+	case BPF_CGROUP_INET4_BIND:
+	case BPF_CGROUP_INET6_BIND:
+	case BPF_CGROUP_DEVICE:
+	case BPF_CGROUP_SYSCTL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int
+bpf_container_cgroup_net_admin(enum bpf_attach_type attach_type)
+{
+	struct bpf_token *token;
+	int ret = 0;
+
+	if (!bpf_container_cgroup_attach_type_allowed(attach_type))
+		return -EPERM;
+
+	token = bpf_get_effective_container_token();
+	if (IS_ERR(token))
+		return PTR_ERR(token);
+	if (!bpf_token_capable(token, CAP_NET_ADMIN))
+		ret = -EPERM;
+	bpf_token_put(token);
+	return ret;
 }
 
 #define BPF_MAP_CREATE_LAST_FIELD excl_prog_hash_size
@@ -1433,6 +1483,7 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	int numa_node = bpf_map_attr_numa_node(attr);
 	u32 map_type = attr->map_type;
 	struct bpf_map *map;
+	bool container_map_allowed = false;
 	bool token_flag;
 	int f_flags;
 	int err;
@@ -1508,9 +1559,12 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 			return PTR_ERR(token);
 	}
 
-	if (bpf_token_is_container(token) && !bpf_container_map_type_allowed(attr->map_type)) {
-		err = -EPERM;
-		goto put_token;
+	if (bpf_token_is_container(token)) {
+		container_map_allowed = bpf_container_map_type_allowed(attr->map_type);
+		if (!container_map_allowed) {
+			err = -EPERM;
+			goto put_token;
+		}
 	}
 
 	err = -EPERM;
@@ -1521,7 +1575,9 @@ static int map_create(union bpf_attr *attr, bpfptr_t uattr)
 	 * object creation success. Even with unprivileged BPF disabled,
 	 * capability checks are still carried out.
 	 */
-	if (sysctl_unprivileged_bpf_disabled && !bpf_token_capable(token, CAP_BPF))
+	if (sysctl_unprivileged_bpf_disabled &&
+	    !container_map_allowed &&
+	    !bpf_token_capable(token, CAP_BPF))
 		goto put_token;
 
 	/* check privileged map type permissions */
@@ -2976,6 +3032,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	struct bpf_prog *prog, *dst_prog = NULL;
 	struct btf *attach_btf = NULL;
 	struct bpf_token *token = NULL;
+	bool container_prog_allowed = false;
 	bool bpf_cap;
 	int err;
 	char license[128];
@@ -3016,11 +3073,14 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 			return PTR_ERR(token);
 	}
 
-	if (bpf_token_is_container(token) &&
-	    !bpf_container_prog_type_allowed(attr->prog_type,
-					 attr->expected_attach_type)) {
-		err = -EPERM;
-		goto put_token;
+	if (bpf_token_is_container(token)) {
+		container_prog_allowed =
+			bpf_container_prog_type_allowed(attr->prog_type,
+							attr->expected_attach_type);
+		if (!container_prog_allowed) {
+			err = -EPERM;
+			goto put_token;
+		}
 	}
 
 	bpf_cap = bpf_token_capable(token, CAP_BPF);
@@ -3038,7 +3098,9 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	 * capability checks are still carried out for these
 	 * and other operations.
 	 */
-	if (sysctl_unprivileged_bpf_disabled && !bpf_cap)
+	if (sysctl_unprivileged_bpf_disabled &&
+	    !container_prog_allowed &&
+	    !bpf_cap)
 		goto put_token;
 
 	if (attr->insn_cnt == 0 ||
@@ -3048,6 +3110,7 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	}
 	if (type != BPF_PROG_TYPE_SOCKET_FILTER &&
 	    type != BPF_PROG_TYPE_CGROUP_SKB &&
+	    !container_prog_allowed &&
 	    !bpf_cap)
 		goto put_token;
 
@@ -4699,10 +4762,18 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 {
 	struct bpf_prog *prog = NULL;
 	enum bpf_prog_type ptype;
+	bool restrict_cgroupns;
 	int ret;
 
 	if (CHECK_ATTR(BPF_PROG_DETACH))
 		return -EINVAL;
+
+	restrict_cgroupns = bpf_token_current_container_member();
+	if (restrict_cgroupns) {
+		ret = bpf_container_cgroup_net_admin(attr->attach_type);
+		if (ret)
+			return ret;
+	}
 
 	ptype = attach_type_to_prog_type(attr->attach_type);
 	if (bpf_mprog_supported(ptype)) {
@@ -4745,7 +4816,8 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 	case BPF_PROG_TYPE_CGROUP_SYSCTL:
 	case BPF_PROG_TYPE_SOCK_OPS:
 	case BPF_PROG_TYPE_LSM:
-		ret = cgroup_bpf_prog_detach(attr, ptype);
+		ret = cgroup_bpf_prog_detach(attr, ptype,
+					     restrict_cgroupns);
 		break;
 	case BPF_PROG_TYPE_SCHED_CLS:
 		if (attr->attach_type == BPF_TCX_INGRESS ||
@@ -4768,12 +4840,21 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 static int bpf_prog_query(const union bpf_attr *attr,
 			  union bpf_attr __user *uattr, u32 uattr_size)
 {
-	if (!bpf_net_capable())
+	bool restrict_cgroupns = bpf_token_current_container_member();
+	int ret;
+
+	if (!restrict_cgroupns && !bpf_net_capable())
 		return -EPERM;
 	if (CHECK_ATTR(BPF_PROG_QUERY))
 		return -EINVAL;
 	if (attr->query.query_flags & ~BPF_F_QUERY_EFFECTIVE)
 		return -EINVAL;
+
+	if (restrict_cgroupns) {
+		ret = bpf_container_cgroup_net_admin(attr->query.attach_type);
+		if (ret)
+			return ret;
+	}
 
 	switch (attr->query.attach_type) {
 	case BPF_CGROUP_INET_INGRESS:
@@ -4805,26 +4886,35 @@ static int bpf_prog_query(const union bpf_attr *attr,
 	case BPF_CGROUP_GETSOCKOPT:
 	case BPF_CGROUP_SETSOCKOPT:
 	case BPF_LSM_CGROUP:
-		return cgroup_bpf_prog_query(attr, uattr, uattr_size);
+		ret = cgroup_bpf_prog_query(attr, uattr, uattr_size,
+					    restrict_cgroupns);
+		break;
 	case BPF_LIRC_MODE2:
-		return lirc_prog_query(attr, uattr);
+		ret = lirc_prog_query(attr, uattr);
+		break;
 	case BPF_FLOW_DISSECTOR:
 	case BPF_SK_LOOKUP:
-		return netns_bpf_prog_query(attr, uattr);
+		ret = netns_bpf_prog_query(attr, uattr);
+		break;
 	case BPF_SK_SKB_STREAM_PARSER:
 	case BPF_SK_SKB_STREAM_VERDICT:
 	case BPF_SK_MSG_VERDICT:
 	case BPF_SK_SKB_VERDICT:
-		return sock_map_bpf_prog_query(attr, uattr);
+		ret = sock_map_bpf_prog_query(attr, uattr);
+		break;
 	case BPF_TCX_INGRESS:
 	case BPF_TCX_EGRESS:
-		return tcx_prog_query(attr, uattr);
+		ret = tcx_prog_query(attr, uattr);
+		break;
 	case BPF_NETKIT_PRIMARY:
 	case BPF_NETKIT_PEER:
-		return netkit_prog_query(attr, uattr);
+		ret = netkit_prog_query(attr, uattr);
+		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 	}
+	return ret;
 }
 
 #define BPF_PROG_TEST_RUN_LAST_FIELD test.batch_size
