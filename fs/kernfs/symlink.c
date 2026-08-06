@@ -134,6 +134,16 @@ static const char *kernfs_iop_get_link(struct dentry *dentry,
 
 	if (!dentry)
 		return ERR_PTR(-ECHILD);
+
+	switch (kernfs_vpsa_kernfs_filter_kn_decide(inode->i_private, NULL, MAY_READ)) {
+	case VPSA_KERNFS_FILTER_DECISION_HIDE:
+		return ERR_PTR(-ENOENT);
+	case VPSA_KERNFS_FILTER_DECISION_DENY:
+		return ERR_PTR(-EACCES);
+	default:
+		break;
+	}
+
 	body = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!body)
 		return ERR_PTR(-ENOMEM);
