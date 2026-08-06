@@ -285,9 +285,8 @@ __ww_mutex_die(struct MUTEX *lock, struct MUTEX_WAITER *waiter,
 		debug_mutex_wake_waiter(lock, waiter);
 #endif
 		/*
-		 * When waking up the task to die, be sure to set the
-		 * blocked_on to PROXY_WAKING. Otherwise we can see
-		 * circular blocked_on relationships that can't resolve.
+		 * Clear blocked_on while leaving is_blocked set so the wake path
+		 * can return-migrate the task before making it runnable.
 		 */
 		clear_task_blocked_on(waiter->task, lock);
 		wake_q_add(wake_q, waiter->task);
@@ -339,9 +338,8 @@ static bool __ww_mutex_wound(struct MUTEX *lock,
 		 */
 		if (owner != current) {
 			/*
-			 * When waking up the task to wound, be sure to set the
-			 * blocked_on to PROXY_WAKING. Otherwise we can see
-			 * circular blocked_on relationships that can't resolve.
+			 * Clear blocked_on while leaving is_blocked set so the wake
+			 * path can return-migrate the task before making it runnable.
 			 *
 			 * NOTE: We pass NULL here instead of lock, because we
 			 * are waking the mutex owner, who may be currently

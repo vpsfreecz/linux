@@ -2307,7 +2307,7 @@ static inline bool task_is_blocked(struct task_struct *p)
 	if (!sched_proxy_exec())
 		return false;
 
-	return !!p->blocked_on;
+	return READ_ONCE(p->is_blocked);
 }
 
 static inline int task_on_cpu(struct rq *rq, struct task_struct *p)
@@ -2548,6 +2548,7 @@ extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
 extern const struct sched_class fair_sched_class;
 extern const struct sched_class idle_sched_class;
+bool fair_task_hierarchy_throttled(struct task_struct *p, int cpu);
 
 /*
  * Iterate only active classes. SCX can take over all fair tasks or be
@@ -3895,6 +3896,7 @@ static inline
 bool task_is_pushable(struct rq *rq, struct task_struct *p, int cpu)
 {
 	if (!task_on_cpu(rq, p) &&
+	    !task_current_donor(rq, p) &&
 	    cpumask_test_cpu(cpu, &p->cpus_mask))
 		return true;
 
