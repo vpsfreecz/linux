@@ -20,6 +20,7 @@
 #include <linux/sync_core.h>
 #include <linux/execmem.h>
 #include <asm/text-patching.h>
+#include <asm/cmpxchg.h>
 #include <asm/alternative.h>
 #include <asm/sections.h>
 #include <asm/mce.h>
@@ -2083,6 +2084,20 @@ static void text_poke_memset(void *dst, const void *src, size_t len)
 
 typedef void text_poke_f(void *dst, const void *src, size_t len);
 
+struct text_poke_cmpxchg64_args {
+	u64 old;
+	u64 new;
+	u64 result;
+};
+
+static void text_poke_cmpxchg64_fn(void *dst, const void *src, size_t len)
+{
+	struct text_poke_cmpxchg64_args *args = (void *)src;
+
+	(void)len;
+	args->result = arch_sync_cmpxchg((u64 *)dst, args->old, args->new);
+}
+
 static void *__text_poke(text_poke_f func, void *addr, const void *src, size_t len)
 {
 	bool cross_page_boundary = offset_in_page(addr) + len > PAGE_SIZE;
@@ -2210,6 +2225,34 @@ void *text_poke(void *addr, const void *opcode, size_t len)
 	lockdep_assert_held(&text_mutex);
 
 	return __text_poke(text_poke_memcpy, addr, opcode, len);
+}
+
+/**
+ * text_poke_cmpxchg64 - Atomically replace one aligned 64-bit text block
+ * @addr: address of the block to modify
+ * @old: exact block value required before the replacement
+ * @new: coherent block value to install
+ *
+ * The caller must hold text_mutex and ensure that both complete block values
+ * are safe to execute.  The block must be naturally aligned and contained in
+ * one page.  Call text_poke_sync() after the complete text transition.
+ */
+int text_poke_cmpxchg64(void *addr, u64 old, u64 new)
+{
+	struct text_poke_cmpxchg64_args args = {
+		.old = old,
+		.new = new,
+	};
+
+	lockdep_assert_held(&text_mutex);
+
+	if (WARN_ON_ONCE(!IS_ALIGNED((unsigned long)addr, sizeof(u64)) ||
+			 offset_in_page(addr) + sizeof(u64) > PAGE_SIZE))
+		return -EINVAL;
+
+	__text_poke(text_poke_cmpxchg64_fn, addr, &args, sizeof(u64));
+
+	return args.result == old ? 0 : -EAGAIN;
 }
 
 /**

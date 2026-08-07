@@ -1114,15 +1114,25 @@ SYM_CODE_END(vpsadminos_saferet_paranoid_alias)
 SYM_CODE_START(vpsadminos_saferet_error_srso)
 	UNWIND_HINT_FUNC
 	__HANDLE_INTR_SAFERET(srso_safe_ret, 8(%rsp))
-	leaq	8(%rsp), %rax
-	jmp	srso_return_thunk
+	leaq	error_entry-0x16d(%rip), %rcx
+	cmpq	%rcx, RIP+8(%rsp)
+	jne	.Lvpsadminos_saferet_error_srso_done
+	swapgs
+.Lvpsadminos_saferet_error_srso_done:
+	leaq	error_entry+0xc9(%rip), %rax
+	JMP_NOSPEC rax
 SYM_CODE_END(vpsadminos_saferet_error_srso)
 
 SYM_CODE_START(vpsadminos_saferet_error_alias)
 	UNWIND_HINT_FUNC
 	__HANDLE_INTR_SAFERET(srso_alias_safe_ret, 8(%rsp))
-	leaq	8(%rsp), %rax
-	jmp	srso_alias_return_thunk
+	leaq	error_entry-0x16d(%rip), %rcx
+	cmpq	%rcx, RIP+8(%rsp)
+	jne	.Lvpsadminos_saferet_error_alias_done
+	swapgs
+.Lvpsadminos_saferet_error_alias_done:
+	leaq	error_entry+0xc9(%rip), %rax
+	JMP_NOSPEC rax
 SYM_CODE_END(vpsadminos_saferet_error_alias)
 	.popsection
 

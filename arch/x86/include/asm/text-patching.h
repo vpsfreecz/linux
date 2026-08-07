@@ -32,6 +32,7 @@ extern void text_poke_apply_relocation(u8 *buf, const u8 * const instr, size_t i
  * an inconsistent instruction while you patch.
  */
 extern void *text_poke(void *addr, const void *opcode, size_t len);
+int text_poke_cmpxchg64(void *addr, u64 old, u64 new);
 extern void text_poke_sync(void);
 extern void *text_poke_kgdb(void *addr, const void *opcode, size_t len);
 extern void *text_poke_copy(void *addr, const void *opcode, size_t len);
