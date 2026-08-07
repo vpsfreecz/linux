@@ -414,7 +414,7 @@ static int is_out(const struct crush_map *map,
 		  const __u32 *weight, int weight_max,
 		  int item, int x)
 {
-	if (item >= weight_max)
+	if (item < 0 || item >= weight_max)
 		return 1;
 	if (weight[item] >= 0x10000)
 		return 0;
