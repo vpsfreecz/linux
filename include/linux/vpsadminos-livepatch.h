@@ -38,6 +38,32 @@ static inline void vpsadminos_nfqueue_livepatch_post_unpatch(void)
 void vpsadminos_pipapo_livepatch_cleanup(void);
 #endif
 
+#if defined(CONFIG_LIVEPATCH) && defined(CONFIG_X86) && \
+	defined(CONFIG_MITIGATION_SRSO)
+void error_entry(void);
+void paranoid_entry(void);
+void vpsadminos_saferet_paranoid_srso(void);
+void vpsadminos_saferet_paranoid_alias(void);
+void vpsadminos_saferet_error_srso(void);
+void vpsadminos_saferet_error_alias(void);
+int vpsadminos_saferet_livepatch_pre_patch(void);
+void vpsadminos_saferet_livepatch_post_patch(void);
+void vpsadminos_saferet_livepatch_post_unpatch(void);
+#else
+static inline int vpsadminos_saferet_livepatch_pre_patch(void)
+{
+	return 0;
+}
+
+static inline void vpsadminos_saferet_livepatch_post_patch(void)
+{
+}
+
+static inline void vpsadminos_saferet_livepatch_post_unpatch(void)
+{
+}
+#endif
+
 #if defined(CONFIG_LIVEPATCH) && defined(CONFIG_SUNRPC)
 int vpsadminos_sunrpc_livepatch_pre_patch(void);
 void vpsadminos_sunrpc_livepatch_post_patch(void);

@@ -1091,6 +1091,79 @@ SYM_CODE_START(error_entry)
 	jmp	sync_regs
 SYM_CODE_END(error_entry)
 
+#if defined(CONFIG_LIVEPATCH) && defined(CONFIG_MITIGATION_SRSO)
+/*
+ * A running kernel cannot grow paranoid_entry() and error_entry() in place.
+ * The cumulative livepatch redirects their existing terminal return-thunk
+ * jumps to the matching stub below.  Keep the interrupted Safe-RET handling
+ * identical to HANDLE_INTR_SAFERET and preserve the selected return thunk.
+ */
+	.pushsection .text.vpsadminos.saferet, "ax"
+SYM_CODE_START(vpsadminos_saferet_paranoid_srso)
+	UNWIND_HINT_FUNC
+	__HANDLE_INTR_SAFERET(srso_safe_ret, 8(%rsp))
+	jmp	srso_return_thunk
+SYM_CODE_END(vpsadminos_saferet_paranoid_srso)
+
+SYM_CODE_START(vpsadminos_saferet_paranoid_alias)
+	UNWIND_HINT_FUNC
+	__HANDLE_INTR_SAFERET(srso_alias_safe_ret, 8(%rsp))
+	jmp	srso_alias_return_thunk
+SYM_CODE_END(vpsadminos_saferet_paranoid_alias)
+
+SYM_CODE_START(vpsadminos_saferet_error_srso)
+	UNWIND_HINT_FUNC
+	__HANDLE_INTR_SAFERET(srso_safe_ret, 8(%rsp))
+	leaq	8(%rsp), %rax
+	jmp	srso_return_thunk
+SYM_CODE_END(vpsadminos_saferet_error_srso)
+
+SYM_CODE_START(vpsadminos_saferet_error_alias)
+	UNWIND_HINT_FUNC
+	__HANDLE_INTR_SAFERET(srso_alias_safe_ret, 8(%rsp))
+	leaq	8(%rsp), %rax
+	jmp	srso_alias_return_thunk
+SYM_CODE_END(vpsadminos_saferet_error_alias)
+	.popsection
+
+	/*
+	 * SYM_CODE symbols are STT_NOTYPE and share the non-bundlable
+	 * .entry.text section, so kpatch's STT_FUNC-only function-ignore record
+	 * cannot describe these entries.  The boot-only HANDLE_INTR_SAFERET
+	 * expansion also changes the owning object's alternative-instruction
+	 * metadata and replacement payload.  Ignore all three boot-only sections
+	 * from their owning object and keep the livepatch stubs in the separate
+	 * section above so create-diff-object still bundles them.
+	 */
+	.pushsection .rodata, "a"
+.Lvpsadminos_kpatch_ignore_entry_text:
+	.string ".entry.text"
+.Lvpsadminos_kpatch_ignore_altinstructions:
+	.string ".altinstructions"
+.Lvpsadminos_kpatch_ignore_altinstr_replacement:
+	.string ".altinstr_replacement"
+	.popsection
+
+	.pushsection .kpatch.ignore.sections, "aw"
+	.balign 8
+	.globl __UNIQUE_ID_kpatch_ignore_section_vpsadminos_entry_text
+	.type __UNIQUE_ID_kpatch_ignore_section_vpsadminos_entry_text, @object
+	.size __UNIQUE_ID_kpatch_ignore_section_vpsadminos_entry_text, 8
+__UNIQUE_ID_kpatch_ignore_section_vpsadminos_entry_text:
+	.quad .Lvpsadminos_kpatch_ignore_entry_text
+	.globl __UNIQUE_ID_kpatch_ignore_section_vpsadminos_altinstructions
+	.type __UNIQUE_ID_kpatch_ignore_section_vpsadminos_altinstructions, @object
+	.size __UNIQUE_ID_kpatch_ignore_section_vpsadminos_altinstructions, 8
+__UNIQUE_ID_kpatch_ignore_section_vpsadminos_altinstructions:
+	.quad .Lvpsadminos_kpatch_ignore_altinstructions
+	.globl __UNIQUE_ID_kpatch_ignore_section_vpsadminos_altinstr_replacement
+	.type __UNIQUE_ID_kpatch_ignore_section_vpsadminos_altinstr_replacement, @object
+	.size __UNIQUE_ID_kpatch_ignore_section_vpsadminos_altinstr_replacement, 8
+__UNIQUE_ID_kpatch_ignore_section_vpsadminos_altinstr_replacement:
+	.quad .Lvpsadminos_kpatch_ignore_altinstr_replacement
+	.popsection
+#endif
+
 SYM_CODE_START_LOCAL(error_return)
 	UNWIND_HINT_REGS
 	DEBUG_ENTRY_ASSERT_IRQS_OFF

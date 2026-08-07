@@ -16,6 +16,11 @@
 #include <linux/sched/smt.h>
 #include <linux/pgtable.h>
 #include <linux/bpf.h>
+#ifdef CONFIG_LIVEPATCH
+#include <linux/livepatch.h>
+#include <linux/memory.h>
+#include <linux/vpsadminos-livepatch.h>
+#endif
 
 #include <asm/spec-ctrl.h>
 #include <asm/cmdline.h>
@@ -31,6 +36,9 @@
 #include <asm/hypervisor.h>
 #include <asm/tlbflush.h>
 #include <asm/cpu.h>
+#ifdef CONFIG_LIVEPATCH
+#include <asm/text-patching.h>
+#endif
 
 #include "cpu.h"
 
@@ -3543,4 +3551,227 @@ void noinstr handle_interrupted_saferet(struct pt_regs *regs)
 	/* 2. Pop rIP off the stack: */
 	regs->sp += 8;
 }
+
+#ifdef CONFIG_LIVEPATCH
+#define VPSADMINOS_SAFERET_STATE_ID	0x7e7f81cf6f5ca331UL
+#define VPSADMINOS_PARANOID_RETURN_OFFSET	0xe1
+#define VPSADMINOS_ERROR_RETURN_OFFSET		0xdb
+
+static struct klp_state vpsadminos_saferet_state
+__section(".kpatch.system_states") __used
+__aligned(__alignof__(struct klp_state)) = {
+	.id = VPSADMINOS_SAFERET_STATE_ID,
+	.version = 1,
+};
+
+struct vpsadminos_saferet_transition {
+	/* Boot-kernel bytes propagated for final clean removal. */
+	u8 original_paranoid[JMP32_INSN_SIZE];
+	u8 original_error[JMP32_INSN_SIZE];
+	/* Current owner's bytes verified by a cumulative successor. */
+	u8 patched_paranoid[JMP32_INSN_SIZE];
+	u8 patched_error[JMP32_INSN_SIZE];
+};
+
+static struct vpsadminos_saferet_transition vpsadminos_saferet_transition;
+static struct vpsadminos_saferet_transition *vpsadminos_saferet_predecessor;
+static u8 vpsadminos_saferet_previous_paranoid[JMP32_INSN_SIZE];
+static u8 vpsadminos_saferet_previous_error[JMP32_INSN_SIZE];
+static bool vpsadminos_saferet_text_patched;
+
+static void *vpsadminos_saferet_paranoid_site(void)
+{
+	return (void *)((unsigned long)paranoid_entry +
+			VPSADMINOS_PARANOID_RETURN_OFFSET);
+}
+
+static void *vpsadminos_saferet_error_site(void)
+{
+	return (void *)((unsigned long)error_entry +
+			VPSADMINOS_ERROR_RETURN_OFFSET);
+}
+
+static int vpsadminos_saferet_make_jump(union text_poke_insn *insn,
+					void *site, void *target)
+{
+	s64 displacement = (s64)(unsigned long)target -
+			   ((s64)(unsigned long)site + JMP32_INSN_SIZE);
+
+	if (displacement != (s64)(s32)displacement)
+		return -ERANGE;
+
+	__text_gen_insn(insn, JMP32_INSN_OPCODE, site, target,
+			JMP32_INSN_SIZE);
+	return 0;
+}
+
+static int vpsadminos_saferet_select_stubs(void **paranoid_stub,
+					   void **error_stub)
+{
+	if (boot_cpu_has(X86_FEATURE_SRSO_ALIAS)) {
+		*paranoid_stub = vpsadminos_saferet_paranoid_alias;
+		*error_stub = vpsadminos_saferet_error_alias;
+		return 1;
+	}
+
+	if (boot_cpu_has(X86_FEATURE_SRSO)) {
+		*paranoid_stub = vpsadminos_saferet_paranoid_srso;
+		*error_stub = vpsadminos_saferet_error_srso;
+		return 1;
+	}
+
+	return 0;
+}
+
+int vpsadminos_saferet_livepatch_pre_patch(void)
+{
+	struct vpsadminos_saferet_transition *prev_transition = NULL;
+	struct klp_state *prev_state;
+	union text_poke_insn expected_paranoid;
+	union text_poke_insn expected_error;
+	union text_poke_insn patched_paranoid;
+	union text_poke_insn patched_error;
+	const u8 *original_paranoid;
+	const u8 *original_error;
+	const u8 *expected_paranoid_text;
+	const u8 *expected_error_text;
+	void *paranoid_site = vpsadminos_saferet_paranoid_site();
+	void *error_site = vpsadminos_saferet_error_site();
+	void *paranoid_stub;
+	void *error_stub;
+	int ret;
+
+	if (!vpsadminos_saferet_select_stubs(&paranoid_stub, &error_stub))
+		return 0;
+
+	if (vpsadminos_saferet_text_patched)
+		return -EBUSY;
+
+	prev_state = klp_get_prev_state(VPSADMINOS_SAFERET_STATE_ID);
+	if (prev_state)
+		prev_transition = READ_ONCE(prev_state->data);
+
+	if (prev_transition) {
+		expected_paranoid_text = prev_transition->patched_paranoid;
+		expected_error_text = prev_transition->patched_error;
+		original_paranoid = prev_transition->original_paranoid;
+		original_error = prev_transition->original_error;
+	} else {
+		ret = vpsadminos_saferet_make_jump(&expected_paranoid,
+						   paranoid_site,
+						   x86_return_thunk);
+		if (ret)
+			return ret;
+		ret = vpsadminos_saferet_make_jump(&expected_error, error_site,
+						   x86_return_thunk);
+		if (ret)
+			return ret;
+
+		expected_paranoid_text = expected_paranoid.text;
+		expected_error_text = expected_error.text;
+		original_paranoid = expected_paranoid.text;
+		original_error = expected_error.text;
+	}
+
+	ret = vpsadminos_saferet_make_jump(&patched_paranoid, paranoid_site,
+					   paranoid_stub);
+	if (ret)
+		return ret;
+	ret = vpsadminos_saferet_make_jump(&patched_error, error_site,
+					   error_stub);
+	if (ret)
+		return ret;
+
+	mutex_lock(&text_mutex);
+	if (memcmp(paranoid_site, expected_paranoid_text, JMP32_INSN_SIZE) ||
+	    memcmp(error_site, expected_error_text, JMP32_INSN_SIZE)) {
+		pr_err("livepatch Safe-RET target bytes do not match 6.12.95\n");
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	memcpy(vpsadminos_saferet_previous_paranoid, paranoid_site,
+	       JMP32_INSN_SIZE);
+	memcpy(vpsadminos_saferet_previous_error, error_site,
+	       JMP32_INSN_SIZE);
+	memcpy(vpsadminos_saferet_transition.original_paranoid,
+	       original_paranoid, JMP32_INSN_SIZE);
+	memcpy(vpsadminos_saferet_transition.original_error,
+	       original_error, JMP32_INSN_SIZE);
+	memcpy(vpsadminos_saferet_transition.patched_paranoid,
+	       patched_paranoid.text, JMP32_INSN_SIZE);
+	memcpy(vpsadminos_saferet_transition.patched_error,
+	       patched_error.text, JMP32_INSN_SIZE);
+	vpsadminos_saferet_predecessor = prev_transition;
+
+	text_poke_queue(paranoid_site,
+			vpsadminos_saferet_transition.patched_paranoid,
+			JMP32_INSN_SIZE, NULL);
+	text_poke_queue(error_site,
+			vpsadminos_saferet_transition.patched_error,
+			JMP32_INSN_SIZE, NULL);
+	text_poke_finish();
+	vpsadminos_saferet_text_patched = true;
+	ret = 0;
+
+unlock:
+	mutex_unlock(&text_mutex);
+	return ret;
+}
+
+void vpsadminos_saferet_livepatch_post_patch(void)
+{
+	struct klp_state *prev_state;
+
+	if (!vpsadminos_saferet_text_patched)
+		return;
+
+	WRITE_ONCE(vpsadminos_saferet_state.data,
+		   &vpsadminos_saferet_transition);
+	prev_state = klp_get_prev_state(VPSADMINOS_SAFERET_STATE_ID);
+	if (prev_state &&
+	    READ_ONCE(prev_state->data) == vpsadminos_saferet_predecessor)
+		WRITE_ONCE(prev_state->data, NULL);
+}
+
+void vpsadminos_saferet_livepatch_post_unpatch(void)
+{
+	const u8 *restore_paranoid;
+	const u8 *restore_error;
+	bool committed;
+	void *paranoid_site = vpsadminos_saferet_paranoid_site();
+	void *error_site = vpsadminos_saferet_error_site();
+
+	committed = READ_ONCE(vpsadminos_saferet_state.data) ==
+		    &vpsadminos_saferet_transition;
+	WRITE_ONCE(vpsadminos_saferet_state.data, NULL);
+	if (!vpsadminos_saferet_text_patched)
+		return;
+
+	if (committed) {
+		restore_paranoid =
+			vpsadminos_saferet_transition.original_paranoid;
+		restore_error = vpsadminos_saferet_transition.original_error;
+	} else {
+		restore_paranoid = vpsadminos_saferet_previous_paranoid;
+		restore_error = vpsadminos_saferet_previous_error;
+	}
+
+	mutex_lock(&text_mutex);
+	WARN_ON_ONCE(memcmp(paranoid_site,
+			    vpsadminos_saferet_transition.patched_paranoid,
+			    JMP32_INSN_SIZE));
+	WARN_ON_ONCE(memcmp(error_site,
+			    vpsadminos_saferet_transition.patched_error,
+			    JMP32_INSN_SIZE));
+	text_poke_queue(paranoid_site, restore_paranoid,
+			JMP32_INSN_SIZE, NULL);
+	text_poke_queue(error_site, restore_error,
+			JMP32_INSN_SIZE, NULL);
+	text_poke_finish();
+	vpsadminos_saferet_text_patched = false;
+	vpsadminos_saferet_predecessor = NULL;
+	mutex_unlock(&text_mutex);
+}
+#endif /* CONFIG_LIVEPATCH */
 #endif /* CONFIG_MITIGATION_SRSO */
