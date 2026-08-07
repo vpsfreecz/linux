@@ -1028,6 +1028,18 @@ __section(".kpatch.callbacks.post_unpatch") __used = {
 	.fn = vpsadminos_livepatch_post_unpatch,
 	.objname = NULL,
 };
+
+/*
+ * Kpatch collects system-state records from the built-in diff object.  Keep
+ * the state owned by the modular KVM SVM callback here so it is registered by
+ * the generated cumulative livepatch even when kvm-amd is not loaded yet.
+ */
+static struct klp_state vpsadminos_svm_asid_generation_state
+__section(".kpatch.system_states") __used
+__aligned(__alignof__(struct klp_state)) = {
+	.id = 0x25f744ffa0c8e799UL,
+	.version = 1,
+};
 #endif
 
 #define BPF_PROG_SIZE_TO_NBITS(size)	(round_up(size, BPF_PROG_CHUNK_SIZE) / BPF_PROG_CHUNK_SIZE)

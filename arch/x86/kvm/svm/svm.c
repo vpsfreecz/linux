@@ -28,6 +28,9 @@
 #include <linux/rwsem.h>
 #include <linux/cc_platform.h>
 #include <linux/smp.h>
+#if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
+#include <linux/livepatch.h>
+#endif
 
 #include <asm/apic.h>
 #include <asm/perf_event.h>
@@ -248,6 +251,46 @@ static u8 rsm_ins_bytes[] = "\x0f\xaa";
 static unsigned long iopm_base;
 
 DEFINE_PER_CPU(struct svm_cpu_data, svm_data);
+
+#ifdef CONFIG_LIVEPATCH
+struct vpsadminos_svm_post_patch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_svm_pre_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+static void vpsadminos_svm_bump_asid_generation_cpu(void *unused)
+{
+	struct svm_cpu_data *sd = this_cpu_ptr(&svm_data);
+
+	(void)unused;
+	sd->asid_generation++;
+}
+
+static void vpsadminos_svm_bump_asid_generation(struct klp_object *obj)
+{
+	(void)obj;
+	on_each_cpu(vpsadminos_svm_bump_asid_generation_cpu, NULL, 1);
+}
+
+static struct vpsadminos_svm_post_patch_callback
+vpsadminos_svm_post_patch_data
+__section(".kpatch.callbacks.post_patch") __used = {
+	.fn = vpsadminos_svm_bump_asid_generation,
+	.objname = NULL,
+};
+
+static struct vpsadminos_svm_pre_unpatch_callback
+vpsadminos_svm_pre_unpatch_data
+__section(".kpatch.callbacks.pre_unpatch") __used = {
+	.fn = vpsadminos_svm_bump_asid_generation,
+	.objname = NULL,
+};
+#endif
 
 /*
  * Only MSR_TSC_AUX is switched via the user return hook.  EFER is switched via
