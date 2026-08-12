@@ -415,13 +415,16 @@ static bool access_need_override_creds(int flags)
 	return false;
 }
 
-static const struct cred *access_override_creds(void)
+static const struct cred *access_override_creds(int *error)
 {
+	const struct cred *old_cred;
 	struct cred *override_cred;
 
 	override_cred = prepare_creds();
-	if (!override_cred)
+	if (!override_cred) {
+		*error = -ENOMEM;
 		return NULL;
+	}
 
 	/*
 	 * XXX access_need_override_creds performs checks in hopes of skipping
@@ -461,7 +464,10 @@ static const struct cred *access_override_creds(void)
 	 * freeing.
 	 */
 	override_cred->non_rcu = 1;
-	return override_creds(override_cred);
+	old_cred = override_creds_from_prepared(override_cred);
+	if (!old_cred)
+		*error = -EACCES;
+	return old_cred;
 }
 
 static int do_faccessat(int dfd, const char __user *filename, int mode, int flags)
@@ -484,9 +490,9 @@ static int do_faccessat(int dfd, const char __user *filename, int mode, int flag
 		lookup_flags |= LOOKUP_EMPTY;
 
 	if (access_need_override_creds(flags)) {
-		old_cred = access_override_creds();
+		old_cred = access_override_creds(&res);
 		if (!old_cred)
-			return -ENOMEM;
+			return res;
 	}
 
 retry:

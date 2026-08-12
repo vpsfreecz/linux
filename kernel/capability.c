@@ -273,16 +273,22 @@ error:
  *
  * Note that this does not set PF_SUPERPRIV on the task.
  */
+static bool has_ns_capability_opts(struct task_struct *task,
+				   struct user_namespace *ns, int cap,
+				   unsigned int opts)
+{
+	const struct cred *cred __free(put_cred) =
+		get_task_cred_checked_nowait(task);
+
+	if (IS_ERR(cred))
+		return false;
+	return security_capable(cred, ns, cap, opts) == 0;
+}
+
 bool has_ns_capability(struct task_struct *t,
 		       struct user_namespace *ns, int cap)
 {
-	int ret;
-
-	rcu_read_lock();
-	ret = security_capable(__task_cred(t), ns, cap, CAP_OPT_NONE);
-	rcu_read_unlock();
-
-	return (ret == 0);
+	return has_ns_capability_opts(t, ns, cap, CAP_OPT_NONE);
 }
 
 /**
@@ -301,13 +307,7 @@ bool has_ns_capability(struct task_struct *t,
 bool has_ns_capability_noaudit(struct task_struct *t,
 			       struct user_namespace *ns, int cap)
 {
-	int ret;
-
-	rcu_read_lock();
-	ret = security_capable(__task_cred(t), ns, cap, CAP_OPT_NOAUDIT);
-	rcu_read_unlock();
-
-	return (ret == 0);
+	return has_ns_capability_opts(t, ns, cap, CAP_OPT_NOAUDIT);
 }
 
 /**

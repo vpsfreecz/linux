@@ -101,6 +101,7 @@ struct task_struct;
 
 void put_files_struct(struct files_struct *fs);
 int unshare_files(void);
+int unshare_files_in_task_transition(void);
 struct fd_range {
 	unsigned int from, to;
 };

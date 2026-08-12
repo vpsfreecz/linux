@@ -2093,18 +2093,19 @@ static int pid_revalidate(struct inode *dir, const struct qstr *name,
 	struct task_struct *task;
 	int ret = 0;
 
-	rcu_read_lock();
-	inode = d_inode_rcu(dentry);
+	if (flags & LOOKUP_RCU)
+		return -ECHILD;
+
+	inode = d_inode(dentry);
 	if (!inode)
-		goto out;
-	task = pid_task(proc_pid(inode), PIDTYPE_PID);
+		return 0;
+	task = get_proc_task(inode);
 
 	if (task) {
 		pid_update_inode(task, inode);
+		put_task_struct(task);
 		ret = 1;
 	}
-out:
-	rcu_read_unlock();
 	return ret;
 }
 

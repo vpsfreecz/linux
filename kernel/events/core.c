@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/cpu.h>
+#include <linux/cred.h>
 #include <linux/smp.h>
 #include <linux/idr.h>
 #include <linux/file.h>
@@ -88,7 +89,7 @@ static bool perf_event_token_is_container(const struct perf_event *event)
 static bool perf_event_container_current_ok(const struct perf_event *event)
 {
 	return !perf_event_token_is_container(event) ||
-	       bpf_token_task_match(event->token, current);
+	       bpf_token_current_match(event->token);
 }
 
 static bool perf_event_container_same_domain(const struct perf_event *event,
@@ -13087,7 +13088,8 @@ perf_event_alloc(struct perf_event_attr *attr, int cpu,
 		 struct perf_event *group_leader,
 		 struct perf_event *parent_event,
 		 perf_overflow_handler_t overflow_handler,
-		 void *context, int cgroup_fd)
+		 void *context, int cgroup_fd,
+		 const struct bpf_current_container *container)
 {
 	struct pmu *pmu;
 	struct hw_perf_event *hwc;
@@ -13608,13 +13610,16 @@ perf_check_permission(struct perf_event_attr *attr, struct task_struct *task)
 	bool is_capable = perfmon_capable();
 
 	if (attr->sigtrap) {
+		const struct cred *task_cred __free(put_cred) =
+			get_task_cred_checked_nowait(task);
+
 		/*
 		 * perf_event_attr::sigtrap sends signals to the other task.
 		 * Require the current task to also have CAP_KILL.
 		 */
-		rcu_read_lock();
-		is_capable &= ns_capable(__task_cred(task)->user_ns, CAP_KILL);
-		rcu_read_unlock();
+		if (IS_ERR(task_cred))
+			return false;
+		is_capable &= ns_capable(task_cred->user_ns, CAP_KILL);
 
 		/*
 		 * If the required capabilities aren't available, checks for
@@ -13653,6 +13658,7 @@ SYSCALL_DEFINE5(perf_event_open,
 	struct file *event_file = NULL;
 	struct task_struct *task = NULL;
 	struct pmu *pmu;
+	bool container_perfmon_capable;
 	int event_fd;
 	int move_group = 0;
 	int err;
@@ -13673,11 +13679,18 @@ SYSCALL_DEFINE5(perf_event_open,
 	if (err)
 		return err;
 
+	BPF_CURRENT_CONTAINER(container);
+	err = bpf_container_status(&container);
+	if (err)
+		return err;
+	container_perfmon_capable =
+		bpf_container_capable(&container, CAP_PERFMON);
+
 	if (!attr.exclude_kernel) {
 		err = perf_allow_kernel();
 		if (err) {
 			if (!(bpf_container_tracing_enabled() &&
-			      bpf_token_current_container_capable(CAP_PERFMON)))
+			      container_perfmon_capable))
 				return err;
 			defer_container_kernel_check = true;
 		}
@@ -13720,11 +13733,11 @@ SYSCALL_DEFINE5(perf_event_open,
 		return -EINVAL;
 	if ((flags & PERF_FLAG_PID_CGROUP) &&
 	    bpf_container_tracing_enabled() &&
-	    bpf_token_current_container_capable(CAP_PERFMON))
+	    container_perfmon_capable)
 		return -EACCES;
 	if (attr.sigtrap &&
 	    bpf_container_tracing_enabled() &&
-	    bpf_token_current_container_capable(CAP_PERFMON))
+	    container_perfmon_capable)
 		return -EACCES;
 
 	if (flags & PERF_FLAG_FD_CLOEXEC)
@@ -13774,7 +13787,7 @@ SYSCALL_DEFINE5(perf_event_open,
 		cgroup_fd = pid;
 
 	event = perf_event_alloc(&attr, cpu, task, group_leader, NULL,
-				 NULL, NULL, cgroup_fd);
+				 NULL, NULL, cgroup_fd, &container);
 	if (IS_ERR(event)) {
 		err = PTR_ERR(event);
 		goto err_task;
@@ -14095,7 +14108,7 @@ perf_event_create_kernel_counter(struct perf_event_attr *attr, int cpu,
 	guard(srcu)(&pmus_srcu);
 
 	event = perf_event_alloc(attr, cpu, task, NULL, NULL,
-				 overflow_handler, context, -1);
+				 overflow_handler, context, -1, NULL);
 	if (IS_ERR(event)) {
 		err = PTR_ERR(event);
 		goto err;
@@ -14590,10 +14603,10 @@ inherit_event(struct perf_event *parent_event,
 	guard(srcu)(&pmus_srcu);
 
 	child_event = perf_event_alloc(&parent_event->attr,
-					   parent_event->cpu,
-					   child,
-					   group_leader, parent_event,
-					   NULL, NULL, -1);
+				   parent_event->cpu,
+				   child,
+				   group_leader, parent_event,
+				   NULL, NULL, -1, NULL);
 	if (IS_ERR(child_event))
 		return child_event;
 
