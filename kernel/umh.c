@@ -103,7 +103,9 @@ static int call_usermodehelper_exec_async(void *data)
 		}
 	}
 
-	commit_creds(new);
+	retval = commit_creds(new);
+	if (retval)
+		goto out;
 
 	wait_for_initramfs();
 	retval = kernel_execve(sub_info->path,

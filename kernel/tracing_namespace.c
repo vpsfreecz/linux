@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/auth_guard.h>
 #include <linux/err.h>
 #include <linux/audit.h>
 #include <linux/cred.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/nsproxy.h>
 #include <linux/nstree.h>
 #include <linux/pid_namespace.h>
 #include <linux/proc_ns.h>
@@ -32,9 +34,30 @@ struct tracing_namespace init_tracing_ns = {
 };
 EXPORT_SYMBOL_GPL(init_tracing_ns);
 
+DEFINE_USERNS_OWNED_BOUNDARY_REPLACER(
+	tracing_ns_replace_userns_default, tracing_namespace, tracing_ns,
+	tracing_ns_is_owner, get_tracing_ns, put_tracing_ns,
+	get_tracing_ns_structural, put_tracing_ns_structural)
+
+DEFINE_CURRENT_NSPROXY_MEMBER_GETTER(get_current_tracing_ns_checked,
+				     struct tracing_namespace, tracing_ns,
+				     get_tracing_ns, put_tracing_ns)
+EXPORT_SYMBOL_GPL(get_current_tracing_ns_checked_where);
+
+bool tracing_ns_current_is_guest(void)
+{
+	struct tracing_namespace *ns __free(put_tracing_ns) =
+		get_current_tracing_ns_checked();
+
+	if (IS_ERR(ns))
+		return true;
+	return ns != &init_tracing_ns;
+}
+EXPORT_SYMBOL_GPL(tracing_ns_current_is_guest);
+
 static void tracing_ns_audit(const char *op,
-			     const struct tracing_namespace *ns,
-			     const struct tracing_namespace *parent,
+		     const struct tracing_namespace *ns,
+		     const struct tracing_namespace *parent,
 			     const struct user_namespace *user_ns,
 			     u32 pid_ns_inum, u32 syslog_ns_inum,
 			     int res)
@@ -160,28 +183,60 @@ static bool tracing_ns_can_bind_child(const struct tracing_namespace *old_ns,
 	return true;
 }
 
-bool tracing_ns_matches_task(const struct tracing_namespace *ns,
-			     const struct task_struct *task)
+bool tracing_ns_matches_task_where(const struct tracing_namespace *ns,
+				   const struct task_struct *task,
+				   const char *where)
 {
 	struct nsproxy *nsproxy;
+	struct task_struct *checked_task;
 	const struct cred *cred;
+	enum auth_guard_check_result auth_result;
 	bool match = false;
 
 	if (!ns || !task)
 		return false;
+	checked_task = (struct task_struct *)task;
 
-	rcu_read_lock();
-	nsproxy = task->nsproxy;
-	cred = __task_cred(task);
-	if (nsproxy && cred && nsproxy->tracing_ns == ns &&
+	for (;;) {
+		cred = get_task_cred_checked_where(checked_task, where);
+		if (IS_ERR(cred))
+			return false;
+
+		task_lock(checked_task);
+		nsproxy = READ_ONCE(task->nsproxy);
+		if (nsproxy)
+			get_nsproxy(nsproxy);
+		auth_result = auth_guard_task_check_real_cred_where(checked_task,
+							    cred, where);
+		task_unlock(checked_task);
+
+		if (auth_result == AUTH_GUARD_CHECK_VALID)
+			break;
+		if (nsproxy)
+			put_nsproxy(nsproxy);
+		put_cred(cred);
+		if (auth_result != AUTH_GUARD_CHECK_BUSY)
+			return false;
+		cpu_relax();
+	}
+
+	auth_result = auth_guard_nsproxy_snapshot_begin_where(nsproxy, where);
+	if (auth_result != AUTH_GUARD_CHECK_VALID)
+		goto out;
+	if (nsproxy && nsproxy->tracing_ns == ns &&
 	    tracing_ns_syslog_contains(ns, nsproxy->syslog_ns))
 		match = tracing_ns_pid_matches(ns, task, nsproxy) &&
 			tracing_ns_matches_user_ns(ns, cred->user_ns);
-	rcu_read_unlock();
+	if (!auth_guard_nsproxy_snapshot_end_where(nsproxy, where))
+		match = false;
+out:
+	if (nsproxy)
+		put_nsproxy(nsproxy);
+	put_cred(cred);
 
 	return match;
 }
-EXPORT_SYMBOL_GPL(tracing_ns_matches_task);
+EXPORT_SYMBOL_GPL(tracing_ns_matches_task_where);
 
 /*
  * BPF program dispatch can run from NMI context. Match the current task from
@@ -343,6 +398,7 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 						  struct tracing_namespace *old_ns)
 {
 	struct tracing_namespace *ns;
+	enum auth_guard_mutation_result mutation;
 	int err;
 
 	ns = kzalloc(sizeof(*ns), GFP_KERNEL);
@@ -367,14 +423,14 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 	 * so future userns descendants and setns checks resolve to the child
 	 * tracing boundary rather than the inherited init one.
 	 */
-	if (user_ns != current_user_ns() && user_ns->tracing_ns == old_ns) {
-		if (WARN_ON_ONCE(user_ns->tracing_ns_is_owner)) {
-			err = -EINVAL;
+	if (user_ns != current_user_ns()) {
+		mutation = tracing_ns_replace_userns_default(user_ns, old_ns, ns);
+		if (mutation == AUTH_GUARD_MUTATION_QUARANTINED)
+			return ERR_PTR(-EACCES);
+		if (mutation != AUTH_GUARD_MUTATION_APPLIED) {
+			err = -EACCES;
 			goto fail_refs;
 		}
-		put_tracing_ns(user_ns->tracing_ns);
-		user_ns->tracing_ns = get_tracing_ns_structural(ns);
-		user_ns->tracing_ns_is_owner = true;
 	}
 
 	__ns_tree_add(&ns->ns, &tracing_ns_tree);
@@ -440,15 +496,19 @@ EXPORT_SYMBOL_GPL(copy_tracing_ns);
 
 static struct ns_common *tracingns_get(struct task_struct *task)
 {
-	struct tracing_namespace *ns = &init_tracing_ns;
-	struct nsproxy *nsproxy;
+	struct task_nsproxy_snapshot snapshot;
+	struct tracing_namespace *ns;
 
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy && nsproxy->tracing_ns)
-		ns = nsproxy->tracing_ns;
+	if (task_nsproxy_snapshot_get(task, &snapshot))
+		return NULL;
+	ns = READ_ONCE(snapshot.nsproxy->tracing_ns);
+	if (!ns)
+		ns = &init_tracing_ns;
 	get_tracing_ns(ns);
-	task_unlock(task);
+	if (!task_nsproxy_snapshot_put(&snapshot)) {
+		put_tracing_ns(ns);
+		return NULL;
+	}
 
 	return &ns->ns;
 }

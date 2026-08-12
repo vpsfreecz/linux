@@ -17,6 +17,7 @@
 #ifndef _SELINUX_OBJSEC_H_
 #define _SELINUX_OBJSEC_H_
 
+#include <linux/auth_guard_types.h>
 #include <linux/list.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
@@ -42,6 +43,9 @@ struct cred_security_struct {
 	u32 create_sid; /* fscreate SID */
 	u32 keycreate_sid; /* keycreate SID */
 	u32 sockcreate_sid; /* fscreate SID */
+#ifdef CONFIG_SELINUX_CRED_GUARD
+	struct auth_guard_stamp guard;
+#endif
 } __randomize_layout;
 
 struct task_security_struct {
@@ -183,6 +187,29 @@ static inline struct cred_security_struct *selinux_cred(const struct cred *cred)
 	return cred->security + selinux_blob_sizes.lbs_cred;
 }
 
+#ifdef CONFIG_SELINUX_CRED_GUARD
+bool selinux_cred_guard_check_where(const struct cred *cred,
+				    const char *where);
+#else
+static inline bool selinux_cred_guard_check_where(const struct cred *cred,
+						  const char *where)
+{
+	return cred;
+}
+#endif
+
+static inline const struct cred_security_struct *
+selinux_cred_checked_where(const struct cred *cred, const char *where)
+{
+	if (!selinux_cred_guard_check_where(cred, where))
+		BUG();
+
+	return selinux_cred(cred);
+}
+
+#define selinux_cred_checked(_cred) \
+	selinux_cred_checked_where((_cred), __func__)
+
 static inline struct task_security_struct *
 selinux_task(const struct task_struct *task)
 {
@@ -226,9 +253,7 @@ selinux_ipc(const struct kern_ipc_perm *ipc)
  */
 static inline u32 current_sid(void)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
-
-	return crsec->sid;
+	return selinux_cred_checked(current_cred())->sid;
 }
 
 static inline struct superblock_security_struct *
