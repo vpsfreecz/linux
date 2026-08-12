@@ -241,8 +241,8 @@ int cgroup_do_get_tree(struct fs_context *fc);
 
 int cgroup_migrate_vet_dst(struct cgroup *dst_cgrp);
 void cgroup_migrate_finish(struct cgroup_mgctx *mgctx);
-void cgroup_migrate_add_src(struct css_set *src_cset, struct cgroup *dst_cgrp,
-			    struct cgroup_mgctx *mgctx);
+int cgroup_migrate_add_src(struct css_set *src_cset, struct cgroup *dst_cgrp,
+			   struct cgroup_mgctx *mgctx);
 int cgroup_migrate_prepare_dst(struct cgroup_mgctx *mgctx);
 int cgroup_migrate(struct task_struct *leader, bool threadgroup,
 		   struct cgroup_mgctx *mgctx);

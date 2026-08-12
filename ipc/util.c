@@ -65,6 +65,7 @@
 #include <linux/ipc_namespace.h>
 #include <linux/rhashtable.h>
 #include <linux/log2.h>
+#include <linux/auth_guard.h>
 
 #include <asm/unistd.h>
 
@@ -897,6 +898,9 @@ static const struct seq_operations sysvipc_proc_seqops = {
 static int sysvipc_proc_open(struct inode *inode, struct file *file)
 {
 	struct ipc_proc_iter *iter;
+
+	if (!auth_guard_current())
+		return -EACCES;
 
 	iter = __seq_open_private(file, &sysvipc_proc_seqops, sizeof(*iter));
 	if (!iter)

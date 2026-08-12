@@ -8,6 +8,7 @@
  *  Copyright (C) 1998-2024  Ingo Molnar, Red Hat
  */
 #include <linux/sched.h>
+#include <linux/auth_guard.h>
 #include <linux/cpuset.h>
 #include <linux/sched/debug.h>
 
@@ -322,15 +323,9 @@ static void __setscheduler_params(struct task_struct *p,
 	set_load_weight(p, true);
 }
 
-/*
- * Check the target process has a UID that matches the current process's:
- */
-static bool check_same_owner(struct task_struct *p)
+static bool check_same_owner(const struct cred *cred,
+			     const struct cred *pcred)
 {
-	const struct cred *cred = current_cred(), *pcred;
-	guard(rcu)();
-
-	pcred = __task_cred(p);
 	return (uid_eq(cred->euid, pcred->euid) ||
 		uid_eq(cred->euid, pcred->uid));
 }
@@ -487,6 +482,19 @@ static int user_check_sched_setscheduler(struct task_struct *p,
 					 const struct sched_attr *attr,
 					 int policy, int reset_on_fork)
 {
+	const struct cred *cred = current_cred();
+	const struct cred *pcred;
+	bool same_owner;
+
+	if (auth_guard_task_check_real_cred(current, current_real_cred()) !=
+	    AUTH_GUARD_CHECK_VALID)
+		return -EACCES;
+	pcred = get_task_cred_checked(p);
+	if (IS_ERR(pcred))
+		return PTR_ERR(pcred);
+	same_owner = check_same_owner(cred, pcred);
+	put_cred(pcred);
+
 	if (fair_policy(policy)) {
 		if (attr->sched_nice < task_nice(p) &&
 		    !is_nice_reduction(p, attr->sched_nice))
@@ -525,7 +533,7 @@ static int user_check_sched_setscheduler(struct task_struct *p,
 	}
 
 	/* Can't change other user's priorities: */
-	if (!check_same_owner(p))
+	if (!same_owner)
 		goto req_priv;
 
 	/* Normal users shall not reset the sched_reset_on_fork flag: */
@@ -1233,6 +1241,9 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 {
 	struct affinity_context ac;
 	struct cpumask *user_mask;
+	const struct cred *cred = current_cred();
+	const struct cred *pcred;
+	bool same_owner;
 	int retval;
 
 	CLASS(find_get_task, p)(pid);
@@ -1242,11 +1253,18 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 	if (p->flags & PF_NO_SETAFFINITY)
 		return -EINVAL;
 
-	if (!check_same_owner(p)) {
-		guard(rcu)();
-		if (!ns_capable(__task_cred(p)->user_ns, CAP_SYS_NICE))
-			return -EPERM;
+	if (auth_guard_task_check_real_cred(current, current_real_cred()) !=
+	    AUTH_GUARD_CHECK_VALID)
+		return -EACCES;
+	pcred = get_task_cred_checked(p);
+	if (IS_ERR(pcred))
+		return PTR_ERR(pcred);
+	same_owner = check_same_owner(cred, pcred);
+	if (!same_owner && !ns_capable(pcred->user_ns, CAP_SYS_NICE)) {
+		put_cred(pcred);
+		return -EPERM;
 	}
+	put_cred(pcred);
 
 	retval = security_task_setscheduler(p);
 	if (retval)
