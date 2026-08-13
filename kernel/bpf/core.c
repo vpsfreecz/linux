@@ -977,16 +977,22 @@ static int vpsadminos_livepatch_pre_patch(struct klp_object *obj)
 	if (ret)
 		return ret;
 
-	ret = vpsadminos_xfrm_livepatch_pre_patch();
+	ret = vpsadminos_rhashtable_livepatch_pre_patch();
 	if (ret)
 		goto restore_saferet;
+
+	ret = vpsadminos_xfrm_livepatch_pre_patch();
+	if (ret)
+		goto restore_rhashtable;
 
 	ret = vpsadminos_sunrpc_livepatch_pre_patch();
 	if (ret)
-		goto restore_saferet;
+		goto restore_rhashtable;
 
 	return 0;
 
+restore_rhashtable:
+	vpsadminos_rhashtable_livepatch_post_unpatch();
 restore_saferet:
 	vpsadminos_saferet_livepatch_post_unpatch();
 	return ret;
@@ -996,6 +1002,7 @@ static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
 {
 	(void)obj;
 	vpsadminos_saferet_livepatch_post_patch();
+	vpsadminos_rhashtable_livepatch_post_patch();
 	vpsadminos_pipapo_livepatch_post_patch();
 	vpsadminos_nfqueue_livepatch_post_patch();
 	vpsadminos_sunrpc_livepatch_post_patch();
@@ -1017,6 +1024,7 @@ static void vpsadminos_livepatch_post_unpatch(struct klp_object *obj)
 	vpsadminos_sunrpc_livepatch_post_unpatch();
 	vpsadminos_nfqueue_livepatch_post_unpatch();
 	vpsadminos_pipapo_livepatch_post_unpatch();
+	vpsadminos_rhashtable_livepatch_post_unpatch();
 	vpsadminos_saferet_livepatch_post_unpatch();
 }
 

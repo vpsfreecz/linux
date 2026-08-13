@@ -38,6 +38,29 @@ static inline void vpsadminos_nfqueue_livepatch_post_unpatch(void)
 void vpsadminos_pipapo_livepatch_cleanup(void);
 #endif
 
+#if defined(CONFIG_LIVEPATCH) && defined(CONFIG_X86_64)
+struct rhashtable_iter;
+
+int vpsadminos_livepatch_text_poke_cmpxchg64(void *addr, u64 old, u64 new);
+int vpsadminos_rhashtable_walk_start_check(struct rhashtable_iter *iter);
+int vpsadminos_rhashtable_livepatch_pre_patch(void);
+void vpsadminos_rhashtable_livepatch_post_patch(void);
+void vpsadminos_rhashtable_livepatch_post_unpatch(void);
+#else
+static inline int vpsadminos_rhashtable_livepatch_pre_patch(void)
+{
+	return 0;
+}
+
+static inline void vpsadminos_rhashtable_livepatch_post_patch(void)
+{
+}
+
+static inline void vpsadminos_rhashtable_livepatch_post_unpatch(void)
+{
+}
+#endif
+
 #if defined(CONFIG_LIVEPATCH) && defined(CONFIG_X86) && \
 	defined(CONFIG_MITIGATION_SRSO)
 void error_entry(void);

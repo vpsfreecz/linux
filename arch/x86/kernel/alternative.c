@@ -19,6 +19,7 @@
 #include <linux/bsearch.h>
 #include <linux/sync_core.h>
 #include <linux/execmem.h>
+#include <linux/vpsadminos-livepatch.h>
 #include <asm/text-patching.h>
 #include <asm/cmpxchg.h>
 #include <asm/alternative.h>
@@ -2254,6 +2255,21 @@ int text_poke_cmpxchg64(void *addr, u64 old, u64 new)
 
 	return args.result == old ? 0 : -EAGAIN;
 }
+
+#if defined(CONFIG_LIVEPATCH) && defined(CONFIG_X86_64)
+int vpsadminos_livepatch_text_poke_cmpxchg64(void *addr, u64 old, u64 new)
+{
+	int ret;
+
+	mutex_lock(&text_mutex);
+	ret = text_poke_cmpxchg64(addr, old, new);
+	if (!ret)
+		text_poke_sync();
+	mutex_unlock(&text_mutex);
+
+	return ret;
+}
+#endif
 
 /**
  * text_poke_kgdb - Update instructions on a live kernel by kgdb
