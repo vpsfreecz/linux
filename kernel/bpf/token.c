@@ -7,10 +7,209 @@
 #include <linux/namei.h>
 #include <linux/user_namespace.h>
 #include <linux/security.h>
+#include <linux/tracing_namespace.h>
 
 static bool bpf_ns_capable(struct user_namespace *ns, int cap)
 {
 	return ns_capable(ns, cap) || (cap != CAP_SYS_ADMIN && ns_capable(ns, CAP_SYS_ADMIN));
+}
+
+bool bpf_token_is_container(const struct bpf_token *token)
+{
+	return token && (token->flags & BPF_TOKEN_F_CONTAINER);
+}
+
+static bool bpf_token_is_internal(const struct bpf_token *token)
+{
+	return token && (token->flags & BPF_TOKEN_F_INTERNAL);
+}
+
+bool bpf_token_same_container_domain(const struct bpf_token *a,
+				     const struct bpf_token *b)
+{
+	if (!bpf_token_is_container(a) || !bpf_token_is_container(b))
+		return false;
+
+	return a->tracing_ns && a->tracing_ns == b->tracing_ns;
+}
+
+bool bpf_token_task_match(const struct bpf_token *token,
+			  const struct task_struct *task)
+{
+	if (!bpf_token_is_container(token))
+		return true;
+	if (!task || !token->tracing_ns)
+		return false;
+
+	return tracing_ns_matches_task(token->tracing_ns, task);
+}
+
+bool bpf_token_current_match(const struct bpf_token *token)
+{
+	if (!bpf_token_is_container(token))
+		return true;
+	if (!token->tracing_ns)
+		return false;
+
+	return tracing_ns_matches_current(token->tracing_ns);
+}
+
+bool bpf_token_current_domain_matches_task(const struct task_struct *task)
+{
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
+
+	if (!tns || tns == &init_tracing_ns)
+		return true;
+
+	return tracing_ns_matches_task(tns, task);
+#else
+	return true;
+#endif
+}
+
+bool bpf_token_current_container_member(void)
+{
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
+
+	if (!tns || tns == &init_tracing_ns)
+		return false;
+
+	return tracing_ns_matches_current(tns);
+#else
+	return false;
+#endif
+}
+
+static bool bpf_token_current_container_allowed(const struct bpf_token *token)
+{
+	if (!bpf_token_current_container_member())
+		return true;
+	if (!bpf_token_is_container(token))
+		return false;
+
+	return bpf_token_current_match(token);
+}
+
+/*
+ * Container tracing authority is anchored to the user namespace that owns the
+ * tracing boundary. A nested user namespace inside the same tracing guest must
+ * not regain tracing privileges solely by becoming capable in that nested
+ * namespace.
+ */
+static struct user_namespace *bpf_token_current_container_userns(void)
+{
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
+
+	if (!bpf_token_current_container_member())
+		return NULL;
+
+	return tns->user_ns;
+#else
+	return NULL;
+#endif
+}
+
+bool bpf_token_current_container_capable(int cap)
+{
+	struct user_namespace *userns;
+
+	userns = bpf_token_current_container_userns();
+	if (!userns)
+		return false;
+
+	return bpf_ns_capable(userns, cap);
+}
+
+static struct bpf_token *bpf_token_alloc_current_container(void)
+{
+	struct bpf_token *token;
+	struct user_namespace *userns;
+#ifdef CONFIG_TRACING_NS
+	struct tracing_namespace *tns = current_tracing_ns();
+#else
+	struct tracing_namespace *tns = NULL;
+#endif
+
+	if (!bpf_token_current_container_capable(CAP_BPF) &&
+	    !bpf_token_current_container_capable(CAP_PERFMON) &&
+	    !bpf_token_current_container_capable(CAP_SYS_ADMIN) &&
+	    !bpf_token_current_container_capable(CAP_NET_ADMIN))
+		return NULL;
+	userns = bpf_token_current_container_userns();
+	if (!tns || !userns)
+		return NULL;
+
+	token = kzalloc(sizeof(*token), GFP_KERNEL);
+	if (!token)
+		return ERR_PTR(-ENOMEM);
+
+	atomic64_set(&token->refcnt, 1);
+	token->flags = BPF_TOKEN_F_CONTAINER | BPF_TOKEN_F_INTERNAL;
+	token->userns = get_user_ns(userns);
+	token->tracing_ns = get_tracing_ns(tns);
+
+	return token;
+}
+
+struct bpf_token *bpf_token_get_current_container(void)
+{
+	return bpf_token_alloc_current_container();
+}
+
+bool bpf_token_allow_helper(const struct bpf_token *token, enum bpf_func_id func_id)
+{
+	if (!bpf_token_is_container(token))
+		return true;
+
+	switch (func_id) {
+	case BPF_FUNC_map_lookup_elem:
+	case BPF_FUNC_map_update_elem:
+	case BPF_FUNC_map_delete_elem:
+	case BPF_FUNC_map_push_elem:
+	case BPF_FUNC_map_pop_elem:
+	case BPF_FUNC_map_peek_elem:
+	case BPF_FUNC_map_lookup_percpu_elem:
+	case BPF_FUNC_get_prandom_u32:
+	case BPF_FUNC_get_smp_processor_id:
+	case BPF_FUNC_get_numa_node_id:
+	case BPF_FUNC_tail_call:
+	case BPF_FUNC_ktime_get_ns:
+	case BPF_FUNC_ktime_get_boot_ns:
+	case BPF_FUNC_ktime_get_tai_ns:
+	case BPF_FUNC_jiffies64:
+	case BPF_FUNC_ringbuf_output:
+	case BPF_FUNC_ringbuf_reserve:
+	case BPF_FUNC_ringbuf_submit:
+	case BPF_FUNC_ringbuf_discard:
+	case BPF_FUNC_ringbuf_query:
+	case BPF_FUNC_ringbuf_reserve_dynptr:
+	case BPF_FUNC_ringbuf_submit_dynptr:
+	case BPF_FUNC_ringbuf_discard_dynptr:
+	case BPF_FUNC_dynptr_from_mem:
+	case BPF_FUNC_dynptr_read:
+	case BPF_FUNC_dynptr_write:
+	case BPF_FUNC_dynptr_data:
+	case BPF_FUNC_strncmp:
+	case BPF_FUNC_strtol:
+	case BPF_FUNC_strtoul:
+	case BPF_FUNC_snprintf:
+	case BPF_FUNC_loop:
+	case BPF_FUNC_get_current_pid_tgid:
+	case BPF_FUNC_get_ns_current_pid_tgid:
+	case BPF_FUNC_get_current_uid_gid:
+	case BPF_FUNC_get_current_comm:
+	case BPF_FUNC_probe_read_user:
+	case BPF_FUNC_probe_read_user_str:
+	case BPF_FUNC_copy_from_user:
+	case BPF_FUNC_perf_event_output:
+	case BPF_FUNC_get_attach_cookie:
+		return true;
+	default:
+		return false;
+	}
 }
 
 bool bpf_token_capable(const struct bpf_token *token, int cap)
@@ -21,7 +220,8 @@ bool bpf_token_capable(const struct bpf_token *token, int cap)
 	userns = token ? token->userns : &init_user_ns;
 	if (!bpf_ns_capable(userns, cap))
 		return false;
-	if (token && security_bpf_token_capable(token, cap) < 0)
+	if (token && !bpf_token_is_internal(token) &&
+	    security_bpf_token_capable(token, cap) < 0)
 		return false;
 	return true;
 }
@@ -33,8 +233,10 @@ void bpf_token_inc(struct bpf_token *token)
 
 static void bpf_token_free(struct bpf_token *token)
 {
-	security_bpf_token_free(token);
+	if (!bpf_token_is_internal(token))
+		security_bpf_token_free(token);
 	put_user_ns(token->userns);
+	put_tracing_ns(token->tracing_ns);
 	kfree(token);
 }
 
@@ -69,6 +271,9 @@ static void bpf_token_show_fdinfo(struct seq_file *m, struct file *filp)
 {
 	struct bpf_token *token = filp->private_data;
 	u64 mask;
+
+	if (!bpf_token_current_container_allowed(token))
+		return;
 
 	BUILD_BUG_ON(__MAX_BPF_CMD >= 64);
 	mask = BIT_ULL(__MAX_BPF_CMD) - 1;
@@ -183,6 +388,15 @@ int bpf_token_create(union bpf_attr *attr)
 	/* remember bpffs owning userns for future ns_capable() checks */
 	token->userns = get_user_ns(userns);
 
+	if (bpf_token_current_container_member()) {
+		struct tracing_namespace *tns = current_tracing_ns();
+
+		token->flags = BPF_TOKEN_F_CONTAINER;
+		put_user_ns(token->userns);
+		token->userns = get_user_ns(tns->user_ns);
+		token->tracing_ns = get_tracing_ns(tns);
+	}
+
 	token->allowed_cmds = mnt_opts->delegate_cmds;
 	token->allowed_maps = mnt_opts->delegate_maps;
 	token->allowed_progs = mnt_opts->delegate_progs;
@@ -221,6 +435,9 @@ int bpf_token_get_info_by_fd(struct bpf_token *token,
 	info_len = min_t(u32, info_len, sizeof(info));
 	memset(&info, 0, sizeof(info));
 
+	if (!bpf_token_current_container_allowed(token))
+		return -EACCES;
+
 	info.allowed_cmds = token->allowed_cmds;
 	info.allowed_maps = token->allowed_maps;
 	info.allowed_progs = token->allowed_progs;
@@ -244,6 +461,8 @@ struct bpf_token *bpf_token_get_from_fd(u32 ufd)
 		return ERR_PTR(-EINVAL);
 
 	token = fd_file(f)->private_data;
+	if (!bpf_token_current_container_allowed(token))
+		return ERR_PTR(-EACCES);
 	bpf_token_inc(token);
 
 	return token;

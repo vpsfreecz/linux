@@ -13941,6 +13941,11 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	if (!insn->imm)
 		return 0;
 
+	if (bpf_token_is_container(env->prog->aux->token)) {
+		verbose(env, "container tracing programs cannot call kernel functions\n");
+		return -EACCES;
+	}
+
 	err = fetch_kfunc_meta(env, insn, &meta, &func_name);
 	if (err == -EACCES && func_name)
 		verbose(env, "calling kernel function %s is not allowed\n", func_name);
@@ -20836,6 +20841,14 @@ static int __add_used_map(struct bpf_verifier_env *env, struct bpf_map *map)
 	err = check_map_prog_compatibility(env, map, env->prog);
 	if (err)
 		return err;
+
+	if (bpf_token_is_container(env->prog->aux->token)) {
+		if (!bpf_token_is_container(map->token) ||
+		    !bpf_token_same_container_domain(env->prog->aux->token, map->token)) {
+			verbose(env, "container program cannot use a cross-domain map\n");
+			return -EACCES;
+		}
+	}
 
 	if (env->prog->sleepable)
 		atomic64_inc(&map->sleepable_refcnt);
