@@ -97,26 +97,45 @@ static int inet_diag_msg_sctpladdrs_fill(struct sk_buff *skb,
 	return 0;
 }
 
+static int sctp_diag_peer_count(struct sctp_association *asoc, size_t *count)
+{
+	struct sctp_transport *transport;
+	size_t n = 0;
+
+	list_for_each_entry(transport, &asoc->peer.transport_addr_list,
+			    transports) {
+		if (n == INT_MAX / sizeof(struct sockaddr_storage))
+			return -EOVERFLOW;
+		n++;
+	}
+
+	*count = n;
+	return 0;
+}
+
 static int inet_diag_msg_sctpaddrs_fill(struct sk_buff *skb,
-					struct sctp_association *asoc)
+					struct sctp_association *asoc,
+					size_t addrcnt)
 {
 	int addrlen = sizeof(struct sockaddr_storage);
 	struct sctp_transport *from;
 	struct nlattr *attr;
 	void *info = NULL;
 
-	attr = nla_reserve(skb, INET_DIAG_PEERS,
-			   addrlen * asoc->peer.transport_count);
+	attr = nla_reserve(skb, INET_DIAG_PEERS, addrlen * addrcnt);
 	if (!attr)
 		return -EMSGSIZE;
 
 	info = nla_data(attr);
 	list_for_each_entry(from, &asoc->peer.transport_addr_list,
 			    transports) {
+		if (!addrcnt)
+			break;
 		memcpy(info, &from->ipaddr, sizeof(from->ipaddr));
 		memset(info + sizeof(from->ipaddr), 0,
 		       addrlen - sizeof(from->ipaddr));
 		info += addrlen;
+		addrcnt--;
 	}
 
 	return 0;
@@ -137,7 +156,11 @@ static int inet_sctp_diag_fill(struct sock *sk, struct sctp_association *asoc,
 	struct nlmsghdr  *nlh;
 	int ext = req->idiag_ext;
 	struct sctp_infox infox;
+	size_t peer_count = 0;
 	void *info = NULL;
+
+	if (asoc && sctp_diag_peer_count(asoc, &peer_count))
+		return -EMSGSIZE;
 
 	nlh = nlmsg_put(skb, portid, seq, unlh->nlmsg_type, sizeof(*r),
 			nlmsg_flags);
@@ -210,7 +233,7 @@ static int inet_sctp_diag_fill(struct sock *sk, struct sctp_association *asoc,
 		if (nla_put_string(skb, INET_DIAG_CONG, "reno") < 0)
 			goto errout;
 
-	if (asoc && inet_diag_msg_sctpaddrs_fill(skb, asoc))
+	if (asoc && inet_diag_msg_sctpaddrs_fill(skb, asoc, peer_count))
 		goto errout;
 
 	nlmsg_end(skb, nlh);
@@ -235,19 +258,37 @@ static size_t inet_assoc_attr_size(struct sock *sk,
 {
 	int addrlen = sizeof(struct sockaddr_storage);
 	int addrcnt = 0;
+	size_t peer_count;
 	struct sctp_sockaddr_entry *laddr;
+	size_t size;
+
+	if (sctp_diag_peer_count(asoc, &peer_count))
+		return 0;
 
 	list_for_each_entry_rcu(laddr, &asoc->base.bind_addr.address_list,
 				list, lockdep_sock_is_held(sk))
 		addrcnt++;
 
-	return	  nla_total_size(sizeof(struct sctp_info))
-		+ nla_total_size(addrlen * asoc->peer.transport_count)
-		+ nla_total_size(addrlen * addrcnt)
-		+ nla_total_size(sizeof(struct inet_diag_msg))
-		+ inet_diag_msg_attrs_size()
-		+ nla_total_size(sizeof(struct inet_diag_meminfo))
-		+ 64;
+	size = nla_total_size(sizeof(struct sctp_info));
+	if (check_add_overflow(size,
+			       (size_t)nla_total_size(addrlen * peer_count),
+			       &size) ||
+	    check_add_overflow(size,
+			       (size_t)nla_total_size(addrlen * addrcnt),
+			       &size) ||
+	    check_add_overflow(size,
+			       (size_t)nla_total_size(sizeof(struct inet_diag_msg)),
+			       &size) ||
+	    check_add_overflow(size, inet_diag_msg_attrs_size(), &size) ||
+	    check_add_overflow(size,
+			       (size_t)nla_total_size(sizeof(struct inet_diag_meminfo)),
+			       &size) ||
+	    check_add_overflow(size, (size_t)64, &size))
+		return 0;
+	if (size > INT_MAX - NLMSG_HDRLEN - (NLMSG_ALIGNTO - 1))
+		return 0;
+
+	return size;
 }
 
 static int sctp_sock_dump_one(struct sctp_endpoint *ep, struct sctp_transport *tsp, void *p)
@@ -258,6 +299,7 @@ static int sctp_sock_dump_one(struct sctp_endpoint *ep, struct sctp_transport *t
 	const struct inet_diag_req_v2 *req = commp->r;
 	struct sk_buff *skb = commp->skb;
 	struct sk_buff *rep;
+	size_t attr_size;
 	int err;
 
 	err = sock_diag_check_cookie(sk, req->id.idiag_cookie);
@@ -271,7 +313,13 @@ static int sctp_sock_dump_one(struct sctp_endpoint *ep, struct sctp_transport *t
 		goto out_unlock;
 	}
 
-	rep = nlmsg_new(inet_assoc_attr_size(sk, assoc), GFP_KERNEL);
+	attr_size = inet_assoc_attr_size(sk, assoc);
+	if (!attr_size) {
+		err = -EMSGSIZE;
+		goto out_unlock;
+	}
+
+	rep = nlmsg_new(attr_size, GFP_KERNEL);
 	if (!rep) {
 		err = -ENOMEM;
 		goto out_unlock;
