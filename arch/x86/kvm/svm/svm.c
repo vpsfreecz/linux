@@ -4403,6 +4403,18 @@ static __no_kcsan fastpath_t svm_vcpu_run(struct kvm_vcpu *vcpu, u64 run_flags)
 	if (force_immediate_exit)
 		smp_send_reschedule(vcpu->cpu);
 
+	/*
+	 * A vCPU may have had AVIC inhibited while running L2 before this
+	 * livepatch was activated, leaving L0's x2APIC MSR bitmap permissive.
+	 * Repair the cached bitmap before any subsequent VMRUN of L1 or L2.
+	 * Expand kvm_vcpu_apicv_active() with static_key_enabled() because a
+	 * livepatch replacement cannot carry a module-owned jump-label site.
+	 */
+	if (!((!static_key_enabled(&kvm_has_noapic_vcpu) || vcpu->arch.apic) &&
+	      vcpu->arch.apic->apicv_active) &&
+	    !svm->x2avic_msrs_intercepted)
+		svm_set_x2apic_msr_interception(svm, true);
+
 	pre_svm_run(vcpu);
 
 	sync_lapic_to_cr8(vcpu);

@@ -1053,7 +1053,7 @@ static struct klp_state vpsadminos_svm_asid_generation_state
 __section(".kpatch.system_states") __used
 __aligned(__alignof__(struct klp_state)) = {
 	.id = 0x25f744ffa0c8e799UL,
-	.version = 1,
+	.version = 2,
 };
 #endif
 
