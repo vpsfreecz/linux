@@ -94,12 +94,19 @@ static ssize_t bpf_seq_read(struct file *file, char __user *buf, size_t size,
 			    loff_t *ppos)
 {
 	struct seq_file *seq = file->private_data;
+	struct bpf_iter_priv_data *iter_priv;
 	size_t n, offs, copied = 0;
 	int err = 0, num_objs = 0;
 	bool can_resched;
 	void *p;
 
 	mutex_lock(&seq->lock);
+	iter_priv = container_of(seq->private, struct bpf_iter_priv_data,
+				 target_private);
+	if (!bpf_prog_current_container_allowed(iter_priv->prog)) {
+		err = -EACCES;
+		goto done;
+	}
 
 	if (!seq->buf) {
 		seq->size = PAGE_SIZE << 3;
@@ -682,6 +689,8 @@ struct bpf_prog *bpf_iter_get_info(struct bpf_iter_meta *meta, bool in_stop)
 				 target_private);
 
 	if (in_stop && iter_priv->done_stop)
+		return NULL;
+	if (!bpf_prog_current_container_allowed(iter_priv->prog))
 		return NULL;
 
 	meta->session_id = iter_priv->session_id;

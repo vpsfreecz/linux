@@ -1243,6 +1243,10 @@ static const struct bpf_func_proto bpf_get_func_arg_cnt_proto = {
 static const struct bpf_func_proto *
 bpf_tracing_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
+	if (bpf_token_is_container(prog->aux->token) &&
+	    !bpf_token_allow_helper(prog->aux->token, func_id))
+		return NULL;
+
 	const struct bpf_func_proto *func_proto;
 
 	switch (func_id) {
@@ -1303,6 +1307,10 @@ static inline bool is_uprobe_session(const struct bpf_prog *prog)
 static const struct bpf_func_proto *
 kprobe_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
+	if (bpf_token_is_container(prog->aux->token) &&
+	    !bpf_token_allow_helper(prog->aux->token, func_id))
+		return NULL;
+
 	switch (func_id) {
 	case BPF_FUNC_perf_event_output:
 		return &bpf_perf_event_output_proto;
@@ -1430,6 +1438,10 @@ static const struct bpf_func_proto bpf_get_stack_proto_tp = {
 static const struct bpf_func_proto *
 tp_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
+	if (bpf_token_is_container(prog->aux->token) &&
+	    !bpf_token_allow_helper(prog->aux->token, func_id))
+		return NULL;
+
 	switch (func_id) {
 	case BPF_FUNC_perf_event_output:
 		return &bpf_perf_event_output_proto_tp;
@@ -1534,6 +1546,10 @@ static const struct bpf_func_proto bpf_read_branch_records_proto = {
 static const struct bpf_func_proto *
 pe_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
+	if (bpf_token_is_container(prog->aux->token) &&
+	    !bpf_token_allow_helper(prog->aux->token, func_id))
+		return NULL;
+
 	switch (func_id) {
 	case BPF_FUNC_perf_event_output:
 		return &bpf_perf_event_output_proto_tp;
@@ -1669,6 +1685,10 @@ static const struct bpf_func_proto bpf_get_stack_proto_raw_tp = {
 static const struct bpf_func_proto *
 raw_tp_prog_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
+	if (bpf_token_is_container(prog->aux->token) &&
+	    !bpf_token_allow_helper(prog->aux->token, func_id))
+		return NULL;
+
 	switch (func_id) {
 	case BPF_FUNC_perf_event_output:
 		return &bpf_perf_event_output_proto_raw_tp;
