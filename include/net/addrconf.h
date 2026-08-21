@@ -368,7 +368,7 @@ static inline struct inet6_dev *__in6_dev_get_safely(const struct net_device *de
  * on the inet6_dev. Callers must use in6_dev_put() later to
  * release this reference.
  */
-static inline struct inet6_dev *in6_dev_get(const struct net_device *dev)
+static __always_inline struct inet6_dev *in6_dev_get(const struct net_device *dev)
 {
 	struct inet6_dev *idev;
 

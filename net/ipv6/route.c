@@ -64,6 +64,10 @@
 #include <linux/uaccess.h>
 #include <linux/btf_ids.h>
 
+#ifdef CONFIG_LIVEPATCH
+#include "kpatch-macros.h"
+#endif
+
 #ifdef CONFIG_SYSCTL
 #include <linux/sysctl.h>
 #endif
@@ -74,6 +78,11 @@ static int ip6_rt_type_to_error(u8 fib6_type);
 #include <trace/events/fib6.h>
 EXPORT_TRACEPOINT_SYMBOL_GPL(fib6_table_lookup);
 #undef CREATE_TRACE_POINTS
+
+#ifdef CONFIG_LIVEPATCH
+/* This boot-only section has finished before any livepatch can activate. */
+KPATCH_IGNORE_SECTION(".init.text")
+#endif
 
 enum rt6_nud_state {
 	RT6_NUD_FAIL_HARD = -3,
