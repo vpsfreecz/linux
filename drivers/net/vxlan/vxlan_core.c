@@ -2943,6 +2943,7 @@ static void vxlan_uninit(struct net_device *dev)
 {
 	struct vxlan_dev *vxlan = netdev_priv(dev);
 
+	del_timer_sync(&vxlan->age_timer);
 	vxlan_mdb_fini(vxlan);
 
 	if (vxlan->cfg.flags & VXLAN_F_VNIFILTER)
