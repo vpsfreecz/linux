@@ -1459,6 +1459,9 @@ static void sctp_check_transmitted(struct sctp_outq *q,
 	while (NULL != (lchunk = sctp_list_dequeue(transmitted_queue))) {
 		tchunk = list_entry(lchunk, struct sctp_chunk,
 				    transmitted_list);
+		if (transport && tchunk->transport &&
+		    tchunk->transport != transport)
+			tchunk->transport = transport;
 
 		if (sctp_chunk_abandoned(tchunk)) {
 			/* Move the chunk to abandoned list. */
