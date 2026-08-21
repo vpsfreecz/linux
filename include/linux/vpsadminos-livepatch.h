@@ -2,6 +2,12 @@
 #ifndef _LINUX_VPSADMINOS_LIVEPATCH_H
 #define _LINUX_VPSADMINOS_LIVEPATCH_H
 
+#ifdef CONFIG_LIVEPATCH
+#define VPSADMINOS_NFS_FREE_STATEID_CONTROL_SHADOW_ID	0xbbddece21d1ee29bUL
+#define VPSADMINOS_NFS_FREE_STATEID_DATA_SHADOW_ID	0x32127145199df290UL
+#define VPSADMINOS_NFS_FREE_STATEID_STATE_ID		0x95e5fe7fc76a656bUL
+#endif
+
 #if defined(CONFIG_LIVEPATCH) && defined(CONFIG_XFRM)
 int vpsadminos_xfrm_livepatch_pre_patch(void);
 void vpsadminos_xfrm_livepatch_post_patch(void);

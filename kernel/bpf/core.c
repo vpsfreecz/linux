@@ -911,6 +911,7 @@ static inline void vpsadminos_bpf_jit_ibpb(void)
 #ifdef CONFIG_LIVEPATCH
 #define VPSADMINOS_PIPAPO_STATE_ID	0x7a1f024282b3489dUL
 #define VPSADMINOS_PIPAPO_STATE_ACTIVE	((void *)1UL)
+#define VPSADMINOS_NFS_FREE_STATEID_STATE_ACTIVE	((void *)1UL)
 
 static struct klp_state vpsadminos_pipapo_state
 __section(".kpatch.system_states") __used
@@ -934,6 +935,48 @@ static void vpsadminos_pipapo_livepatch_post_patch(void)
 static void vpsadminos_pipapo_livepatch_post_unpatch(void)
 {
 	WRITE_ONCE(vpsadminos_pipapo_state.data, NULL);
+}
+
+/*
+ * Keep this state record in a built-in diff object.  The callback and shadow
+ * registry which own the transition live in modular nfsv4.ko, whose state
+ * records are not collected into the generated patch's state array.
+ */
+static struct klp_state vpsadminos_nfs_free_stateid_state
+__section(".kpatch.system_states") __used
+__aligned(__alignof__(struct klp_state)) = {
+	.id = VPSADMINOS_NFS_FREE_STATEID_STATE_ID,
+	.version = 1,
+};
+
+static void vpsadminos_nfs_free_stateid_livepatch_post_patch(void)
+{
+	struct klp_state *prev_state;
+
+	WRITE_ONCE(vpsadminos_nfs_free_stateid_state.data,
+		   VPSADMINOS_NFS_FREE_STATEID_STATE_ACTIVE);
+	prev_state = klp_get_prev_state(VPSADMINOS_NFS_FREE_STATEID_STATE_ID);
+	if (prev_state &&
+	    READ_ONCE(prev_state->data) ==
+		    VPSADMINOS_NFS_FREE_STATEID_STATE_ACTIVE)
+		WRITE_ONCE(prev_state->data, NULL);
+}
+
+static void vpsadminos_nfs_free_stateid_livepatch_post_unpatch(void)
+{
+	struct klp_state *prev_state;
+
+	prev_state = klp_get_prev_state(VPSADMINOS_NFS_FREE_STATEID_STATE_ID);
+	if (prev_state &&
+	    READ_ONCE(prev_state->data) ==
+		    VPSADMINOS_NFS_FREE_STATEID_STATE_ACTIVE) {
+		WRITE_ONCE(vpsadminos_nfs_free_stateid_state.data, NULL);
+		return;
+	}
+
+	WRITE_ONCE(vpsadminos_nfs_free_stateid_state.data, NULL);
+	klp_shadow_free_all(VPSADMINOS_NFS_FREE_STATEID_DATA_SHADOW_ID, NULL);
+	klp_shadow_free_all(VPSADMINOS_NFS_FREE_STATEID_CONTROL_SHADOW_ID, NULL);
 }
 
 #ifndef CONFIG_X86
@@ -1006,6 +1049,7 @@ static void vpsadminos_livepatch_post_patch(struct klp_object *obj)
 	vpsadminos_pipapo_livepatch_post_patch();
 	vpsadminos_nfqueue_livepatch_post_patch();
 	vpsadminos_sunrpc_livepatch_post_patch();
+	vpsadminos_nfs_free_stateid_livepatch_post_patch();
 	vpsadminos_xfrm_livepatch_post_patch();
 	vpsadminos_bpf_jit_ibpb();
 	vpsadminos_livepatch_flush_tlb_all();
@@ -1021,6 +1065,7 @@ static void vpsadminos_livepatch_pre_unpatch(struct klp_object *obj)
 static void vpsadminos_livepatch_post_unpatch(struct klp_object *obj)
 {
 	(void)obj;
+	vpsadminos_nfs_free_stateid_livepatch_post_unpatch();
 	vpsadminos_sunrpc_livepatch_post_unpatch();
 	vpsadminos_nfqueue_livepatch_post_unpatch();
 	vpsadminos_pipapo_livepatch_post_unpatch();

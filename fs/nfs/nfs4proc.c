@@ -55,6 +55,11 @@
 #include <linux/utsname.h>
 #include <linux/freezer.h>
 #include <linux/iversion.h>
+#ifdef CONFIG_LIVEPATCH
+#include <linux/livepatch.h>
+#include <linux/vpsadminos-livepatch.h>
+#include <net/net_namespace.h>
+#endif
 
 #include "nfs4_fs.h"
 #include "delegation.h"
@@ -10570,9 +10575,132 @@ struct nfs_free_stateid_data {
 	struct nfs41_free_stateid_res res;
 };
 
+static const struct rpc_call_ops nfs41_free_stateid_ops;
+
+#ifdef CONFIG_LIVEPATCH
+struct vpsadminos_nfs_free_stateid_control {
+	struct mutex gate;	/* serializes producer publication and shutdown */
+	spinlock_t lock;		/* protects operations and inflight */
+	struct list_head operations;
+	unsigned int inflight;
+	bool active;
+};
+
+struct vpsadminos_nfs_free_stateid_operation {
+	struct list_head node;
+	struct vpsadminos_nfs_free_stateid_control *control;
+	struct nfs_server *server;
+	struct nfs_client *clp;
+	struct rpc_clnt *rpc_client;
+};
+
+struct vpsadminos_nfs_free_stateid_operation_init {
+	struct vpsadminos_nfs_free_stateid_control *control;
+	struct nfs_server *server;
+	struct nfs_client *clp;
+	struct rpc_clnt *rpc_client;
+};
+
+static int
+vpsadminos_nfs_free_stateid_control_ctor(void *obj, void *shadow_data,
+					 void *ctor_data)
+{
+	struct vpsadminos_nfs_free_stateid_control *control = shadow_data;
+
+	(void)ctor_data;
+	WARN_ON_ONCE(obj != &nfs41_free_stateid_ops);
+	mutex_init(&control->gate);
+	spin_lock_init(&control->lock);
+	INIT_LIST_HEAD(&control->operations);
+	return 0;
+}
+
+static int
+vpsadminos_nfs_free_stateid_operation_ctor(void *obj, void *shadow_data,
+					   void *ctor_data)
+{
+	struct vpsadminos_nfs_free_stateid_operation_init *init = ctor_data;
+	struct vpsadminos_nfs_free_stateid_operation *operation = shadow_data;
+
+	INIT_LIST_HEAD(&operation->node);
+	operation->control = init->control;
+	operation->server = init->server;
+	operation->clp = init->clp;
+	operation->rpc_client = init->rpc_client;
+	(void)obj;
+	return 0;
+}
+
+static struct vpsadminos_nfs_free_stateid_control *
+vpsadminos_nfs_free_stateid_control_get(void)
+{
+	return klp_shadow_get((void *)&nfs41_free_stateid_ops,
+			      VPSADMINOS_NFS_FREE_STATEID_CONTROL_SHADOW_ID);
+}
+
+static struct vpsadminos_nfs_free_stateid_operation *
+vpsadminos_nfs_free_stateid_operation_get(struct nfs_free_stateid_data *data)
+{
+	return klp_shadow_get(data,
+			      VPSADMINOS_NFS_FREE_STATEID_DATA_SHADOW_ID);
+}
+
+static void
+vpsadminos_nfs_freeid_release(struct nfs_free_stateid_data *data,
+			      struct vpsadminos_nfs_free_stateid_operation *operation)
+{
+	struct vpsadminos_nfs_free_stateid_control *control = operation->control;
+	struct rpc_clnt *rpc_client = operation->rpc_client;
+	struct nfs_server *server = operation->server;
+	struct nfs_client *clp = operation->clp;
+	bool wake = false;
+
+	spin_lock(&control->lock);
+	if (WARN_ON_ONCE(list_empty(&operation->node))) {
+		spin_unlock(&control->lock);
+	} else {
+		list_del_init(&operation->node);
+		if (WARN_ON_ONCE(!control->inflight))
+			control->inflight = 0;
+		else if (!--control->inflight)
+			wake = true;
+		spin_unlock(&control->lock);
+	}
+
+	/* klp_shadow_free() schedules the record for RCU reclamation. */
+	klp_shadow_free(data, VPSADMINOS_NFS_FREE_STATEID_DATA_SHADOW_ID,
+			NULL);
+	rpc_release_client(rpc_client);
+	nfs_sb_deactive(server->super);
+	nfs_put_client(clp);
+	kfree(data);
+
+	if (wake) {
+		/* Pairs the zero transition with wait_var_event_timeout(). */
+		smp_mb();
+		wake_up_var(&control->inflight);
+	}
+}
+#endif
+
 static void nfs41_free_stateid_prepare(struct rpc_task *task, void *calldata)
 {
 	struct nfs_free_stateid_data *data = calldata;
+
+#ifdef CONFIG_LIVEPATCH
+	if (vpsadminos_nfs_free_stateid_control_get()) {
+		struct vpsadminos_nfs_free_stateid_operation *operation;
+
+		operation = vpsadminos_nfs_free_stateid_operation_get(data);
+		if (!operation) {
+			rpc_exit(task, -EIO);
+			return;
+		}
+		nfs4_setup_sequence(operation->clp, &data->args.seq_args,
+				    &data->res.seq_res, task);
+		return;
+	}
+#endif
 	nfs4_setup_sequence(data->server->nfs_client,
 			&data->args.seq_args,
 			&data->res.seq_res,
@@ -10582,12 +10710,29 @@ static void nfs41_free_stateid_prepare(struct rpc_task *task, void *calldata)
 static void nfs41_free_stateid_done(struct rpc_task *task, void *calldata)
 {
 	struct nfs_free_stateid_data *data = calldata;
+	struct nfs_server *server = data->server;
+
+#ifdef CONFIG_LIVEPATCH
+	if (vpsadminos_nfs_free_stateid_control_get()) {
+		struct vpsadminos_nfs_free_stateid_operation *operation;
+
+		operation = vpsadminos_nfs_free_stateid_operation_get(data);
+		nfs41_sequence_done(task, &data->res.seq_res);
+		if (!operation)
+			return;
+		server = operation->server;
+		goto handle_status;
+	}
+#endif
 
 	nfs41_sequence_done(task, &data->res.seq_res);
 
+#ifdef CONFIG_LIVEPATCH
+handle_status:
+#endif
 	switch (task->tk_status) {
 	case -NFS4ERR_DELAY:
-		if (nfs4_async_handle_error(task, data->server, NULL, NULL) == -EAGAIN)
+		if (nfs4_async_handle_error(task, server, NULL, NULL) == -EAGAIN)
 			rpc_restart_call_prepare(task);
 	}
 }
@@ -10595,8 +10740,26 @@ static void nfs41_free_stateid_done(struct rpc_task *task, void *calldata)
 static void nfs41_free_stateid_release(void *calldata)
 {
 	struct nfs_free_stateid_data *data = calldata;
-	struct nfs_client *clp = data->server->nfs_client;
+	struct nfs_client *clp;
 
+#ifdef CONFIG_LIVEPATCH
+	if (vpsadminos_nfs_free_stateid_control_get()) {
+		struct vpsadminos_nfs_free_stateid_operation *operation;
+
+		operation = vpsadminos_nfs_free_stateid_operation_get(data);
+		if (operation)
+			vpsadminos_nfs_freeid_release(data, operation);
+		else
+			/*
+			 * Legacy calldata has no server pin, so even reading server
+			 * here can race its RCU free.  Accept the one client reference
+			 * as a bounded activation-time leak and free only calldata.
+			 */
+			kfree(data);
+		return;
+	}
+#endif
+	clp = data->server->nfs_client;
 	nfs_sb_deactive(data->server->super);
 	nfs_put_client(clp);
 	kfree(calldata);
@@ -10607,6 +10770,106 @@ static const struct rpc_call_ops nfs41_free_stateid_ops = {
 	.rpc_call_done = nfs41_free_stateid_done,
 	.rpc_release = nfs41_free_stateid_release,
 };
+
+#ifdef CONFIG_LIVEPATCH
+static int
+vpsadminos_nfs_freeid(struct vpsadminos_nfs_free_stateid_control *control,
+		      struct nfs_server *server,
+		      const nfs4_stateid *stateid,
+		      const struct cred *cred, bool privileged)
+{
+	struct rpc_message msg = {
+		.rpc_proc = &nfs4_procedures[NFSPROC4_CLNT_FREE_STATEID],
+		.rpc_cred = cred,
+	};
+	struct rpc_task_setup task_setup = {
+		.rpc_client = server->client,
+		.rpc_message = &msg,
+		.callback_ops = &nfs41_free_stateid_ops,
+		.flags = RPC_TASK_ASYNC | RPC_TASK_MOVEABLE,
+	};
+	struct vpsadminos_nfs_free_stateid_operation_init operation_init = {
+		.control = control,
+		.server = server,
+	};
+	struct vpsadminos_nfs_free_stateid_operation *operation;
+	struct nfs_free_stateid_data *data;
+	struct nfs_client *clp = server->nfs_client;
+	struct rpc_task *task;
+	int ret;
+
+	mutex_lock(&control->gate);
+	if (!control->active) {
+		ret = -EAGAIN;
+		goto out_unlock;
+	}
+	if (!refcount_inc_not_zero(&clp->cl_count)) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+	if (!nfs_sb_active(server->super)) {
+		ret = -EIO;
+		goto out_put_client;
+	}
+
+	nfs4_state_protect(clp, NFS_SP4_MACH_CRED_STATEID,
+			   &task_setup.rpc_client, &msg);
+
+	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	if (!data) {
+		ret = -ENOMEM;
+		goto out_deactive;
+	}
+	data->server = server;
+	nfs4_stateid_copy(&data->args.stateid, stateid);
+
+	task_setup.callback_data = data;
+	msg.rpc_argp = &data->args;
+	msg.rpc_resp = &data->res;
+	nfs4_init_sequence(&data->args.seq_args, &data->res.seq_res, 1,
+			   privileged);
+
+	refcount_inc(&task_setup.rpc_client->cl_count);
+	operation_init.clp = clp;
+	operation_init.rpc_client = task_setup.rpc_client;
+	operation = klp_shadow_alloc(data,
+				     VPSADMINOS_NFS_FREE_STATEID_DATA_SHADOW_ID,
+				     sizeof(*operation), GFP_KERNEL,
+				     vpsadminos_nfs_free_stateid_operation_ctor,
+				     &operation_init);
+	if (!operation) {
+		ret = -ENOMEM;
+		goto out_release_rpc_client;
+	}
+
+	spin_lock(&control->lock);
+	list_add_tail(&operation->node, &control->operations);
+	control->inflight++;
+	spin_unlock(&control->lock);
+
+	dprintk("NFS call  free_stateid %p\n", stateid);
+	task = rpc_run_task(&task_setup);
+	if (IS_ERR(task)) {
+		ret = PTR_ERR(task);
+	} else {
+		rpc_put_task(task);
+		ret = 0;
+	}
+	mutex_unlock(&control->gate);
+	return ret;
+
+out_release_rpc_client:
+	rpc_release_client(task_setup.rpc_client);
+	kfree(data);
+out_deactive:
+	nfs_sb_deactive(server->super);
+out_put_client:
+	nfs_put_client(clp);
+out_unlock:
+	mutex_unlock(&control->gate);
+	return ret;
+}
+#endif
 
 /**
  * nfs41_free_stateid - perform a FREE_STATEID operation
@@ -10636,6 +10899,14 @@ static int nfs41_free_stateid(struct nfs_server *server,
 	struct nfs_free_stateid_data *data;
 	struct rpc_task *task;
 	struct nfs_client *clp = server->nfs_client;
+#ifdef CONFIG_LIVEPATCH
+	struct vpsadminos_nfs_free_stateid_control *control;
+
+	control = vpsadminos_nfs_free_stateid_control_get();
+	if (control)
+		return vpsadminos_nfs_freeid(control, server, stateid, cred,
+					       privileged);
+#endif
 
 	if (!refcount_inc_not_zero(&clp->cl_count))
 		return -EIO;
@@ -10665,6 +10936,199 @@ static int nfs41_free_stateid(struct nfs_server *server,
 	rpc_put_task(task);
 	return 0;
 }
+
+#ifdef CONFIG_LIVEPATCH
+static bool
+vpsadminos_nfs_free_stateid_task_match(const struct rpc_task *task,
+				       const void *data)
+{
+	(void)data;
+	return task->tk_msg.rpc_proc ==
+		&nfs4_procedures[NFSPROC4_CLNT_FREE_STATEID];
+}
+
+static unsigned long
+vpsadminos_nfs_free_stateid_cancel_legacy(void)
+{
+	struct nfs_client *clp;
+	struct nfs_net *nn;
+	struct net *net;
+	unsigned long count = 0;
+
+	/*
+	 * A vulnerable legacy task selected cl_rpcclient for machine
+	 * credentials.  Its producer-held nfs_client reference keeps clp on
+	 * this list until the task's release callback runs.
+	 */
+	down_read(&net_rwsem);
+	for_each_net(net) {
+		nn = net_generic(net, nfs_net_id);
+		spin_lock(&nn->nfs_client_lock);
+		list_for_each_entry(clp, &nn->nfs_client_list, cl_share_link) {
+			if (IS_ERR_OR_NULL(clp->cl_rpcclient))
+				continue;
+			count += rpc_cancel_tasks(clp->cl_rpcclient, -EIO,
+				vpsadminos_nfs_free_stateid_task_match, NULL);
+		}
+		spin_unlock(&nn->nfs_client_lock);
+	}
+	up_read(&net_rwsem);
+	return count;
+}
+
+static void
+vpsadminos_nfs_cancel(struct vpsadminos_nfs_free_stateid_control *control)
+{
+	struct vpsadminos_nfs_free_stateid_operation *operation;
+
+	spin_lock(&control->lock);
+	list_for_each_entry(operation, &control->operations, node)
+		rpc_cancel_tasks(operation->rpc_client, -EIO,
+				 vpsadminos_nfs_free_stateid_task_match, NULL);
+	spin_unlock(&control->lock);
+}
+
+static int vpsadminos_nfs_freeid_pre_patch(struct klp_object *obj)
+{
+	struct vpsadminos_nfs_free_stateid_control *control;
+	bool busy;
+
+	(void)obj;
+	control = klp_shadow_get_or_alloc((void *)&nfs41_free_stateid_ops,
+					  VPSADMINOS_NFS_FREE_STATEID_CONTROL_SHADOW_ID,
+					  sizeof(*control), GFP_KERNEL,
+					  vpsadminos_nfs_free_stateid_control_ctor,
+					  NULL);
+	if (!control)
+		return -ENOMEM;
+
+	mutex_lock(&control->gate);
+	spin_lock(&control->lock);
+	busy = !list_empty(&control->operations) || control->inflight;
+	spin_unlock(&control->lock);
+	if (!control->active && busy) {
+		mutex_unlock(&control->gate);
+		return -EBUSY;
+	}
+	mutex_unlock(&control->gate);
+	return 0;
+}
+
+static void vpsadminos_nfs_freeid_post_patch(struct klp_object *obj)
+{
+	struct vpsadminos_nfs_free_stateid_control *control;
+
+	(void)obj;
+	control = vpsadminos_nfs_free_stateid_control_get();
+	if (WARN_ON_ONCE(!control))
+		return;
+	mutex_lock(&control->gate);
+	control->active = true;
+	mutex_unlock(&control->gate);
+}
+
+static void vpsadminos_nfs_freeid_pre_unpatch(struct klp_object *obj)
+{
+	struct vpsadminos_nfs_free_stateid_control *control;
+	unsigned long legacy;
+
+	(void)obj;
+	control = vpsadminos_nfs_free_stateid_control_get();
+	if (!control)
+		return;
+
+	mutex_lock(&control->gate);
+	control->active = false;
+	mutex_unlock(&control->gate);
+
+	for (;;) {
+		vpsadminos_nfs_cancel(control);
+		legacy = vpsadminos_nfs_free_stateid_cancel_legacy();
+		if (!legacy && !READ_ONCE(control->inflight))
+			break;
+		if (READ_ONCE(control->inflight))
+			wait_var_event_timeout(&control->inflight,
+					       !READ_ONCE(control->inflight),
+					       HZ / 10);
+		else
+			msleep(20);
+	}
+
+	spin_lock(&control->lock);
+	WARN_ON_ONCE(!list_empty(&control->operations) || control->inflight);
+	spin_unlock(&control->lock);
+}
+
+static void vpsadminos_nfs_freeid_post_unpatch(struct klp_object *obj)
+{
+	struct vpsadminos_nfs_free_stateid_control *control;
+	bool free_control;
+
+	(void)obj;
+	control = vpsadminos_nfs_free_stateid_control_get();
+	if (!control)
+		return;
+
+	mutex_lock(&control->gate);
+	spin_lock(&control->lock);
+	free_control = !control->active &&
+		list_empty(&control->operations) && !control->inflight;
+	spin_unlock(&control->lock);
+	mutex_unlock(&control->gate);
+	if (free_control)
+		klp_shadow_free((void *)&nfs41_free_stateid_ops,
+				VPSADMINOS_NFS_FREE_STATEID_CONTROL_SHADOW_ID,
+				NULL);
+}
+
+struct vpsadminos_nfs_pre_patch_callback {
+	int (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nfs_post_patch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nfs_pre_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+struct vpsadminos_nfs_post_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+static struct vpsadminos_nfs_pre_patch_callback
+vpsadminos_nfs_free_stateid_pre_patch_data
+__section(".kpatch.callbacks.pre_patch") __used = {
+	.fn = vpsadminos_nfs_freeid_pre_patch,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nfs_post_patch_callback
+vpsadminos_nfs_free_stateid_post_patch_data
+__section(".kpatch.callbacks.post_patch") __used = {
+	.fn = vpsadminos_nfs_freeid_post_patch,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nfs_pre_unpatch_callback
+vpsadminos_nfs_free_stateid_pre_unpatch_data
+__section(".kpatch.callbacks.pre_unpatch") __used = {
+	.fn = vpsadminos_nfs_freeid_pre_unpatch,
+	.objname = NULL,
+};
+
+static struct vpsadminos_nfs_post_unpatch_callback
+vpsadminos_nfs_free_stateid_post_unpatch_data
+__section(".kpatch.callbacks.post_unpatch") __used = {
+	.fn = vpsadminos_nfs_freeid_post_unpatch,
+	.objname = NULL,
+};
+#endif
 
 static void
 nfs41_free_lock_state(struct nfs_server *server, struct nfs4_lock_state *lsp)
