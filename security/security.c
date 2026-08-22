@@ -150,6 +150,15 @@ static bool security_cred_guard_check_where(const struct cred *cred,
 	return cred_guard_verify_committed_cred_where(cred, where);
 }
 
+static bool security_cred_guard_check_wait_where(const struct cred *cred,
+						 const char *where)
+{
+	if (security_cred_is_current(cred))
+		return security_current_guard_check_wait_where(where);
+
+	return cred_guard_verify_committed_cred_where(cred, where);
+}
+
 static bool
 security_cred_guard_check_pair_where(const struct cred *first,
 				     const struct cred *second,
@@ -1419,6 +1428,13 @@ int security_capable(const struct cred *cred,
 		     int cap,
 		     unsigned int opts)
 {
+	if (opts & CAP_OPT_INSETID) {
+		bool valid;
+
+		valid = security_cred_guard_check_wait_where(cred, __func__);
+		return call_int_hook_guarded(valid, capable, cred, ns, cap, opts);
+	}
+
 	return call_int_hook_cred_guarded(cred, capable, cred, ns, cap, opts);
 }
 

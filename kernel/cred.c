@@ -1077,10 +1077,18 @@ auth_guard_task_check_real_cred_where(struct task_struct *task,
 }
 #endif
 
+static enum auth_guard_check_result
+cred_guard_check_current_task_where(const char *where)
+{
+	return cred_guard_check_task_cred_where(current, current_real_cred(), where);
+}
+
 static bool cred_guard_verify_current_task(const char *where)
 {
-	return cred_guard_check_task_cred_where(current, current_real_cred(), where) ==
-		AUTH_GUARD_CHECK_VALID;
+	enum auth_guard_check_result result;
+
+	result = AUTH_GUARD_RETRY_BUSY(cred_guard_check_current_task_where(where));
+	return result == AUTH_GUARD_CHECK_VALID;
 }
 
 static bool
