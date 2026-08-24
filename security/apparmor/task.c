@@ -12,6 +12,7 @@
  * should return to the previous cred if it has not been modified.
  */
 
+#include <linux/cred.h>
 #include <linux/gfp.h>
 #include <linux/ptrace.h>
 
@@ -28,11 +29,12 @@
  */
 struct aa_label *aa_get_task_label(struct task_struct *task)
 {
+	const struct cred *cred;
 	struct aa_label *p;
 
-	rcu_read_lock();
-	p = aa_get_newest_cred_label(__task_cred(task));
-	rcu_read_unlock();
+	cred = get_task_cred(task);
+	p = aa_get_newest_cred_label(cred);
+	put_cred(cred);
 
 	return p;
 }
@@ -48,6 +50,8 @@ int aa_replace_current_label(struct aa_label *label)
 	struct aa_label *old = aa_current_raw_label();
 	struct aa_task_ctx *ctx = task_ctx(current);
 	struct cred *new;
+	bool clear_ctx;
+	int error;
 
 	AA_BUG(!label);
 
@@ -61,19 +65,7 @@ int aa_replace_current_label(struct aa_label *label)
 	if (!new)
 		return -ENOMEM;
 
-	if (ctx->nnp && label_is_stale(ctx->nnp)) {
-		struct aa_label *tmp = ctx->nnp;
-
-		ctx->nnp = aa_get_newest_label(tmp);
-		aa_put_label(tmp);
-	}
-	if (unconfined(label) || (labels_ns(old) != labels_ns(label)))
-		/*
-		 * if switching to unconfined or a different label namespace
-		 * clear out context state
-		 */
-		aa_clear_task_ctx_trans(task_ctx(current));
-
+	clear_ctx = unconfined(label) || (labels_ns(old) != labels_ns(label));
 	/*
 	 * be careful switching cred label, when racing replacement it
 	 * is possible that the cred labels's->proxy->label is the reference
@@ -84,7 +76,23 @@ int aa_replace_current_label(struct aa_label *label)
 	aa_put_label(cred_label(new));
 	set_cred_label(new, label);
 
-	commit_creds(new);
+	error = commit_creds(new);
+	if (error)
+		return error;
+
+	if (ctx->nnp && label_is_stale(ctx->nnp)) {
+		struct aa_label *tmp = ctx->nnp;
+
+		ctx->nnp = aa_get_newest_label(tmp);
+		aa_put_label(tmp);
+	}
+	if (clear_ctx)
+		/*
+		 * if switching to unconfined or a different label namespace
+		 * clear out context state
+		 */
+		aa_clear_task_ctx_trans(task_ctx(current));
+
 	return 0;
 }
 
@@ -117,7 +125,9 @@ void aa_set_current_onexec(struct aa_label *label, bool stack)
 int aa_set_current_hat(struct aa_label *label, u64 token)
 {
 	struct aa_task_ctx *ctx = task_ctx(current);
+	struct aa_label *previous = NULL;
 	struct cred *new;
+	int error;
 
 	new = prepare_creds();
 	if (!new)
@@ -126,8 +136,7 @@ int aa_set_current_hat(struct aa_label *label, u64 token)
 
 	if (!ctx->previous) {
 		/* transfer refcount */
-		ctx->previous = cred_label(new);
-		ctx->token = token;
+		previous = cred_label(new);
 	} else if (ctx->token == token) {
 		aa_put_label(cred_label(new));
 	} else {
@@ -137,11 +146,21 @@ int aa_set_current_hat(struct aa_label *label, u64 token)
 	}
 
 	set_cred_label(new, aa_get_newest_label(label));
+
+	error = commit_creds(new);
+	if (error) {
+		aa_put_label(previous);
+		return error;
+	}
+
+	if (previous) {
+		ctx->previous = previous;
+		ctx->token = token;
+	}
 	/* clear exec on switching context */
 	aa_put_label(ctx->onexec);
 	ctx->onexec = NULL;
 
-	commit_creds(new);
 	return 0;
 }
 
@@ -158,6 +177,7 @@ int aa_restore_previous_label(u64 token)
 {
 	struct aa_task_ctx *ctx = task_ctx(current);
 	struct cred *new;
+	int error;
 
 	if (ctx->token != token)
 		return -EACCES;
@@ -172,10 +192,13 @@ int aa_restore_previous_label(u64 token)
 	aa_put_label(cred_label(new));
 	set_cred_label(new, aa_get_newest_label(ctx->previous));
 	AA_BUG(!cred_label(new));
+
+	error = commit_creds(new);
+	if (error)
+		return error;
+
 	/* clear exec && prev information when restoring to previous context */
 	aa_clear_task_ctx_trans(ctx);
-
-	commit_creds(new);
 
 	return 0;
 }

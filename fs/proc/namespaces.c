@@ -63,13 +63,21 @@ static const char *proc_ns_get_link(struct dentry *dentry,
 	if (!task)
 		return ERR_PTR(-EACCES);
 
+retry:
 	error = down_read_killable(&task->signal->exec_update_lock);
 	if (error)
 		goto out_put_task;
 
-	error = -EACCES;
-	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS))
+	error = ptrace_may_access_result(task, PTRACE_MODE_READ_FSCREDS);
+	if (error == -EAGAIN) {
+		up_read(&task->signal->exec_update_lock);
+		cond_resched();
+		goto retry;
+	}
+	if (error) {
+		error = -EACCES;
 		goto out;
+	}
 
 	error = ns_get_path(&ns_path, task, ns_ops);
 	if (error)
@@ -95,16 +103,26 @@ static int proc_ns_readlink(struct dentry *dentry, char __user *buffer, int bufl
 	if (!task)
 		return res;
 
+retry:
 	res = down_read_killable(&task->signal->exec_update_lock);
 	if (res)
 		goto out_put_task;
 
-	res = -EACCES;
-	if (ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
-		res = ns_get_name(name, sizeof(name), task, ns_ops);
-		if (res >= 0)
-			res = readlink_copy(buffer, buflen, name, strlen(name));
+	res = ptrace_may_access_result(task, PTRACE_MODE_READ_FSCREDS);
+	if (res == -EAGAIN) {
+		up_read(&task->signal->exec_update_lock);
+		cond_resched();
+		goto retry;
 	}
+	if (res) {
+		res = -EACCES;
+		goto out;
+	}
+
+	res = ns_get_name(name, sizeof(name), task, ns_ops);
+	if (res >= 0)
+		res = readlink_copy(buffer, buflen, name, strlen(name));
+out:
 	up_read(&task->signal->exec_update_lock);
 out_put_task:
 	put_task_struct(task);

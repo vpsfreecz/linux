@@ -1640,10 +1640,10 @@ static int aio_write(struct kiocb *req, const struct iocb *iocb,
 static void aio_fsync_work(struct work_struct *work)
 {
 	struct aio_kiocb *iocb = container_of(work, struct aio_kiocb, fsync.work);
-	const struct cred *old_cred = override_creds(iocb->fsync.creds);
 
-	iocb->ki_res.res = vfs_fsync(iocb->fsync.file, iocb->fsync.datasync);
-	revert_creds(old_cred);
+	scoped_with_creds(iocb->fsync.creds) {
+		iocb->ki_res.res = vfs_fsync(iocb->fsync.file, iocb->fsync.datasync);
+	}
 	put_cred(iocb->fsync.creds);
 	iocb_put(iocb);
 }
@@ -1651,6 +1651,8 @@ static void aio_fsync_work(struct work_struct *work)
 static int aio_fsync(struct fsync_iocb *req, const struct iocb *iocb,
 		     bool datasync)
 {
+	int ret;
+
 	if (unlikely(iocb->aio_buf || iocb->aio_offset || iocb->aio_nbytes ||
 			iocb->aio_rw_flags))
 		return -EINVAL;
@@ -1661,6 +1663,11 @@ static int aio_fsync(struct fsync_iocb *req, const struct iocb *iocb,
 	req->creds = prepare_creds();
 	if (!req->creds)
 		return -ENOMEM;
+	ret = commit_prepared_cred(req->creds);
+	if (ret) {
+		req->creds = NULL;
+		return ret;
+	}
 
 	req->datasync = datasync;
 	INIT_WORK(&req->work, aio_fsync_work);
