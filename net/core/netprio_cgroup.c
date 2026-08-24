@@ -8,6 +8,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
+#include <linux/auth_guard.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/string.h>
@@ -232,10 +233,12 @@ static void net_prio_attach(struct cgroup_taskset *tset)
 	struct cgroup_subsys_state *css;
 
 	cgroup_taskset_for_each(p, css, tset) {
+		enum auth_guard_check_result guard_result;
 		void *v = (void *)(unsigned long)css->id;
 
-		task_lock(p);
-		iterate_fd(p->files, 0, update_netprio, v);
+		guard_result = cgroup_task_lock_auth_guard_wait(p);
+		if (guard_result == AUTH_GUARD_CHECK_VALID)
+			iterate_fd(p->files, 0, update_netprio, v);
 		task_unlock(p);
 	}
 }

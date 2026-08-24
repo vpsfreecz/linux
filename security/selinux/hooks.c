@@ -22,6 +22,8 @@
  */
 
 #include <linux/init.h>
+#include <linux/auth_guard.h>
+#include <linux/kallsyms.h>
 #include <linux/kd.h>
 #include <linux/kernel.h>
 #include <linux/kernel_read_file.h>
@@ -205,6 +207,221 @@ static int selinux_lsm_notifier_avc_callback(u32 event)
 	return 0;
 }
 
+#define selinux_cred_guard_seal_cred(_cred) \
+	__selinux_cred_guard_seal_cred_where((_cred), __func__, NULL)
+
+#ifdef CONFIG_SELINUX_CRED_GUARD
+static struct auth_guard_domain selinux_cred_guard_domain __ro_after_init =
+	AUTH_GUARD_DOMAIN("selinux_cred");
+static bool selinux_cred_guard_active __ro_after_init;
+
+struct selinux_cred_guard_digest {
+	u64 cred;
+	u64 crsec;
+	u64 generation;
+	u64 nonce;
+	u64 osid;
+	u64 sid;
+	u64 exec_sid;
+	u64 create_sid;
+	u64 keycreate_sid;
+	u64 sockcreate_sid;
+} __aligned(SIPHASH_ALIGNMENT);
+
+static bool selinux_cred_guard_enabled(void)
+{
+	return auth_guard_layer_enabled(selinux_cred_guard_active);
+}
+
+static u64 selinux_cred_guard_hash(const struct cred *cred,
+				   const struct auth_guard_stamp *stamp)
+{
+	const struct cred_security_struct *crsec = selinux_cred(cred);
+	struct selinux_cred_guard_digest digest = {};
+
+	digest.cred = auth_guard_ptr(cred);
+	digest.crsec = auth_guard_ptr(crsec);
+	digest.generation = stamp->generation;
+	digest.nonce = stamp->nonce;
+	digest.osid = crsec->osid;
+	digest.sid = crsec->sid;
+	digest.exec_sid = crsec->exec_sid;
+	digest.create_sid = crsec->create_sid;
+	digest.keycreate_sid = crsec->keycreate_sid;
+	digest.sockcreate_sid = crsec->sockcreate_sid;
+
+	return auth_guard_seal(&selinux_cred_guard_domain, &digest,
+			       sizeof(digest));
+}
+
+static void selinux_cred_guard_reset(struct cred_security_struct *crsec)
+{
+	auth_guard_stamp_clear(&crsec->guard);
+}
+
+#define SELINUX_CRED_GUARD_ROLE_LEN 32
+
+static __cold noinline void
+selinux_cred_guard_report(const char *where, const char *role,
+			  const char *what, const void *object)
+{
+	char scoped_where[KSYM_NAME_LEN + SELINUX_CRED_GUARD_ROLE_LEN];
+
+	if (!role) {
+		auth_guard_fail(&selinux_cred_guard_domain, where, what, object);
+		return;
+	}
+
+	scnprintf(scoped_where, sizeof(scoped_where), "%s:%s", where, role);
+	auth_guard_fail(&selinux_cred_guard_domain, scoped_where, what, object);
+}
+
+static bool __selinux_cred_guard_check_where(const struct cred *cred,
+					     const char *where,
+					     const char *role)
+{
+	const struct cred_security_struct *crsec;
+	struct auth_guard_stamp stamp;
+
+	if (!cred) {
+		selinux_cred_guard_report(where, role, "missing", cred);
+		return false;
+	}
+	if (!selinux_cred_guard_enabled())
+		return true;
+
+	crsec = selinux_cred(cred);
+	stamp = auth_guard_stamp_load_acquire(&crsec->guard);
+	if (!stamp.seal) {
+		selinux_cred_guard_report(where, role, "unsealed", cred);
+		return false;
+	}
+	if (!stamp.nonce) {
+		selinux_cred_guard_report(where, role, "no-nonce", cred);
+		return false;
+	}
+	if (!auth_guard_stamp_valid(&stamp)) {
+		selinux_cred_guard_report(where, role, "no-generation", cred);
+		return false;
+	}
+	if (selinux_cred_guard_hash(cred, &stamp) != stamp.seal) {
+		selinux_cred_guard_report(where, role, "corrupt", cred);
+		return false;
+	}
+
+	return true;
+}
+
+bool selinux_cred_guard_check_where(const struct cred *cred, const char *where)
+{
+	return __selinux_cred_guard_check_where(cred, where, NULL);
+}
+
+static bool selinux_cred_guard_check_role_where(const struct cred *cred,
+						const char *where,
+						const char *role)
+{
+	return __selinux_cred_guard_check_where(cred, where, role);
+}
+
+static void __selinux_cred_guard_seal_cred_where(struct cred *cred,
+						 const char *where,
+						 const char *stage)
+{
+	struct cred_security_struct *crsec;
+	struct auth_guard_stamp stamp;
+
+	if (!selinux_cred_guard_enabled())
+		return;
+	if (!cred) {
+		selinux_cred_guard_report(where, stage, "missing", cred);
+		return;
+	}
+
+	crsec = selinux_cred(cred);
+	stamp = auth_guard_stamp_fresh(&selinux_cred_guard_domain);
+	stamp.seal = selinux_cred_guard_hash(cred, &stamp);
+	auth_guard_stamp_publish_release(&crsec->guard, &stamp);
+}
+
+static void __init selinux_cred_guard_enable(void)
+{
+	struct cred *cred = (struct cred *)current->real_cred;
+	struct cred_security_struct *crsec = selinux_cred(cred);
+
+	auth_guard_init_domain(&selinux_cred_guard_domain);
+	selinux_cred_guard_active = true;
+	selinux_cred_guard_reset(crsec);
+	selinux_cred_guard_seal_cred(cred);
+}
+
+#ifdef CONFIG_AUTH_GUARD_TEST
+int selinux_cred_guard_test_corrupt_current(const char *what)
+{
+	struct cred_security_struct *crsec;
+	struct cred *cred;
+	u32 sid;
+
+	if (strcmp(what, "selinux_sid"))
+		return -EINVAL;
+
+	cred = prepare_creds();
+	if (!cred)
+		return -ENOMEM;
+
+	crsec = selinux_cred(cred);
+	sid = crsec->sid;
+	crsec->sid = sid == SECINITSID_KERNEL ?
+		SECINITSID_UNLABELED : SECINITSID_KERNEL;
+	selinux_cred_guard_check_where(cred,
+		AUTH_GUARD_TEST_CONTEXT("selinux_sid"));
+
+	crsec->sid = sid;
+	__selinux_cred_guard_seal_cred_where(cred,
+		AUTH_GUARD_TEST_CONTEXT("repair"), NULL);
+	abort_creds(cred);
+	return 0;
+}
+#endif
+#else
+static inline void selinux_cred_guard_reset(struct cred_security_struct *crsec)
+{
+}
+
+static inline void
+__selinux_cred_guard_seal_cred_where(struct cred *cred, const char *where,
+				     const char *stage)
+{
+}
+
+static inline bool
+selinux_cred_guard_check_role_where(const struct cred *cred, const char *where,
+				    const char *role)
+{
+	return cred;
+}
+
+static inline void __init selinux_cred_guard_enable(void)
+{
+}
+#endif
+
+static struct cred_security_struct *
+selinux_cred_mutable_security_where(struct cred *cred, const char *where)
+{
+	if (!cred)
+		return ERR_PTR(-EINVAL);
+	if (!cred_guard_verify_prepared_cred_where(cred, where))
+		return ERR_PTR(-EACCES);
+	if (!selinux_cred_guard_check_where(cred, where))
+		return ERR_PTR(-EACCES);
+
+	return selinux_cred(cred);
+}
+
+#define selinux_cred_mutable_security(_cred) \
+	selinux_cred_mutable_security_where((_cred), __func__)
+
 /*
  * initialise the security for the init task
  */
@@ -223,10 +440,7 @@ static void cred_init_security(void)
  */
 static inline u32 cred_sid(const struct cred *cred)
 {
-	const struct cred_security_struct *crsec;
-
-	crsec = selinux_cred(cred);
-	return crsec->sid;
+	return selinux_cred_checked(cred)->sid;
 }
 
 static void __ad_net_init(struct common_audit_data *ad,
@@ -437,7 +651,7 @@ static int may_context_mount_sb_relabel(u32 sid,
 			struct superblock_security_struct *sbsec,
 			const struct cred *cred)
 {
-	const struct cred_security_struct *crsec = selinux_cred(cred);
+	const struct cred_security_struct *crsec = selinux_cred_checked(cred);
 	int rc;
 
 	rc = avc_has_perm(crsec->sid, sbsec->sid, SECCLASS_FILESYSTEM,
@@ -454,7 +668,7 @@ static int may_context_mount_inode_relabel(u32 sid,
 			struct superblock_security_struct *sbsec,
 			const struct cred *cred)
 {
-	const struct cred_security_struct *crsec = selinux_cred(cred);
+	const struct cred_security_struct *crsec = selinux_cred_checked(cred);
 	int rc;
 	rc = avc_has_perm(crsec->sid, sbsec->sid, SECCLASS_FILESYSTEM,
 			  FILESYSTEM__RELABELFROM, NULL);
@@ -1840,7 +2054,8 @@ static int may_create(struct inode *dir,
 		      struct dentry *dentry,
 		      u16 tclass)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
+	const struct cred_security_struct *crsec =
+		selinux_cred_checked(current_cred());
 	struct inode_security_struct *dsec;
 	struct superblock_security_struct *sbsec;
 	u32 sid, newsid;
@@ -2333,13 +2548,20 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	struct inode_security_struct *isec;
 	struct common_audit_data ad;
 	struct inode *inode = file_inode(bprm->file);
+	u32 new_sid;
 	int rc;
 
 	/* SELinux context only depends on initial program or script and not
 	 * the script interpreter */
 
+	if (!selinux_cred_guard_check_role_where(current_cred(), __func__,
+						 "old") ||
+	    !selinux_cred_guard_check_role_where(bprm->cred, __func__, "new"))
+		return -EACCES;
 	old_crsec = selinux_cred(current_cred());
-	new_crsec = selinux_cred(bprm->cred);
+	new_crsec = selinux_cred_mutable_security(bprm->cred);
+	if (IS_ERR(new_crsec))
+		return PTR_ERR(new_crsec);
 	isec = inode_security(inode);
 
 	/* Default to the current task SID. */
@@ -2350,6 +2572,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 	new_crsec->create_sid = 0;
 	new_crsec->keycreate_sid = 0;
 	new_crsec->sockcreate_sid = 0;
+	selinux_cred_guard_seal_cred(bprm->cred);
 
 	/*
 	 * Before policy is loaded, label any task outside kernel space
@@ -2361,6 +2584,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 		new_crsec->sid = SECINITSID_INIT;
 		/* also clear the exec_sid just in case */
 		new_crsec->exec_sid = 0;
+		selinux_cred_guard_seal_cred(bprm->cred);
 		return 0;
 	}
 
@@ -2368,6 +2592,7 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 		new_crsec->sid = old_crsec->exec_sid;
 		/* Reset exec SID on execve. */
 		new_crsec->exec_sid = 0;
+		selinux_cred_guard_seal_cred(bprm->cred);
 
 		/* Fail on NNP or nosuid if not an allowed transition. */
 		rc = check_nnp_nosuid(bprm, old_crsec, new_crsec);
@@ -2375,19 +2600,22 @@ static int selinux_bprm_creds_for_exec(struct linux_binprm *bprm)
 			return rc;
 	} else {
 		/* Check for a default transition on this program. */
-		rc = security_transition_sid(old_crsec->sid,
-					     isec->sid, SECCLASS_PROCESS, NULL,
-					     &new_crsec->sid);
+		rc = security_transition_sid(old_crsec->sid, isec->sid,
+					     SECCLASS_PROCESS, NULL, &new_sid);
 		if (rc)
 			return rc;
+		new_crsec->sid = new_sid;
+		selinux_cred_guard_seal_cred(bprm->cred);
 
 		/*
 		 * Fallback to old SID on NNP or nosuid if not an allowed
 		 * transition.
 		 */
 		rc = check_nnp_nosuid(bprm, old_crsec, new_crsec);
-		if (rc)
+		if (rc) {
 			new_crsec->sid = old_crsec->sid;
+			selinux_cred_guard_seal_cred(bprm->cred);
+		}
 	}
 
 	ad.type = LSM_AUDIT_DATA_FILE;
@@ -2510,7 +2738,8 @@ static void selinux_bprm_committing_creds(const struct linux_binprm *bprm)
 	struct rlimit *rlim, *initrlim;
 	int rc, i;
 
-	new_crsec = selinux_cred(bprm->cred);
+	new_crsec = (struct cred_security_struct *)
+		selinux_cred_checked(bprm->cred);
 	if (new_crsec->sid == new_crsec->osid)
 		return;
 
@@ -2552,7 +2781,8 @@ static void selinux_bprm_committing_creds(const struct linux_binprm *bprm)
  */
 static void selinux_bprm_committed_creds(const struct linux_binprm *bprm)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
+	const struct cred_security_struct *crsec =
+		selinux_cred_checked(current_cred());
 	u32 osid, sid;
 	int rc;
 
@@ -2913,7 +3143,7 @@ static int selinux_dentry_init_security(struct dentry *dentry, int mode,
 	u32 newsid;
 	int rc;
 
-	rc = selinux_determine_inode_label(selinux_cred(current_cred()),
+	rc = selinux_determine_inode_label(selinux_cred_checked(current_cred()),
 					   d_inode(dentry->d_parent), name,
 					   inode_mode_to_security_class(mode),
 					   &newsid);
@@ -2936,6 +3166,8 @@ static int selinux_dentry_create_files_as(struct dentry *dentry, int mode,
 	int rc;
 	struct cred_security_struct *crsec;
 
+	if (!selinux_cred_guard_check_role_where(old, __func__, "old"))
+		return -EACCES;
 	rc = selinux_determine_inode_label(selinux_cred(old),
 					   d_inode(dentry->d_parent), name,
 					   inode_mode_to_security_class(mode),
@@ -2943,8 +3175,11 @@ static int selinux_dentry_create_files_as(struct dentry *dentry, int mode,
 	if (rc)
 		return rc;
 
-	crsec = selinux_cred(new);
+	crsec = selinux_cred_mutable_security(new);
+	if (IS_ERR(crsec))
+		return PTR_ERR(crsec);
 	crsec->create_sid = newsid;
+	selinux_cred_guard_seal_cred(new);
 	return 0;
 }
 
@@ -2952,7 +3187,8 @@ static int selinux_inode_init_security(struct inode *inode, struct inode *dir,
 				       const struct qstr *qstr,
 				       struct xattr *xattrs, int *xattr_count)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
+	const struct cred_security_struct *crsec =
+		selinux_cred_checked(current_cred());
 	struct superblock_security_struct *sbsec;
 	struct xattr *xattr;
 	u32 newsid, clen;
@@ -3681,17 +3917,25 @@ static int selinux_inode_copy_up(struct dentry *src, struct cred **new)
 	struct lsm_prop prop;
 	struct cred_security_struct *crsec;
 	struct cred *new_creds = *new;
+	bool prepared_here = false;
 
 	if (new_creds == NULL) {
 		new_creds = prepare_creds();
 		if (!new_creds)
 			return -ENOMEM;
+		prepared_here = true;
 	}
 
-	crsec = selinux_cred(new_creds);
+	crsec = selinux_cred_mutable_security(new_creds);
+	if (IS_ERR(crsec)) {
+		if (prepared_here)
+			abort_creds(new_creds);
+		return PTR_ERR(crsec);
+	}
 	/* Get label from overlay inode and set it in create_sid */
 	selinux_inode_getlsmprop(d_inode(src), &prop);
 	crsec->create_sid = prop.selinux.secid;
+	selinux_cred_guard_seal_cred(new_creds);
 	*new = new_creds;
 	return 0;
 }
@@ -3717,7 +3961,8 @@ static int selinux_inode_copy_up_xattr(struct dentry *dentry, const char *name)
 static int selinux_kernfs_init_security(struct kernfs_node *kn_dir,
 					struct kernfs_node *kn)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
+	const struct cred_security_struct *crsec =
+		selinux_cred_checked(current_cred());
 	u32 parent_sid, newsid, clen;
 	int rc;
 	char *context;
@@ -4272,16 +4517,25 @@ static int selinux_task_alloc(struct task_struct *task,
 	return avc_has_perm(sid, sid, SECCLASS_PROCESS, PROCESS__FORK, NULL);
 }
 
+static void selinux_cred_copy(struct cred *new, const struct cred *old)
+{
+	const struct cred_security_struct *old_crsec = selinux_cred_checked(old);
+	struct cred_security_struct *crsec = selinux_cred(new);
+
+	*crsec = *old_crsec;
+	selinux_cred_guard_reset(crsec);
+	selinux_cred_guard_seal_cred(new);
+}
+
 /*
  * prepare a new set of credentials for modification
  */
 static int selinux_cred_prepare(struct cred *new, const struct cred *old,
 				gfp_t gfp)
 {
-	const struct cred_security_struct *old_crsec = selinux_cred(old);
-	struct cred_security_struct *crsec = selinux_cred(new);
-
-	*crsec = *old_crsec;
+	if (!selinux_cred_guard_check_role_where(old, __func__, "old"))
+		return -EACCES;
+	selinux_cred_copy(new, old);
 	return 0;
 }
 
@@ -4290,10 +4544,8 @@ static int selinux_cred_prepare(struct cred *new, const struct cred *old,
  */
 static void selinux_cred_transfer(struct cred *new, const struct cred *old)
 {
-	const struct cred_security_struct *old_crsec = selinux_cred(old);
-	struct cred_security_struct *crsec = selinux_cred(new);
-
-	*crsec = *old_crsec;
+	(void)selinux_cred_checked(old);
+	selinux_cred_copy(new, old);
 }
 
 static void selinux_cred_getsecid(const struct cred *c, u32 *secid)
@@ -4312,7 +4564,7 @@ static void selinux_cred_getlsmprop(const struct cred *c, struct lsm_prop *prop)
  */
 static int selinux_kernel_act_as(struct cred *new, u32 secid)
 {
-	struct cred_security_struct *crsec = selinux_cred(new);
+	struct cred_security_struct *crsec;
 	u32 sid = current_sid();
 	int ret;
 
@@ -4321,10 +4573,14 @@ static int selinux_kernel_act_as(struct cred *new, u32 secid)
 			   KERNEL_SERVICE__USE_AS_OVERRIDE,
 			   NULL);
 	if (ret == 0) {
+		crsec = selinux_cred_mutable_security(new);
+		if (IS_ERR(crsec))
+			return PTR_ERR(crsec);
 		crsec->sid = secid;
 		crsec->create_sid = 0;
 		crsec->keycreate_sid = 0;
 		crsec->sockcreate_sid = 0;
+		selinux_cred_guard_seal_cred(new);
 	}
 	return ret;
 }
@@ -4336,7 +4592,7 @@ static int selinux_kernel_act_as(struct cred *new, u32 secid)
 static int selinux_kernel_create_files_as(struct cred *new, struct inode *inode)
 {
 	struct inode_security_struct *isec = inode_security(inode);
-	struct cred_security_struct *crsec = selinux_cred(new);
+	struct cred_security_struct *crsec;
 	u32 sid = current_sid();
 	int ret;
 
@@ -4345,8 +4601,13 @@ static int selinux_kernel_create_files_as(struct cred *new, struct inode *inode)
 			   KERNEL_SERVICE__CREATE_FILES_AS,
 			   NULL);
 
-	if (ret == 0)
+	if (ret == 0) {
+		crsec = selinux_cred_mutable_security(new);
+		if (IS_ERR(crsec))
+			return PTR_ERR(crsec);
 		crsec->create_sid = isec->sid;
+		selinux_cred_guard_seal_cred(new);
+	}
 	return ret;
 }
 
@@ -4914,7 +5175,8 @@ static int sock_has_perm(struct sock *sk, u32 perms)
 static int selinux_socket_create(int family, int type,
 				 int protocol, int kern)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
+	const struct cred_security_struct *crsec =
+		selinux_cred_checked(current_cred());
 	u32 newsid;
 	u16 secclass;
 	int rc;
@@ -4933,7 +5195,8 @@ static int selinux_socket_create(int family, int type,
 static int selinux_socket_post_create(struct socket *sock, int family,
 				      int type, int protocol, int kern)
 {
-	const struct cred_security_struct *crsec = selinux_cred(current_cred());
+	const struct cred_security_struct *crsec =
+		selinux_cred_checked(current_cred());
 	struct inode_security_struct *isec = inode_security_novalidate(SOCK_INODE(sock));
 	struct sk_security_struct *sksec;
 	u16 sclass = socket_type_to_security_class(family, type, protocol);
@@ -6661,18 +6924,25 @@ static void selinux_d_instantiate(struct dentry *dentry, struct inode *inode)
 static int selinux_lsm_getattr(unsigned int attr, struct task_struct *p,
 			       char **value)
 {
+	const struct cred *tcred;
 	const struct cred_security_struct *crsec;
 	int error;
 	u32 sid;
 	u32 len;
 
-	rcu_read_lock();
-	crsec = selinux_cred(__task_cred(p));
+	tcred = get_task_cred_checked(p);
+	if (IS_ERR(tcred))
+		return PTR_ERR(tcred);
+	if (!selinux_cred_guard_check_role_where(tcred, __func__, "target")) {
+		error = -EACCES;
+		goto out_put;
+	}
+	crsec = selinux_cred(tcred);
 	if (p != current) {
 		error = avc_has_perm(current_sid(), crsec->sid,
 				     SECCLASS_PROCESS, PROCESS__GETATTR, NULL);
 		if (error)
-			goto err_unlock;
+			goto out_put;
 	}
 	switch (attr) {
 	case LSM_ATTR_CURRENT:
@@ -6695,9 +6965,9 @@ static int selinux_lsm_getattr(unsigned int attr, struct task_struct *p,
 		break;
 	default:
 		error = -EOPNOTSUPP;
-		goto err_unlock;
+		goto out_put;
 	}
-	rcu_read_unlock();
+	put_cred(tcred);
 
 	if (sid == SECSID_NULL) {
 		*value = NULL;
@@ -6709,8 +6979,8 @@ static int selinux_lsm_getattr(unsigned int attr, struct task_struct *p,
 		return error;
 	return len;
 
-err_unlock:
-	rcu_read_unlock();
+out_put:
+	put_cred(tcred);
 	return error;
 }
 
@@ -6802,7 +7072,11 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 	   operation.  See selinux_bprm_creds_for_exec for the execve
 	   checks and may_create for the file creation checks. The
 	   operation will then fail if the context is not permitted. */
-	crsec = selinux_cred(new);
+	crsec = selinux_cred_mutable_security(new);
+	if (IS_ERR(crsec)) {
+		error = PTR_ERR(crsec);
+		goto abort_change;
+	}
 	if (attr == LSM_ATTR_EXEC) {
 		crsec->exec_sid = sid;
 	} else if (attr == LSM_ATTR_FSCREATE) {
@@ -6850,7 +7124,10 @@ static int selinux_lsm_setattr(u64 attr, void *value, size_t size)
 		goto abort_change;
 	}
 
-	commit_creds(new);
+	selinux_cred_guard_seal_cred(new);
+	error = commit_creds(new);
+	if (error)
+		return error;
 	return size;
 
 abort_change:
@@ -7014,7 +7291,7 @@ static int selinux_key_alloc(struct key *k, const struct cred *cred,
 	const struct cred_security_struct *crsec;
 	struct key_security_struct *ksec = selinux_key(k);
 
-	crsec = selinux_cred(cred);
+	crsec = selinux_cred_checked(cred);
 	if (crsec->keycreate_sid)
 		ksec->sid = crsec->keycreate_sid;
 	else
@@ -7724,6 +8001,7 @@ static __init int selinux_init(void)
 
 	/* Set the security state for the initial task. */
 	cred_init_security();
+	selinux_cred_guard_enable();
 
 	/* Inform the audit system that secctx is used */
 	audit_cfg_lsm(&selinux_lsmid,

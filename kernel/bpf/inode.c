@@ -936,7 +936,7 @@ static int bpf_check_container_delegate_mask(int opt, u64 msk)
 static bool bpf_mount_capable(void)
 {
 	return capable(CAP_SYS_ADMIN) ||
-	       bpf_token_current_container_capable(CAP_SYS_ADMIN);
+	       bpf_current_container_capable(CAP_SYS_ADMIN);
 }
 
 static int bpf_parse_param(struct fs_context *fc, struct fs_parameter *param)

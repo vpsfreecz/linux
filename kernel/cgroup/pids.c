@@ -291,9 +291,9 @@ static void pids_cancel_fork(struct task_struct *task, struct css_set *cset)
 	pids_uncharge(pids, 1);
 }
 
-static void pids_release(struct task_struct *task)
+static void pids_release(struct task_struct *task, struct css_set *cset)
 {
-	struct pids_cgroup *pids = css_pids(task_css(task, pids_cgrp_id));
+	struct pids_cgroup *pids = css_pids(cset->subsys[pids_cgrp_id]);
 
 	pids_uncharge(pids, 1);
 }

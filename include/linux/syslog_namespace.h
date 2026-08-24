@@ -3,6 +3,7 @@
 #define _LINUX_SYSLOG_NS_H
 
 #include <linux/cred.h>
+#include <linux/cleanup.h>
 #include <linux/err.h>
 #include <linux/irq_work.h>
 #include <linux/ns_common.h>
@@ -96,8 +97,13 @@ static inline struct syslog_namespace *to_syslog_ns(struct ns_common *ns)
 
 #ifdef CONFIG_SYSLOG_NS
 struct syslog_namespace *copy_syslog_ns(bool new, char *name,
-					struct user_namespace *user_ns,
-					struct syslog_namespace *old_ns);
+						struct user_namespace *user_ns,
+						struct syslog_namespace *old_ns);
+enum auth_guard_mutation_result
+syslog_ns_replace_userns_default_where(struct user_namespace *user_ns,
+				       struct syslog_namespace *old_ns,
+				       struct syslog_namespace *new_ns,
+				       const char *where);
 int setup_syslog_namespace(struct syslog_namespace *ns);
 void free_syslog_ns(struct syslog_namespace *ns);
 void syslog_ns_wake_all_waiters(void);
@@ -156,6 +162,15 @@ static inline struct syslog_namespace *copy_syslog_ns(bool new, char *name,
 	return &init_syslog_ns;
 }
 
+static inline enum auth_guard_mutation_result
+syslog_ns_replace_userns_default_where(struct user_namespace *user_ns,
+				       struct syslog_namespace *old_ns,
+				       struct syslog_namespace *new_ns,
+				       const char *where)
+{
+	return AUTH_GUARD_MUTATION_APPLIED;
+}
+
 static inline int setup_syslog_namespace(struct syslog_namespace *ns)
 {
 	return 0;
@@ -182,4 +197,35 @@ get_syslog_ns_structural(struct syslog_namespace *ns)
 
 static inline void put_syslog_ns_structural(struct syslog_namespace *ns) {}
 #endif /* CONFIG_SYSLOG_NS */
+
+DEFINE_NS_COMMON_PUT_CLEANUP(syslog_namespace, put_syslog_ns)
+
+#define syslog_ns_replace_userns_default(_user_ns, _old_ns, _new_ns) \
+	syslog_ns_replace_userns_default_where((_user_ns), (_old_ns),     \
+						 (_new_ns), __func__)
+
+DEFINE_STATIC_CURRENT_NSPROXY_MEMBER_GETTER(get_current_syslog_ns_checked,
+					    struct syslog_namespace, syslog_ns,
+					    get_syslog_ns, put_syslog_ns)
+
+#define get_current_syslog_ns_checked() \
+	get_current_syslog_ns_checked_where(__func__)
+
+#ifdef CONFIG_AUTH_GUARD
+struct syslog_namespace *
+get_syslog_ns_from_userns_checked_where(const struct user_namespace *user_ns,
+					const char *where);
+#else
+static inline struct syslog_namespace *
+get_syslog_ns_from_userns_checked_where(const struct user_namespace *user_ns,
+					const char *where)
+{
+	if (!user_ns)
+		return ERR_PTR(-EINVAL);
+	return get_syslog_ns(READ_ONCE(user_ns->syslog_ns) ?: &init_syslog_ns);
+}
+#endif
+
+#define get_syslog_ns_from_userns_checked(_user_ns) \
+	get_syslog_ns_from_userns_checked_where((_user_ns), __func__)
 #endif /* _LINUX_SYSLOG_NS_H */

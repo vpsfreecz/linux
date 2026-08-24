@@ -6,6 +6,7 @@
 
 #include <linux/time_namespace.h>
 #include <linux/user_namespace.h>
+#include <linux/auth_guard.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/clocksource.h>
@@ -261,37 +262,13 @@ void free_time_ns(struct time_namespace *ns)
 	kfree_rcu(ns, ns.ns_rcu);
 }
 
-static struct ns_common *timens_get(struct task_struct *task)
-{
-	struct time_namespace *ns = NULL;
-	struct nsproxy *nsproxy;
+DEFINE_TASK_NSPROXY_MEMBER_GETTER(timens_get, struct time_namespace, time_ns,
+				  get_time_ns, put_time_ns)
 
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy) {
-		ns = nsproxy->time_ns;
-		get_time_ns(ns);
-	}
-	task_unlock(task);
-
-	return ns ? &ns->ns : NULL;
-}
-
-static struct ns_common *timens_for_children_get(struct task_struct *task)
-{
-	struct time_namespace *ns = NULL;
-	struct nsproxy *nsproxy;
-
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy) {
-		ns = nsproxy->time_ns_for_children;
-		get_time_ns(ns);
-	}
-	task_unlock(task);
-
-	return ns ? &ns->ns : NULL;
-}
+DEFINE_TASK_NSPROXY_MEMBER_GETTER(timens_for_children_get,
+				  struct time_namespace,
+				  time_ns_for_children,
+				  get_time_ns, put_time_ns)
 
 static void timens_put(struct ns_common *ns)
 {
@@ -316,30 +293,39 @@ static int timens_install(struct nsset *nsset, struct ns_common *new)
 	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	get_time_ns(ns);
-	put_time_ns(nsproxy->time_ns);
-	nsproxy->time_ns = ns;
-
-	get_time_ns(ns);
-	put_time_ns(nsproxy->time_ns_for_children);
-	nsproxy->time_ns_for_children = ns;
-	return 0;
+	return auth_guard_nsproxy_install_time_owned(nsproxy, ns, get_time_ns,
+						     put_time_ns);
 }
 
-void timens_on_fork(struct nsproxy *nsproxy, struct task_struct *tsk)
+static void timens_sync_active_unsealed(struct nsproxy *nsproxy,
+					struct task_struct *tsk)
 {
 	struct ns_common *nsc = &nsproxy->time_ns_for_children->ns;
 	struct time_namespace *ns = to_time_ns(nsc);
+	struct time_namespace *old_ns;
 
 	/* create_new_namespaces() already incremented the ref counter */
 	if (nsproxy->time_ns == nsproxy->time_ns_for_children)
 		return;
 
 	get_time_ns(ns);
-	put_time_ns(nsproxy->time_ns);
+	old_ns = nsproxy->time_ns;
 	nsproxy->time_ns = ns;
 
+	put_time_ns(old_ns);
 	timens_commit(tsk, ns);
+}
+
+int timens_on_fork(struct nsproxy *nsproxy, struct task_struct *tsk)
+{
+	timens_sync_active_unsealed(nsproxy, tsk);
+	return 0;
+}
+
+int timens_on_exec(struct nsproxy *nsproxy, struct task_struct *tsk)
+{
+	timens_sync_active_unsealed(nsproxy, tsk);
+	return 0;
 }
 
 static struct user_namespace *timens_owner(struct ns_common *ns)

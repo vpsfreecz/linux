@@ -7,6 +7,7 @@
  * fs/namespace.c, thus here instead of fs/proc
  *
  */
+#include <linux/auth_guard.h>
 #include <linux/mnt_namespace.h>
 #include <linux/nsproxy.h>
 #include <linux/security.h>
@@ -235,6 +236,7 @@ static int mounts_open_common(struct inode *inode, struct file *file,
 			      int (*show)(struct seq_file *, struct vfsmount *))
 {
 	struct task_struct *task = get_proc_task(inode);
+	struct task_nsproxy_snapshot snapshot;
 	struct nsproxy *nsp;
 	struct mnt_namespace *ns = NULL;
 	struct path root;
@@ -245,23 +247,33 @@ static int mounts_open_common(struct inode *inode, struct file *file,
 	if (!task)
 		goto err;
 
-	task_lock(task);
-	nsp = task->nsproxy;
-	if (!nsp || !nsp->mnt_ns) {
-		task_unlock(task);
-		put_task_struct(task);
-		goto err;
+	ret = task_nsproxy_snapshot_get(task, &snapshot);
+	if (ret)
+		goto err_put_task;
+	nsp = snapshot.nsproxy;
+	if (!nsp) {
+		ret = -EINVAL;
+		goto err_put_snapshot;
 	}
-	ns = nsp->mnt_ns;
+	ns = READ_ONCE(nsp->mnt_ns);
+	if (!ns) {
+		ret = -EINVAL;
+		goto err_put_snapshot;
+	}
 	get_mnt_ns(ns);
+
+	task_lock(task);
 	if (!task->fs) {
 		task_unlock(task);
-		put_task_struct(task);
 		ret = -ENOENT;
-		goto err_put_ns;
+		goto err_put_ns_snapshot;
 	}
 	get_fs_root(task->fs, &root);
 	task_unlock(task);
+	if (!task_nsproxy_snapshot_put(&snapshot)) {
+		ret = -EACCES;
+		goto err_put_path_task;
+	}
 	put_task_struct(task);
 
 	ret = seq_open_private(file, &mounts_op, sizeof(struct proc_mounts));
@@ -278,12 +290,21 @@ static int mounts_open_common(struct inode *inode, struct file *file,
 
 	return 0;
 
- err_put_path:
+err_put_path_task:
+	put_task_struct(task);
+err_put_path:
 	path_put(&root);
- err_put_ns:
 	put_mnt_ns(ns);
- err:
+err:
 	return ret;
+
+err_put_ns_snapshot:
+	put_mnt_ns(ns);
+err_put_snapshot:
+	(void)task_nsproxy_snapshot_put(&snapshot);
+err_put_task:
+	put_task_struct(task);
+	goto err;
 }
 
 static int mounts_release(struct inode *inode, struct file *file)

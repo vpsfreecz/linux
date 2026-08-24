@@ -3,6 +3,7 @@
  * Supplementary group IDs
  */
 #include <linux/cred.h>
+#include <linux/err.h>
 #include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/security.h>
@@ -137,9 +138,9 @@ int set_current_groups(struct group_info *group_info)
 	const struct cred *old;
 	int retval;
 
-	new = prepare_creds();
-	if (!new)
-		return -ENOMEM;
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
+		return PTR_ERR(new);
 
 	old = current_cred();
 
@@ -149,10 +150,10 @@ int set_current_groups(struct group_info *group_info)
 	if (retval < 0)
 		goto error;
 
-	return commit_creds(new);
+	return commit_creds_setid(new);
 
 error:
-	abort_creds(new);
+	abort_creds_setid(new);
 	return retval;
 }
 

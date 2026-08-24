@@ -5,6 +5,9 @@
 #include <uapi/linux/seccomp.h>
 #include <linux/seccomp_types.h>
 
+/* Internal terminal mode used after seccomp kills the current task. */
+#define SECCOMP_MODE_DEAD	(SECCOMP_MODE_FILTER + 1)
+
 #define SECCOMP_FILTER_FLAG_MASK	(SECCOMP_FILTER_FLAG_TSYNC | \
 					 SECCOMP_FILTER_FLAG_LOG | \
 					 SECCOMP_FILTER_FLAG_SPEC_ALLOW | \

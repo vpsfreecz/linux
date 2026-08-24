@@ -19,6 +19,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/auth_guard.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
@@ -938,11 +939,12 @@ static __poll_t devkmsg_poll(struct file *file, poll_table *wait)
 static int devkmsg_open(struct inode *inode, struct file *file)
 {
 	struct devkmsg_user *user;
+	struct syslog_namespace *ns;
 	int err;
-	struct syslog_namespace *ns = get_syslog_ns(current_syslog_ns());
 
-	if (!ns)
-		return -EFAULT;
+	ns = get_current_syslog_ns_checked();
+	if (IS_ERR(ns))
+		return PTR_ERR(ns);
 
 	if (devkmsg_log & DEVKMSG_LOG_MASK_OFF) {
 		put_syslog_ns(ns);
@@ -1892,6 +1894,9 @@ int do_syslog(int type, char __user *buf, int len, int source,
 #ifdef CONFIG_SYSLOG_NS
 	{
 		int i;
+		struct auth_guard_task_syslog_request old_request;
+		struct auth_guard_task_syslog_request replacement;
+		enum auth_guard_mutation_result mutation;
 		char *tmp;
 
 		if (len <= 0) {
@@ -1932,12 +1937,23 @@ int do_syslog(int type, char __user *buf, int len, int source,
 		if (error)
 			break;
 
-		kfree(current->syslog_ns_for_child_name);
-		current->syslog_ns_for_child = true;
-		current->syslog_ns_for_child_name = tmp;
+		replacement = (struct auth_guard_task_syslog_request) {
+			.enabled = true,
+			.name = tmp,
+			.name_len = len,
+		};
+		mutation = auth_guard_task_replace_syslog_request(
+			current, &replacement, &old_request);
+		if (mutation == AUTH_GUARD_MUTATION_REJECTED) {
+			kfree(tmp);
+			error = -EACCES;
+			break;
+		}
+		AUTH_GUARD_QUARANTINE_FAIL_STOP(mutation);
+		kfree(old_request.name);
 		error = 0;
 		pr_debug("syslog_ns: new syslog ns %s will be created on next clone/unshare\n",
-			 current->syslog_ns_for_child_name);
+			 tmp);
 		break;
 	}
 #else
@@ -1947,15 +1963,35 @@ int do_syslog(int type, char __user *buf, int len, int source,
 
 	case SYSLOG_ACTION_NEW_TRACING_NS:
 #ifdef CONFIG_TRACING_NS
-		if (current_tracing_ns() != &init_tracing_ns) {
-			error = -EPERM;
+		{
+			struct tracing_namespace *tracing_ns;
+			enum auth_guard_mutation_result mutation;
+			bool old_request;
+
+			tracing_ns = get_current_tracing_ns_checked();
+			if (IS_ERR(tracing_ns)) {
+				error = PTR_ERR(tracing_ns);
+				break;
+			}
+			if (tracing_ns != &init_tracing_ns) {
+				put_tracing_ns(tracing_ns);
+				error = -EPERM;
+				break;
+			}
+			put_tracing_ns(tracing_ns);
+
+			mutation =
+				auth_guard_task_replace_tracing_request(current, true,
+									&old_request);
+			if (mutation == AUTH_GUARD_MUTATION_REJECTED) {
+				error = -EACCES;
+				break;
+			}
+			AUTH_GUARD_QUARANTINE_FAIL_STOP(mutation);
+			error = 0;
+			pr_debug("tracing_ns: new tracing ns will be created on next clone/unshare\n");
 			break;
 		}
-
-		current->tracing_ns_for_child = true;
-		error = 0;
-		pr_debug("tracing_ns: new tracing ns will be created on next clone/unshare\n");
-		break;
 #else
 		error = -EINVAL;
 		break;
@@ -1971,12 +2007,16 @@ int do_syslog(int type, char __user *buf, int len, int source,
 
 SYSCALL_DEFINE3(syslog, int, type, char __user *, buf, int, len)
 {
-	struct syslog_namespace *ns = current_syslog_ns();
+	struct syslog_namespace *ns;
+	int ret;
 
-	if (!ns)
-		return -EFAULT;
+	ns = get_current_syslog_ns_checked();
+	if (IS_ERR(ns))
+		return PTR_ERR(ns);
+	ret = do_syslog(type, buf, len, SYSLOG_FROM_READER, ns);
+	put_syslog_ns(ns);
 
-	return do_syslog(type, buf, len, SYSLOG_FROM_READER, ns);
+	return ret;
 }
 
 /*

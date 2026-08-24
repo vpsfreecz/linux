@@ -8,6 +8,7 @@
 #include <linux/magic.h>
 #include <linux/ktime.h>
 #include <linux/seq_file.h>
+#include <linux/auth_guard.h>
 #include <linux/pid_namespace.h>
 #include <linux/user_namespace.h>
 #include <linux/nsfs.h>
@@ -70,6 +71,8 @@ int ns_get_path_cb(struct path *path, ns_get_path_helper_t *ns_get_cb,
 	struct ns_common *ns;
 
 	ns = ns_get_cb(private_data);
+	if (IS_ERR(ns))
+		return PTR_ERR(ns);
 	if (!ns)
 		return -ENOENT;
 
@@ -382,6 +385,8 @@ int ns_get_name(char *buf, size_t size, struct task_struct *task,
 	int res = -ENOENT;
 	const char *name;
 	ns = ns_ops->get(task);
+	if (IS_ERR(ns))
+		return PTR_ERR(ns);
 	if (ns) {
 		name = ns_ops->real_ns_name ? : ns_ops->name;
 		res = snprintf(buf, size, "%s:[%u]", name, ns->inum);
@@ -473,6 +478,19 @@ static int nsfs_encode_fh(struct inode *inode, u32 *fh, int *max_len,
 	return FILEID_NSFS;
 }
 
+#define NSFS_CURRENT_NS_CASE(_case, _get, _to, _put)                  \
+	case _case: {                                                   \
+		typeof(_get()) current_ns __free(_put) = _get();          \
+		typeof(_to(ns)) target_ns = _to(ns);                      \
+		if (IS_ERR(current_ns)) {                                  \
+			ns->ops->put(ns);                                    \
+			return ERR_CAST(current_ns);                          \
+		}                                                            \
+		if (current_ns != target_ns)                                \
+			owning_ns = target_ns->user_ns;                       \
+		break;                                                       \
+	}
+
 static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 					int fh_len, int fh_type)
 {
@@ -511,6 +529,11 @@ static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 
 		if (!__ns_ref_get(ns))
 			return NULL;
+	}
+
+	if (!auth_guard_current()) {
+		ns->ops->put(ns);
+		return ERR_PTR(-EACCES);
 	}
 
 	switch (ns->ns_type) {
@@ -565,22 +588,30 @@ static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 		break;
 #endif
 #ifdef CONFIG_SYSLOG_NS
-	case SYSLOG_ACTION_NEW_NS:
-		if (current_syslog_ns() != to_syslog_ns(ns))
-			owning_ns = to_syslog_ns(ns)->user_ns;
-		break;
+	NSFS_CURRENT_NS_CASE(SYSLOG_ACTION_NEW_NS,
+			     get_current_syslog_ns_checked, to_syslog_ns,
+			     put_syslog_ns);
 #endif
 #ifdef CONFIG_TRACING_NS
-	case TRACING_NS_TYPE:
+	case TRACING_NS_TYPE: {
+		struct tracing_namespace *current_ns
+			__free(put_tracing_ns) = get_current_tracing_ns_checked();
+		struct tracing_namespace *target_ns = to_tracing_ns(ns);
+
+		if (IS_ERR(current_ns)) {
+			ns->ops->put(ns);
+			return ERR_CAST(current_ns);
+		}
 		/*
 		 * ns_tree_lookup_rcu() acquired the namespace reference
 		 * directly, so pair it with the owner pin expected by
 		 * tracingns_put().
 		 */
-		get_user_ns(to_tracing_ns(ns)->user_ns);
-		if (current_tracing_ns() != to_tracing_ns(ns))
-			owning_ns = to_tracing_ns(ns)->user_ns;
+		get_user_ns(target_ns->user_ns);
+		if (current_ns != target_ns)
+			owning_ns = target_ns->user_ns;
 		break;
+	}
 #endif
 	default:
 		return ERR_PTR(-EOPNOTSUPP);
@@ -598,6 +629,8 @@ static struct dentry *nsfs_fh_to_dentry(struct super_block *sb, struct fid *fh,
 
 	return no_free_ptr(path.dentry);
 }
+
+#undef NSFS_CURRENT_NS_CASE
 
 static int nsfs_export_permission(struct handle_to_path_ctx *ctx,
 				   unsigned int oflags)

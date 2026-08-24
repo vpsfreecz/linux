@@ -197,44 +197,28 @@ static struct key_type key_type_id_resolver = {
 int nfs_idmap_init(void)
 {
 	struct cred *cred;
-	struct key *keyring;
 	int ret = 0;
 
 	printk(KERN_NOTICE "NFS: Registering the %s key type\n",
 		key_type_id_resolver.name);
 
-	cred = prepare_kernel_cred(&init_task);
-	if (!cred)
-		return -ENOMEM;
-
-	keyring = keyring_alloc(".id_resolver",
-				GLOBAL_ROOT_UID, GLOBAL_ROOT_GID, cred,
-				(KEY_POS_ALL & ~KEY_POS_SETATTR) |
-				KEY_USR_VIEW | KEY_USR_READ,
-				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
-	if (IS_ERR(keyring)) {
-		ret = PTR_ERR(keyring);
-		goto failed_put_cred;
-	}
+	cred = keyring_alloc_cache_cred(".id_resolver");
+	if (IS_ERR(cred))
+		return PTR_ERR(cred);
 
 	ret = register_key_type(&key_type_id_resolver);
 	if (ret < 0)
-		goto failed_put_key;
+		goto failed_put_cred;
 
 	ret = register_key_type(&key_type_id_resolver_legacy);
 	if (ret < 0)
 		goto failed_reg_legacy;
 
-	set_bit(KEY_FLAG_ROOT_CAN_CLEAR, &keyring->flags);
-	cred->thread_keyring = keyring;
-	cred->jit_keyring = KEY_REQKEY_DEFL_THREAD_KEYRING;
 	id_resolver_cache = cred;
 	return 0;
 
 failed_reg_legacy:
 	unregister_key_type(&key_type_id_resolver);
-failed_put_key:
-	key_put(keyring);
 failed_put_cred:
 	put_cred(cred);
 	return ret;
@@ -306,14 +290,13 @@ static ssize_t nfs_idmap_get_key(const char *name, size_t namelen,
 				 const char *type, void *data,
 				 size_t data_size, struct idmap *idmap)
 {
-	const struct cred *saved_cred;
 	struct key *rkey;
 	const struct user_key_payload *payload;
 	ssize_t ret;
 
-	saved_cred = override_creds(id_resolver_cache);
-	rkey = nfs_idmap_request_key(name, namelen, type, idmap);
-	revert_creds(saved_cred);
+	scoped_with_creds(id_resolver_cache) {
+		rkey = nfs_idmap_request_key(name, namelen, type, idmap);
+	}
 
 	if (IS_ERR(rkey)) {
 		ret = PTR_ERR(rkey);

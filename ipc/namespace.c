@@ -5,6 +5,7 @@
  */
 
 #include <linux/ipc.h>
+#include <linux/auth_guard.h>
 #include <linux/msg.h>
 #include <linux/ipc_namespace.h>
 #include <linux/rcupdate.h>
@@ -209,19 +210,8 @@ void put_ipc_ns(struct ipc_namespace *ns)
 	}
 }
 
-static struct ns_common *ipcns_get(struct task_struct *task)
-{
-	struct ipc_namespace *ns = NULL;
-	struct nsproxy *nsproxy;
-
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy)
-		ns = get_ipc_ns(nsproxy->ipc_ns);
-	task_unlock(task);
-
-	return ns ? &ns->ns : NULL;
-}
+DEFINE_TASK_NSPROXY_MEMBER_GETTER(ipcns_get, struct ipc_namespace, ipc_ns,
+				  get_ipc_ns, put_ipc_ns)
 
 static void ipcns_put(struct ns_common *ns)
 {
@@ -232,13 +222,13 @@ static int ipcns_install(struct nsset *nsset, struct ns_common *new)
 {
 	struct nsproxy *nsproxy = nsset->nsproxy;
 	struct ipc_namespace *ns = to_ipc_ns(new);
+
 	if (!ns_capable(ns->user_ns, CAP_SYS_ADMIN) ||
 	    !ns_capable(nsset->cred->user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
 
-	put_ipc_ns(nsproxy->ipc_ns);
-	nsproxy->ipc_ns = get_ipc_ns(ns);
-	return 0;
+	return auth_guard_nsproxy_install_owned(nsproxy, ipc_ns, ns,
+						get_ipc_ns, put_ipc_ns);
 }
 
 static struct user_namespace *ipcns_owner(struct ns_common *ns)

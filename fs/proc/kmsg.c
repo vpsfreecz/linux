@@ -21,11 +21,12 @@
 
 static int kmsg_open(struct inode * inode, struct file * file)
 {
-	struct syslog_namespace *ns = get_syslog_ns(current_syslog_ns());
+	struct syslog_namespace *ns;
 	int ret;
 
-	if (!ns)
-		return -EFAULT;
+	ns = get_current_syslog_ns_checked();
+	if (IS_ERR(ns))
+		return PTR_ERR(ns);
 
 	file->private_data = ns;
 	ret = do_syslog(SYSLOG_ACTION_OPEN, NULL, 0, SYSLOG_FROM_PROC, ns);

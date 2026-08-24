@@ -115,13 +115,19 @@ static const struct file_operations proc_fdinfo_file_operations = {
 static bool tid_fd_mode(struct task_struct *task, unsigned fd, fmode_t *mode)
 {
 	struct file *file;
+	int ret;
 
-	file = fget_task(task, fd);
+	do {
+		ret = fget_task_checked(task, fd, &file);
+		if (ret != -EAGAIN)
+			break;
+		cond_resched();
+	} while (1);
 	if (file) {
 		*mode = file->f_mode;
 		fput(file);
 	}
-	return !!file;
+	return !ret;
 }
 
 static void tid_fd_update_inode(struct task_struct *task, struct inode *inode,
@@ -174,19 +180,18 @@ static const struct dentry_operations tid_fd_dentry_operations = {
 static int proc_fd_link(struct dentry *dentry, struct path *path,
 			struct task_struct *task)
 {
-	int ret = -ENOENT;
+	int ret;
 	unsigned int fd = proc_fd(d_inode(dentry));
 	struct file *fd_file;
 
-	fd_file = fget_task(task, fd);
-	if (fd_file) {
+	ret = fget_task_checked(task, fd, &fd_file);
+	if (!ret) {
 		*path = fd_file->f_path;
 		path_get(&fd_file->f_path);
-		ret = 0;
 		fput(fd_file);
 	}
 
-	return ret;
+	return ret == -EBADF ? -ENOENT : ret;
 }
 
 struct fd_data {
