@@ -1791,14 +1791,15 @@ void btf_put(struct btf *btf)
 	}
 }
 
+bool btf_container_allowed(const struct btf *btf,
+			   const struct bpf_current_container *container)
+{
+	return bpf_container_token_allowed(container, btf->token);
+}
+
 bool btf_current_container_allowed(const struct btf *btf)
 {
-	if (!bpf_token_current_container_member())
-		return true;
-	if (!bpf_token_is_container(btf->token))
-		return false;
-
-	return bpf_token_task_match(btf->token, current);
+	return bpf_token_current_container_allowed(btf->token);
 }
 
 struct btf *btf_base_btf(const struct btf *btf)
@@ -8085,6 +8086,21 @@ struct btf *btf_get_by_fd(int fd)
 	return btf;
 }
 
+struct btf *
+btf_get_by_fd_for_container(int fd,
+			    const struct bpf_current_container *container)
+{
+	struct btf *btf;
+
+	CLASS(fd, f)(fd);
+
+	btf = __btf_get_by_fd_for_container(f, container);
+	if (!IS_ERR(btf))
+		refcount_inc(&btf->refcnt);
+
+	return btf;
+}
+
 int btf_get_info_by_fd(const struct btf *btf,
 		       const union bpf_attr *attr,
 		       union bpf_attr __user *uattr)
@@ -8148,7 +8164,40 @@ int btf_get_info_by_fd(const struct btf *btf,
 	return ret;
 }
 
-int btf_get_fd_by_id(u32 id)
+struct btf *
+btf_get_curr_or_next_for_container(u32 *id,
+				   const struct bpf_current_container *container)
+{
+	struct btf *btf;
+
+again:
+	spin_lock_bh(&btf_idr_lock);
+btf_again:
+	btf = idr_get_next(&btf_idr, id);
+	if (btf && !refcount_inc_not_zero(&btf->refcnt)) {
+		(*id)++;
+		goto btf_again;
+	}
+	spin_unlock_bh(&btf_idr_lock);
+
+	if (btf && !btf_container_allowed(btf, container)) {
+		btf_put(btf);
+		(*id)++;
+		goto again;
+	}
+
+	return btf;
+}
+
+struct btf *btf_get_curr_or_next(u32 *id)
+{
+	BPF_CURRENT_CONTAINER(container);
+
+	return btf_get_curr_or_next_for_container(id, &container);
+}
+
+int btf_get_fd_by_id_for_container(u32 id,
+				   const struct bpf_current_container *container)
 {
 	struct btf *btf;
 	int fd;
@@ -8161,12 +8210,23 @@ int btf_get_fd_by_id(u32 id)
 
 	if (IS_ERR(btf))
 		return PTR_ERR(btf);
+	if (!btf_container_allowed(btf, container)) {
+		btf_put(btf);
+		return -ENOENT;
+	}
 
 	fd = __btf_new_fd(btf);
 	if (fd < 0)
 		btf_put(btf);
 
 	return fd;
+}
+
+int btf_get_fd_by_id(u32 id)
+{
+	BPF_CURRENT_CONTAINER(container);
+
+	return btf_get_fd_by_id_for_container(id, &container);
 }
 
 u32 btf_obj_id(const struct btf *btf)

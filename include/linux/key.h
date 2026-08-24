@@ -492,6 +492,7 @@ do {									\
  * the userspace interface
  */
 extern int install_thread_keyring_to_cred(struct cred *cred);
+struct cred *keyring_alloc_cache_cred(const char *description);
 extern void key_fsuid_changed(struct cred *new_cred);
 extern void key_fsgid_changed(struct cred *new_cred);
 extern void key_init(void);
