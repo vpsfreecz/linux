@@ -9,6 +9,8 @@
  */
 
 #include <linux/capability.h>
+#include <linux/auth_guard.h>
+#include <linux/cred.h>
 #include <linux/export.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
@@ -290,13 +292,24 @@ static bool task_still_dumpable(struct task_struct *task, unsigned int mode)
 static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 {
 	const struct cred *cred = current_cred(), *tcred;
+	enum auth_guard_check_result guard_result;
 	kuid_t caller_uid;
 	kgid_t caller_gid;
+	int rc = 0;
 
 	if (!(mode & PTRACE_MODE_FSCREDS) == !(mode & PTRACE_MODE_REALCREDS)) {
 		WARN(1, "denying ptrace access check without PTRACE_MODE_*CREDS\n");
 		return -EPERM;
 	}
+	guard_result = auth_guard_task_check_real_cred(current, current_real_cred());
+	if (guard_result == AUTH_GUARD_CHECK_BUSY)
+		return -EAGAIN;
+	if (guard_result != AUTH_GUARD_CHECK_VALID)
+		return -EACCES;
+
+	tcred = get_task_cred_checked_nowait(task);
+	if (IS_ERR(tcred))
+		return PTR_ERR(tcred);
 
 	/* May we inspect the given task?
 	 * This check is used both for attaching with ptrace
@@ -309,8 +322,7 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 
 	/* Don't let security modules deny introspection */
 	if (same_thread_group(task, current))
-		return 0;
-	rcu_read_lock();
+		goto out;
 	if (mode & PTRACE_MODE_FSCREDS) {
 		caller_uid = cred->fsuid;
 		caller_gid = cred->fsgid;
@@ -326,7 +338,6 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 		caller_uid = cred->uid;
 		caller_gid = cred->gid;
 	}
-	tcred = __task_cred(task);
 	if (uid_eq(caller_uid, tcred->euid) &&
 	    uid_eq(caller_uid, tcred->suid) &&
 	    uid_eq(caller_uid, tcred->uid)  &&
@@ -336,10 +347,9 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 		goto ok;
 	if (ptrace_has_cap(tcred->user_ns, mode))
 		goto ok;
-	rcu_read_unlock();
-	return -EPERM;
+	rc = -EPERM;
+	goto out;
 ok:
-	rcu_read_unlock();
 	/*
 	 * If a task drops privileges and becomes nondumpable (through a syscall
 	 * like setresuid()) while we are trying to access it, we must ensure
@@ -350,19 +360,30 @@ ok:
 	 * Pairs with a write barrier in commit_creds().
 	 */
 	smp_rmb();
-	if (!task_still_dumpable(task, mode))
-		return -EPERM;
+	if (!task_still_dumpable(task, mode)) {
+		rc = -EPERM;
+		goto out;
+	}
 
-	return security_ptrace_access_check(task, mode);
+	rc = security_ptrace_access_check(task, mode);
+out:
+	put_cred(tcred);
+	return rc;
+}
+
+int ptrace_may_access_result(struct task_struct *task, unsigned int mode)
+{
+	int err;
+
+	task_lock(task);
+	err = __ptrace_may_access(task, mode);
+	task_unlock(task);
+	return err;
 }
 
 bool ptrace_may_access(struct task_struct *task, unsigned int mode)
 {
-	int err;
-	task_lock(task);
-	err = __ptrace_may_access(task, mode);
-	task_unlock(task);
-	return !err;
+	return !ptrace_may_access_result(task, mode);
 }
 
 static int check_ptrace_options(unsigned long data)

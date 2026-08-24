@@ -1816,14 +1816,17 @@ static int call_proc_get_link(struct dentry *dentry, struct inode *inode, struct
 	struct task_struct *task;
 	int ret;
 
+retry:
 	task = get_proc_task(inode);
 	if (!task)
 		return -ENOENT;
 	ret = down_read_killable(&task->signal->exec_update_lock);
 	if (ret)
 		goto out_put_task;
-	if (!ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS)) {
-		ret = -EACCES;
+	ret = ptrace_may_access_result(task, PTRACE_MODE_READ_FSCREDS);
+	if (ret) {
+		if (ret != -EAGAIN)
+			ret = -EACCES;
 		goto out;
 	}
 	ret = PROC_I(inode)->op.proc_get_link(dentry, path_out, task);
@@ -1832,6 +1835,10 @@ out:
 	up_read(&task->signal->exec_update_lock);
 out_put_task:
 	put_task_struct(task);
+	if (ret == -EAGAIN) {
+		cond_resched();
+		goto retry;
+	}
 	return ret;
 }
 
@@ -2093,18 +2100,19 @@ static int pid_revalidate(struct inode *dir, const struct qstr *name,
 	struct task_struct *task;
 	int ret = 0;
 
-	rcu_read_lock();
-	inode = d_inode_rcu(dentry);
+	if (flags & LOOKUP_RCU)
+		return -ECHILD;
+
+	inode = d_inode(dentry);
 	if (!inode)
-		goto out;
-	task = pid_task(proc_pid(inode), PIDTYPE_PID);
+		return 0;
+	task = get_proc_task(inode);
 
 	if (task) {
 		pid_update_inode(task, inode);
+		put_task_struct(task);
 		ret = 1;
 	}
-out:
-	rcu_read_unlock();
 	return ret;
 }
 

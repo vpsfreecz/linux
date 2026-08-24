@@ -32,6 +32,7 @@
 #include <linux/rmap.h>
 #include <linux/topology.h>
 #include <linux/cpu.h>
+#include <linux/cgroup.h>
 #include <linux/cpuset.h>
 #include <linux/cgroup_namespace.h>
 #include <linux/compaction.h>
@@ -7547,11 +7548,22 @@ static int proc_dointvec_minmax_swappiness(const struct ctl_table *table,
 					   int write, void *buffer,
 					   size_t *lenp, loff_t *ppos)
 {
+	struct cgroup_task_auth_snapshot snapshot
+		__free(cgroup_task_auth_snapshot) = {};
 	struct ctl_table vtable = *table;
-	struct user_namespace *ns = current_user_ns();
-	struct cgroup_namespace *cgns = current->nsproxy->cgroup_ns;
-	bool admin = ns_capable(cgns->user_ns, CAP_SYS_ADMIN);
+	struct user_namespace *ns;
+	struct cgroup_namespace *cgns;
+	enum auth_guard_check_result auth_result;
+	bool admin;
 	int swappiness;
+
+	auth_result = cgroup_task_auth_snapshot_get(current, -1, &snapshot);
+	if (auth_result != AUTH_GUARD_CHECK_VALID)
+		return auth_result == AUTH_GUARD_CHECK_BUSY ? -EAGAIN : -EACCES;
+
+	ns = current_user_ns();
+	cgns = snapshot.cgroup_ns;
+	admin = ns_capable(cgns->user_ns, CAP_SYS_ADMIN);
 
 	if (write && !admin)
 		return -EPERM;
@@ -7573,7 +7585,8 @@ static int proc_dointvec_minmax_swappiness(const struct ctl_table *table,
 		if (admin) {
 			struct cgroup_subsys_state *css;
 
-			css = READ_ONCE(cgns->root_cset->subsys[memory_cgrp_id]);
+			css = READ_ONCE(
+				snapshot.root_cset->subsys[memory_cgrp_id]);
 			if (css && css_tryget(css))
 				memcg = mem_cgroup_from_css(css);
 		} else {

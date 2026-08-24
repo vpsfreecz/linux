@@ -87,6 +87,16 @@ extern void exit_ptrace(struct task_struct *tracer, struct list_head *dead);
  */
 extern bool ptrace_may_access(struct task_struct *task, unsigned int mode);
 
+/**
+ * ptrace_may_access_result - check access while preserving the denial reason
+ * @task: target task
+ * @mode: selects type of access and caller credentials
+ *
+ * Return: 0 on success, or a negative error code on denial. In particular,
+ * %-EAGAIN identifies a transient target authority writer.
+ */
+int ptrace_may_access_result(struct task_struct *task, unsigned int mode);
+
 static inline int ptrace_reparented(struct task_struct *child)
 {
 	return !same_thread_group(child->real_parent, child->parent);

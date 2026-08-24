@@ -52,7 +52,8 @@ struct time_namespace *copy_time_ns(u64 flags,
 				    struct user_namespace *user_ns,
 				    struct time_namespace *old_ns);
 void free_time_ns(struct time_namespace *ns);
-void timens_on_fork(struct nsproxy *nsproxy, struct task_struct *tsk);
+int timens_on_fork(struct nsproxy *nsproxy, struct task_struct *tsk);
+int timens_on_exec(struct nsproxy *nsproxy, struct task_struct *tsk);
 struct page *find_timens_vvar_page(struct vm_area_struct *vma);
 
 static inline void put_time_ns(struct time_namespace *ns)
@@ -148,10 +149,16 @@ struct time_namespace *copy_time_ns(u64 flags,
 	return old_ns;
 }
 
-static inline void timens_on_fork(struct nsproxy *nsproxy,
+static inline int timens_on_fork(struct nsproxy *nsproxy,
 				 struct task_struct *tsk)
 {
-	return;
+	return 0;
+}
+
+static inline int timens_on_exec(struct nsproxy *nsproxy,
+				 struct task_struct *tsk)
+{
+	return 0;
 }
 
 static inline struct page *find_timens_vvar_page(struct vm_area_struct *vma)

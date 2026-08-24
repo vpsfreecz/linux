@@ -29,12 +29,16 @@ int cachefiles_get_security_ID(struct cachefiles_cache *cache)
 	if (cache->have_secid) {
 		ret = set_security_override(new, cache->secid);
 		if (ret < 0) {
-			put_cred(new);
+			abort_creds(new);
 			pr_err("Security denies permission to nominate security context: error %d\n",
 			       ret);
 			goto error;
 		}
 	}
+
+	ret = commit_prepared_cred(new);
+	if (ret < 0)
+		goto error;
 
 	cache->cache_cred = new;
 	ret = 0;
@@ -96,6 +100,13 @@ int cachefiles_determine_cache_security(struct cachefiles_cache *cache,
 		abort_creds(new);
 		cachefiles_begin_secure(cache, _saved_cred);
 		_leave(" = %d [cfa]", ret);
+		return ret;
+	}
+
+	ret = commit_prepared_cred(new);
+	if (ret < 0) {
+		cachefiles_begin_secure(cache, _saved_cred);
+		_leave(" = %d [commit]", ret);
 		return ret;
 	}
 

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/auth_guard.h>
 #include <linux/capability.h>
 #include <linux/err.h>
 #include <linux/init.h>
@@ -155,6 +156,12 @@ void free_syslog_ns(struct syslog_namespace *ns)
 	/* Concurrent nstree traversal depends on a grace period. */
 	call_rcu(&ns->ns.ns_rcu, delayed_free_syslog_ns);
 }
+EXPORT_SYMBOL_GPL(free_syslog_ns);
+
+DEFINE_USERNS_OWNED_BOUNDARY_REPLACER(
+	syslog_ns_replace_userns_default, syslog_namespace, syslog_ns,
+	syslog_ns_is_owner, get_syslog_ns, put_syslog_ns,
+	get_syslog_ns_structural, put_syslog_ns_structural)
 
 /*
  * A syslog namespace created before its container user namespace initially
@@ -172,6 +179,8 @@ void free_syslog_ns(struct syslog_namespace *ns)
  */
 void syslog_ns_claim_user_ns(struct user_namespace *user_ns)
 {
+	struct auth_guard_userns_boundary old_boundary;
+	struct auth_guard_userns_boundary proposed;
 	struct syslog_namespace *ns = user_ns->syslog_ns;
 	struct user_namespace *old_user_ns = NULL;
 	unsigned int refs = 0;
@@ -181,10 +190,16 @@ void syslog_ns_claim_user_ns(struct user_namespace *user_ns)
 	if (!ns || ns == &init_syslog_ns || user_ns == &init_user_ns)
 		return;
 
+	auth_guard_userns_boundary_read(user_ns, &old_boundary);
+	AUTH_GUARD_FAIL_STOP_UNLESS(
+		auth_guard_userns_boundary_begin_transition_where(
+			user_ns, &old_boundary, __func__));
+
 	spin_lock_irqsave(&ns->owner_lock, flags);
 	if (ns->user_ns == &init_user_ns) {
 		refs = refcount_read(&ns->ns.__ns_ref);
-		if (WARN_ON_ONCE(!refs))
+		if (WARN_ON_ONCE(!refs || old_boundary.syslog_ns != ns ||
+				 old_boundary.syslog_ns_is_owner))
 			goto unlock;
 
 		/* The inherited reference becomes structural and does not self-pin. */
@@ -193,10 +208,22 @@ void syslog_ns_claim_user_ns(struct user_namespace *user_ns)
 
 		old_user_ns = ns->user_ns;
 		WRITE_ONCE(ns->user_ns, user_ns);
-		user_ns->syslog_ns_is_owner = true;
+		WRITE_ONCE(user_ns->syslog_ns_is_owner, true);
 	}
 unlock:
 	spin_unlock_irqrestore(&ns->owner_lock, flags);
+
+	if (old_user_ns) {
+		proposed = old_boundary;
+		proposed.syslog_ns_is_owner = true;
+		AUTH_GUARD_FAIL_STOP_UNLESS(
+			auth_guard_userns_boundary_finish_transition_where(
+				user_ns, &proposed, __func__));
+	} else {
+		AUTH_GUARD_FAIL_STOP_UNLESS(
+			auth_guard_userns_boundary_abort_transition_where(
+				user_ns, &old_boundary, __func__));
+	}
 
 	/* Drop the old owner pin paired with every existing external reference. */
 	if (old_user_ns)
@@ -210,6 +237,7 @@ clone_syslog_ns(struct user_namespace *user_ns,
 {
 	struct syslog_namespace *ns;
 	struct ucounts *ucounts;
+	enum auth_guard_mutation_result mutation;
 	int err;
 
 	ucounts = inc_syslog_namespaces(user_ns);
@@ -259,19 +287,21 @@ clone_syslog_ns(struct user_namespace *user_ns,
 	 * subsystems keyed by user_ns (for example netns logging) use the child
 	 * syslog buffer rather than the inherited parent one.
 	 */
-	if (user_ns != current_user_ns() && user_ns->syslog_ns == old_ns) {
-		if (WARN_ON_ONCE(user_ns->syslog_ns_is_owner)) {
-			err = -EINVAL;
-			goto fail_unregister_name;
+	if (user_ns != current_user_ns()) {
+		mutation = syslog_ns_replace_userns_default(user_ns, old_ns, ns);
+		if (mutation == AUTH_GUARD_MUTATION_QUARANTINED)
+			return ERR_PTR(-EACCES);
+		if (mutation != AUTH_GUARD_MUTATION_APPLIED) {
+			err = -EACCES;
+			goto fail_log_buf;
 		}
-		put_syslog_ns(user_ns->syslog_ns);
-		user_ns->syslog_ns = get_syslog_ns_structural(ns);
-		user_ns->syslog_ns_is_owner = true;
 	}
 
 	__ns_tree_add(&ns->ns, &syslog_ns_tree);
 	return ns;
 
+fail_log_buf:
+	syslog_ns_log_buf_free(ns);
 fail_unregister_name:
 	unregister_syslog_ns_name(ns);
 fail_name:
@@ -356,19 +386,8 @@ struct syslog_namespace *copy_syslog_ns(bool new, char *name,
 	return clone_syslog_ns(user_ns, old_ns, name);
 }
 
-static struct ns_common *syslogns_get(struct task_struct *task)
-{
-	struct syslog_namespace *ns = NULL;
-	struct nsproxy *nsproxy;
-
-	task_lock(task);
-	nsproxy = task->nsproxy;
-	if (nsproxy)
-		ns = get_syslog_ns(nsproxy->syslog_ns);
-	task_unlock(task);
-
-	return ns ? &ns->ns : NULL;
-}
+DEFINE_TASK_NSPROXY_MEMBER_GETTER(syslogns_get, struct syslog_namespace,
+				  syslog_ns, get_syslog_ns, put_syslog_ns)
 
 static void syslogns_put(struct ns_common *ns)
 {
@@ -395,9 +414,8 @@ static int syslogns_install(struct nsset *nsset, struct ns_common *new)
 	if (ret)
 		return ret;
 
-	put_syslog_ns(nsproxy->syslog_ns);
-	nsproxy->syslog_ns = get_syslog_ns(ns);
-	return 0;
+	return auth_guard_nsproxy_install_owned(nsproxy, syslog_ns, ns,
+						get_syslog_ns, put_syslog_ns);
 }
 
 static struct user_namespace *syslogns_owner(struct ns_common *ns)

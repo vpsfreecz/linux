@@ -23,6 +23,7 @@ int nfsd_setuser(struct svc_cred *cred, struct svc_export *exp)
 	struct group_info *rqgi;
 	struct group_info *gi;
 	struct cred *new;
+	const struct cred *old;
 	int i;
 	int flags = nfsexp_flags(cred, exp);
 
@@ -79,11 +80,13 @@ int nfsd_setuser(struct svc_cred *cred, struct svc_export *exp)
 	else
 		new->cap_effective = cap_raise_nfsd_set(new->cap_effective,
 							new->cap_permitted);
-	put_cred(override_creds(new));
+	old = override_creds_from_prepared(new);
+	if (!old)
+		return -EACCES;
+	put_cred(old);
 	return 0;
 
 oom:
 	abort_creds(new);
 	return -ENOMEM;
 }
-

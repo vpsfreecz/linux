@@ -125,11 +125,13 @@ static int apparmor_ptrace_access_check(struct task_struct *child,
 					unsigned int mode)
 {
 	struct aa_label *tracer, *tracee;
-	const struct cred *cred;
+	const struct cred *cred __free(put_cred) =
+		get_task_cred_checked_nowait(child);
 	int error;
 	bool needput;
 
-	cred = get_task_cred(child);
+	if (IS_ERR(cred))
+		return PTR_ERR(cred);
 	tracee = cred_label(cred);	/* ref count on cred */
 	tracer = __begin_current_label_crit_section(&needput);
 	error = aa_may_ptrace(current_cred(), tracer, cred, tracee,
@@ -144,16 +146,19 @@ static int apparmor_ptrace_access_check(struct task_struct *child,
 static int apparmor_ptrace_traceme(struct task_struct *parent)
 {
 	struct aa_label *tracer, *tracee;
-	const struct cred *cred;
+	const struct cred *cred __free(put_cred) = NULL;
 	int error;
 	bool needput;
 
 	tracee = __begin_current_label_crit_section(&needput);
-	cred = get_task_cred(parent);
+	cred = get_task_cred_checked_nowait(parent);
+	if (IS_ERR(cred)) {
+		__end_current_label_crit_section(tracee, needput);
+		return PTR_ERR(cred);
+	}
 	tracer = cred_label(cred);	/* ref count on cred */
 	error = aa_may_ptrace(cred, tracer, current_cred(), tracee,
 			      AA_PTRACE_TRACE);
-	put_cred(cred);
 	__end_current_label_crit_section(tracee, needput);
 
 	return error;
@@ -1017,12 +1022,14 @@ static int apparmor_task_setrlimit(struct task_struct *task,
 static int apparmor_task_kill(struct task_struct *target, struct kernel_siginfo *info,
 			      int sig, const struct cred *cred)
 {
-	const struct cred *tc;
+	const struct cred *tc __free(put_cred) =
+		get_task_cred_checked(target);
 	struct aa_label *cl, *tl;
 	int error;
 	bool needput;
 
-	tc = get_task_cred(target);
+	if (IS_ERR(tc))
+		return PTR_ERR(tc);
 	tl = aa_get_newest_cred_label(tc);
 	if (cred) {
 		/*

@@ -6,6 +6,7 @@
  */
 
 #include <linux/export.h>
+#include <linux/auth_guard.h>
 #include <linux/mm.h>
 #include <linux/mm_inline.h>
 #include <linux/memcontrol.h>
@@ -428,9 +429,9 @@ long __sys_setregid(gid_t rgid, gid_t egid)
 	if ((egid != (gid_t) -1) && !gid_valid(kegid))
 		return -EINVAL;
 
-	new = prepare_creds();
-	if (!new)
-		return -ENOMEM;
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
+		return PTR_ERR(new);
 	old = current_cred();
 
 	retval = -EPERM;
@@ -461,10 +462,10 @@ long __sys_setregid(gid_t rgid, gid_t egid)
 	if (retval < 0)
 		goto error;
 
-	return commit_creds(new);
+	return commit_creds_setid(new);
 
 error:
-	abort_creds(new);
+	abort_creds_setid(new);
 	return retval;
 }
 
@@ -490,9 +491,9 @@ long __sys_setgid(gid_t gid)
 	if (!gid_valid(kgid))
 		return -EINVAL;
 
-	new = prepare_creds();
-	if (!new)
-		return -ENOMEM;
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
+		return PTR_ERR(new);
 	old = current_cred();
 
 	retval = -EPERM;
@@ -507,10 +508,10 @@ long __sys_setgid(gid_t gid)
 	if (retval < 0)
 		goto error;
 
-	return commit_creds(new);
+	return commit_creds_setid(new);
 
 error:
-	abort_creds(new);
+	abort_creds_setid(new);
 	return retval;
 }
 
@@ -585,9 +586,9 @@ long __sys_setreuid(uid_t ruid, uid_t euid)
 	if ((euid != (uid_t) -1) && !uid_valid(keuid))
 		return -EINVAL;
 
-	new = prepare_creds();
-	if (!new)
-		return -ENOMEM;
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
+		return PTR_ERR(new);
 	old = current_cred();
 
 	retval = -EPERM;
@@ -627,10 +628,10 @@ long __sys_setreuid(uid_t ruid, uid_t euid)
 		goto error;
 
 	flag_nproc_exceeded(new);
-	return commit_creds(new);
+	return commit_creds_setid(new);
 
 error:
-	abort_creds(new);
+	abort_creds_setid(new);
 	return retval;
 }
 
@@ -662,9 +663,9 @@ long __sys_setuid(uid_t uid)
 	if (!uid_valid(kuid))
 		return -EINVAL;
 
-	new = prepare_creds();
-	if (!new)
-		return -ENOMEM;
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
+		return PTR_ERR(new);
 	old = current_cred();
 
 	retval = -EPERM;
@@ -690,10 +691,10 @@ long __sys_setuid(uid_t uid)
 		goto error;
 
 	flag_nproc_exceeded(new);
-	return commit_creds(new);
+	return commit_creds_setid(new);
 
 error:
-	abort_creds(new);
+	abort_creds_setid(new);
 	return retval;
 }
 
@@ -748,9 +749,9 @@ long __sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 	    !ns_capable_setid(old->user_ns, CAP_SETUID))
 		return -EPERM;
 
-	new = prepare_creds();
-	if (!new)
-		return -ENOMEM;
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
+		return PTR_ERR(new);
 
 	if (ruid != (uid_t) -1) {
 		new->uid = kruid;
@@ -775,10 +776,10 @@ long __sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 		goto error;
 
 	flag_nproc_exceeded(new);
-	return commit_creds(new);
+	return commit_creds_setid(new);
 
 error:
-	abort_creds(new);
+	abort_creds_setid(new);
 	return retval;
 }
 
@@ -848,9 +849,9 @@ long __sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 	    !ns_capable_setid(old->user_ns, CAP_SETGID))
 		return -EPERM;
 
-	new = prepare_creds();
-	if (!new)
-		return -ENOMEM;
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
+		return PTR_ERR(new);
 
 	if (rgid != (gid_t) -1)
 		new->gid = krgid;
@@ -864,10 +865,10 @@ long __sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 	if (retval < 0)
 		goto error;
 
-	return commit_creds(new);
+	return commit_creds_setid(new);
 
 error:
-	abort_creds(new);
+	abort_creds_setid(new);
 	return retval;
 }
 
@@ -917,8 +918,8 @@ long __sys_setfsuid(uid_t uid)
 	if (!uid_valid(kuid))
 		return old_fsuid;
 
-	new = prepare_creds();
-	if (!new)
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
 		return old_fsuid;
 
 	if (uid_eq(kuid, old->uid)  || uid_eq(kuid, old->euid)  ||
@@ -931,11 +932,11 @@ long __sys_setfsuid(uid_t uid)
 		}
 	}
 
-	abort_creds(new);
+	abort_creds_setid(new);
 	return old_fsuid;
 
 change_okay:
-	commit_creds(new);
+	AUTH_GUARD_FAIL_STOP_IF(commit_creds_setid(new));
 	return old_fsuid;
 }
 
@@ -961,8 +962,8 @@ long __sys_setfsgid(gid_t gid)
 	if (!gid_valid(kgid))
 		return old_fsgid;
 
-	new = prepare_creds();
-	if (!new)
+	new = prepare_creds_setid();
+	if (IS_ERR(new))
 		return old_fsgid;
 
 	if (gid_eq(kgid, old->gid)  || gid_eq(kgid, old->egid)  ||
@@ -975,11 +976,11 @@ long __sys_setfsgid(gid_t gid)
 		}
 	}
 
-	abort_creds(new);
+	abort_creds_setid(new);
 	return old_fsgid;
 
 change_okay:
-	commit_creds(new);
+	AUTH_GUARD_FAIL_STOP_IF(commit_creds_setid(new));
 	return old_fsgid;
 }
 
@@ -1519,6 +1520,8 @@ static int do_prlimit(struct task_struct *tsk, unsigned int resource,
 
 	/* Holding a refcount on tsk protects tsk->signal from disappearing. */
 	rlim = tsk->signal->rlim + resource;
+retry:
+	retval = 0;
 	task_lock(tsk->group_leader);
 	if (new_rlim) {
 		/*
@@ -1530,6 +1533,11 @@ static int do_prlimit(struct task_struct *tsk, unsigned int resource,
 			retval = -EPERM;
 		if (!retval)
 			retval = security_task_setrlimit(tsk, resource, new_rlim);
+	}
+	if (retval == -EAGAIN) {
+		task_unlock(tsk->group_leader);
+		cond_resched();
+		goto retry;
 	}
 	if (!retval) {
 		if (old_rlim)
@@ -1705,27 +1713,38 @@ static void rlim64_to_rlim(const struct rlimit64 *rlim64, struct rlimit *rlim)
 		rlim->rlim_max = (unsigned long)rlim64->rlim_max;
 }
 
-/* rcu lock must be held */
+/* The caller holds RCU so @task remains linked while its credential is pinned. */
 static int check_prlimit_permission(struct task_struct *task,
 				    unsigned int flags)
 {
 	const struct cred *cred = current_cred(), *tcred;
 	bool id_match;
+	int ret;
 
-	if (current == task)
-		return 0;
+	tcred = get_task_cred_checked(task);
+	if (IS_ERR(tcred))
+		return PTR_ERR(tcred);
 
-	tcred = __task_cred(task);
+	if (current == task) {
+		ret = 0;
+		goto out;
+	}
+
 	id_match = (uid_eq(cred->uid, tcred->euid) &&
 		    uid_eq(cred->uid, tcred->suid) &&
 		    uid_eq(cred->uid, tcred->uid)  &&
 		    gid_eq(cred->gid, tcred->egid) &&
 		    gid_eq(cred->gid, tcred->sgid) &&
 		    gid_eq(cred->gid, tcred->gid));
-	if (!id_match && !ns_capable(tcred->user_ns, CAP_SYS_RESOURCE))
-		return -EPERM;
+	if (!id_match && !ns_capable(tcred->user_ns, CAP_SYS_RESOURCE)) {
+		ret = -EPERM;
+		goto out;
+	}
 
-	return security_task_prlimit(cred, tcred, flags);
+	ret = security_task_prlimit(cred, tcred, flags);
+out:
+	put_cred(tcred);
+	return ret;
 }
 
 SYSCALL_DEFINE4(prlimit64, pid_t, pid, unsigned int, resource,
@@ -2690,11 +2709,18 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 				 (int __user *)arg2);
 		break;
 	case PR_SET_NO_NEW_PRIVS:
+	{
+		enum auth_guard_mutation_result mutation;
+
 		if (arg2 != 1 || arg3 || arg4 || arg5)
 			return -EINVAL;
 
-		task_set_no_new_privs(current);
+		mutation = auth_guard_task_set_no_new_privs(current);
+		if (mutation == AUTH_GUARD_MUTATION_REJECTED)
+			return -EACCES;
+		AUTH_GUARD_QUARANTINE_FAIL_STOP(mutation);
 		break;
+	}
 	case PR_GET_NO_NEW_PRIVS:
 		if (arg2 || arg3 || arg4 || arg5)
 			return -EINVAL;

@@ -15,6 +15,7 @@
 #include <linux/syscalls.h>
 #include <linux/cred.h>
 #include <linux/err.h>
+#include <linux/auth_guard.h>
 #include <linux/acct.h>
 #include <linux/slab.h>
 #include <linux/proc_ns.h>
@@ -349,6 +350,13 @@ int reboot_pid_ns(struct pid_namespace *pid_ns, int cmd)
 static struct ns_common *pidns_get(struct task_struct *task)
 {
 	struct pid_namespace *ns;
+	enum auth_guard_check_result result;
+
+	result = auth_guard_task_check_status(task);
+	if (result == AUTH_GUARD_CHECK_BUSY)
+		return ERR_PTR(-EAGAIN);
+	if (result != AUTH_GUARD_CHECK_VALID)
+		return NULL;
 
 	rcu_read_lock();
 	ns = task_active_pid_ns(task);
@@ -361,23 +369,26 @@ static struct ns_common *pidns_get(struct task_struct *task)
 
 static struct ns_common *pidns_for_children_get(struct task_struct *task)
 {
-	struct pid_namespace *ns = NULL;
+	struct task_nsproxy_snapshot snapshot;
+	struct pid_namespace *ns;
+	int ret;
 
-	task_lock(task);
-	if (task->nsproxy) {
-		ns = task->nsproxy->pid_ns_for_children;
-		get_pid_ns(ns);
+	ret = task_nsproxy_snapshot_get(task, &snapshot);
+	if (ret)
+		return ret == -EAGAIN ? ERR_PTR(ret) : NULL;
+	ns = READ_ONCE(snapshot.nsproxy->pid_ns_for_children);
+	get_pid_ns(ns);
+	if (!task_nsproxy_snapshot_put(&snapshot)) {
+		put_pid_ns(ns);
+		return NULL;
 	}
-	task_unlock(task);
 
-	if (ns) {
-		read_lock(&tasklist_lock);
-		if (!ns->child_reaper) {
-			put_pid_ns(ns);
-			ns = NULL;
-		}
-		read_unlock(&tasklist_lock);
+	read_lock(&tasklist_lock);
+	if (!ns->child_reaper) {
+		put_pid_ns(ns);
+		ns = NULL;
 	}
+	read_unlock(&tasklist_lock);
 
 	return ns ? &ns->ns : NULL;
 }
@@ -425,9 +436,8 @@ static int pidns_install(struct nsset *nsset, struct ns_common *ns)
 	if (ret)
 		return ret;
 
-	put_pid_ns(nsproxy->pid_ns_for_children);
-	nsproxy->pid_ns_for_children = get_pid_ns(new);
-	return 0;
+	return auth_guard_nsproxy_install_owned(nsproxy, pid_ns_for_children,
+						new, get_pid_ns, put_pid_ns);
 }
 
 static struct ns_common *pidns_get_parent(struct ns_common *ns)

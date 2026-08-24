@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "cgroup-internal.h"
 
+#include <linux/auth_guard.h>
 #include <linux/ctype.h>
 #include <linux/kmod.h>
 #include <linux/sort.h>
@@ -45,6 +46,13 @@ static struct workqueue_struct *cgroup_pidlist_destroy_wq;
 /* protects cgroup_subsys->release_agent_path */
 static DEFINE_SPINLOCK(release_agent_path_lock);
 
+static int cgroup1_auth_guard_errno(enum auth_guard_check_result result)
+{
+	if (result == AUTH_GUARD_CHECK_VALID)
+		return 0;
+	return result == AUTH_GUARD_CHECK_BUSY ? -EAGAIN : -EACCES;
+}
+
 bool cgroup1_ssid_disabled(int ssid)
 {
 	return cgroup_no_v1_mask & (1 << ssid);
@@ -72,8 +80,15 @@ int cgroup_attach_task_all(struct task_struct *from, struct task_struct *tsk)
 	cgroup_attach_lock(CGRP_ATTACH_LOCK_GLOBAL, NULL);
 	for_each_root(root) {
 		struct cgroup *from_cgrp;
+		enum auth_guard_check_result result;
 
 		spin_lock_irq(&css_set_lock);
+		result = auth_guard_task_check_status(from);
+		if (result != AUTH_GUARD_CHECK_VALID) {
+			spin_unlock_irq(&css_set_lock);
+			retval = cgroup1_auth_guard_errno(result);
+			break;
+		}
 		from_cgrp = task_cgroup_from_root(from, root);
 		spin_unlock_irq(&css_set_lock);
 
@@ -122,9 +137,14 @@ int cgroup_transfer_tasks(struct cgroup *to, struct cgroup *from)
 
 	/* all tasks in @from are being moved, all csets are source */
 	spin_lock_irq(&css_set_lock);
-	list_for_each_entry(link, &from->cset_links, cset_link)
-		cgroup_migrate_add_src(link->cset, to, &mgctx);
+	list_for_each_entry(link, &from->cset_links, cset_link) {
+		ret = cgroup_migrate_add_src(link->cset, to, &mgctx);
+		if (ret)
+			break;
+	}
 	spin_unlock_irq(&css_set_lock);
+	if (ret)
+		goto out_err;
 
 	ret = cgroup_migrate_prepare_dst(&mgctx);
 	if (ret)
@@ -504,7 +524,9 @@ static ssize_t __cgroup1_procs_write(struct kernfs_open_file *of,
 	const struct cred *cred, *tcred;
 	ssize_t ret;
 	enum cgroup_attach_lock_mode lock_mode;
+	enum auth_guard_check_result auth_result;
 
+retry:
 	cgrp = cgroup_kn_lock_live(of->kn, false);
 	if (!cgrp)
 		return -ENODEV;
@@ -514,13 +536,23 @@ static ssize_t __cgroup1_procs_write(struct kernfs_open_file *of,
 	if (ret)
 		goto out_unlock;
 
+	auth_result = auth_guard_task_check_status(task);
+	if (auth_result != AUTH_GUARD_CHECK_VALID) {
+		ret = cgroup1_auth_guard_errno(auth_result);
+		goto out_finish;
+	}
+
 	/*
 	 * Even if we're attaching all tasks in the thread group, we only need
 	 * to check permissions on one of them. Check permissions using the
 	 * credentials from file open to protect against inherited fd attacks.
 	 */
 	cred = of->file->f_cred;
-	tcred = get_task_cred(task);
+	tcred = get_task_cred_checked_nowait(task);
+	if (IS_ERR(tcred)) {
+		ret = PTR_ERR(tcred);
+		goto out_finish;
+	}
 	if (!uid_eq(cred->euid, GLOBAL_ROOT_UID) &&
 	    !uid_eq(cred->euid, tcred->uid) &&
 	    !uid_eq(cred->euid, tcred->suid))
@@ -535,6 +567,10 @@ out_finish:
 	cgroup_procs_write_finish(task, lock_mode);
 out_unlock:
 	cgroup_kn_unlock(of->kn);
+	if (ret == -EAGAIN) {
+		cond_resched();
+		goto retry;
+	}
 
 	return ret ?: nbytes;
 }
@@ -1309,6 +1345,11 @@ struct cgroup *task_get_cgroup1(struct task_struct *tsk, int hierarchy_id)
 		if (root->hierarchy_id != hierarchy_id)
 			continue;
 		spin_lock_irqsave(&css_set_lock, flags);
+		if (!auth_guard_task_check(tsk)) {
+			cgrp = ERR_PTR(-EACCES);
+			spin_unlock_irqrestore(&css_set_lock, flags);
+			break;
+		}
 		cgrp = task_cgroup_from_root(tsk, root);
 		if (!cgrp || !cgroup_tryget(cgrp))
 			cgrp = ERR_PTR(-ENOENT);

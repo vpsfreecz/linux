@@ -977,7 +977,7 @@ static u64 notrace __bpf_prog_enter_lsm_mac_container(struct bpf_prog *prog,
 
 	run_ctx->saved_run_ctx = bpf_set_run_ctx(&run_ctx->run_ctx);
 
-	if (!bpf_token_task_match(prog->aux->token, current))
+	if (!bpf_token_current_match(prog->aux->token))
 		return 0;
 
 	return NO_START_TIME;
