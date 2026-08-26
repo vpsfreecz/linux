@@ -35,6 +35,8 @@
 #ifdef CONFIG_LIVEPATCH
 #include <linux/livepatch.h>
 #include <linux/rtnetlink.h>
+#include <linux/vpsadminos-livepatch-build.h>
+#include <linux/vpsadminos-livepatch-foundation.h>
 #endif
 #include <net/gso.h>
 #include <net/net_namespace.h>
@@ -1797,6 +1799,9 @@ struct vpsadminos_nfqueue_post_unpatch_callback {
 };
 
 static bool vpsadminos_nfqueue_transition_quiesced;
+#if LIVEPATCH_IS_CHECKPOINT
+static struct vpsadminos_klp_target_token *vpsadminos_nfqueue_target_token;
+#endif
 
 static void vpsadminos_nfqueue_drain_all(void)
 {
@@ -1813,13 +1818,29 @@ vpsadminos_nfqueue_livepatch_quiesce(struct klp_object *obj)
 {
 	int ret = -EBUSY;
 
+#if LIVEPATCH_IS_CHECKPOINT
+	ret = vpsadminos_klp_checkpoint_target_claim(obj,
+						     &vpsadminos_nfqueue_target_token);
+	if (ret)
+		return ret;
+#endif
 	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
 		return 0;
-	if (WARN_ON_ONCE(vpsadminos_nfqueue_transition_quiesced))
+	if (WARN_ON_ONCE(vpsadminos_nfqueue_transition_quiesced)) {
+#if LIVEPATCH_IS_CHECKPOINT
+		goto release_target;
+#else
 		return -EBUSY;
+#endif
+	}
 
-	if (!down_write_trylock(&pernet_ops_rwsem))
+	if (!down_write_trylock(&pernet_ops_rwsem)) {
+#if LIVEPATCH_IS_CHECKPOINT
+		goto release_target;
+#else
 		return -EBUSY;
+#endif
+	}
 	if (!rtnl_trylock())
 		goto out_unlock_pernet;
 
@@ -1842,6 +1863,11 @@ out_unlock_rtnl:
 	rtnl_unlock();
 out_unlock_pernet:
 	up_write(&pernet_ops_rwsem);
+#if LIVEPATCH_IS_CHECKPOINT
+release_target:
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_nfqueue_target_token);
+#endif
 	return ret;
 }
 
@@ -1885,6 +1911,16 @@ vpsadminos_nfqueue_livepatch_restore(struct klp_object *obj)
 	WRITE_ONCE(vpsadminos_nfqueue_transition_quiesced, false);
 }
 
+#if LIVEPATCH_IS_CHECKPOINT
+static void
+vpsadminos_nfqueue_livepatch_post_unpatch(struct klp_object *obj)
+{
+	vpsadminos_nfqueue_livepatch_restore(obj);
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_nfqueue_target_token);
+}
+#endif
+
 static struct vpsadminos_nfqueue_pre_patch_callback
 vpsadminos_nfqueue_pre_patch_data
 __section(".kpatch.callbacks.pre_patch") __used = {
@@ -1909,7 +1945,11 @@ __section(".kpatch.callbacks.pre_unpatch") __used = {
 static struct vpsadminos_nfqueue_post_unpatch_callback
 vpsadminos_nfqueue_post_unpatch_data
 __section(".kpatch.callbacks.post_unpatch") __used = {
+#if LIVEPATCH_IS_CHECKPOINT
+	.fn = vpsadminos_nfqueue_livepatch_post_unpatch,
+#else
 	.fn = vpsadminos_nfqueue_livepatch_restore,
+#endif
 	.objname = NULL,
 };
 #endif

@@ -114,8 +114,13 @@ struct nf_nat_sip_hooks {
 			    const char **dptr,
 			    unsigned int *datalen);
 
+#ifdef __GENKSYMS__
+	void (*seq_adjust)(struct sk_buff *skb,
+			   unsigned int protoff, s16 off);
+#else
 	void (*seq_adjust)(struct sk_buff *skb,
 			   unsigned int protoff, s32 off);
+#endif
 
 	unsigned int (*expect)(struct sk_buff *skb,
 			       unsigned int protoff,

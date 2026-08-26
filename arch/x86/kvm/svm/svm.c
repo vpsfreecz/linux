@@ -28,8 +28,14 @@
 #include <linux/rwsem.h>
 #include <linux/cc_platform.h>
 #include <linux/smp.h>
+#include <linux/vpsadminos-livepatch-build.h>
 #if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
 #include <linux/livepatch.h>
+#include <linux/vpsadminos-livepatch-foundation.h>
+#endif
+#ifdef __GENKSYMS__
+#undef LIVEPATCH_IS_CHECKPOINT
+#define LIVEPATCH_IS_CHECKPOINT 0
 #endif
 
 #include <asm/apic.h>
@@ -258,10 +264,32 @@ struct vpsadminos_svm_post_patch_callback {
 	char *objname;
 };
 
+#if LIVEPATCH_IS_CHECKPOINT
+struct vpsadminos_svm_pre_patch_callback {
+	int (*fn)(struct klp_object *obj);
+	char *objname;
+};
+#endif
+
 struct vpsadminos_svm_pre_unpatch_callback {
 	void (*fn)(struct klp_object *obj);
 	char *objname;
 };
+
+#if LIVEPATCH_IS_CHECKPOINT
+struct vpsadminos_svm_post_unpatch_callback {
+	void (*fn)(struct klp_object *obj);
+	char *objname;
+};
+
+static struct vpsadminos_klp_target_token *vpsadminos_svm_target_token;
+
+static int vpsadminos_svm_livepatch_pre_patch(struct klp_object *obj)
+{
+	return vpsadminos_klp_checkpoint_target_claim(obj,
+						&vpsadminos_svm_target_token);
+}
+#endif
 
 static void vpsadminos_svm_bump_asid_generation_cpu(void *unused)
 {
@@ -277,6 +305,21 @@ static void vpsadminos_svm_bump_asid_generation(struct klp_object *obj)
 	on_each_cpu(vpsadminos_svm_bump_asid_generation_cpu, NULL, 1);
 }
 
+#if LIVEPATCH_IS_CHECKPOINT
+static void vpsadminos_svm_livepatch_post_unpatch(struct klp_object *obj)
+{
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_svm_target_token);
+}
+
+static struct vpsadminos_svm_pre_patch_callback
+vpsadminos_svm_pre_patch_data
+__section(".kpatch.callbacks.pre_patch") __used = {
+	.fn = vpsadminos_svm_livepatch_pre_patch,
+	.objname = NULL,
+};
+#endif
+
 static struct vpsadminos_svm_post_patch_callback
 vpsadminos_svm_post_patch_data
 __section(".kpatch.callbacks.post_patch") __used = {
@@ -290,6 +333,15 @@ __section(".kpatch.callbacks.pre_unpatch") __used = {
 	.fn = vpsadminos_svm_bump_asid_generation,
 	.objname = NULL,
 };
+
+#if LIVEPATCH_IS_CHECKPOINT
+static struct vpsadminos_svm_post_unpatch_callback
+vpsadminos_svm_post_unpatch_data
+__section(".kpatch.callbacks.post_unpatch") __used = {
+	.fn = vpsadminos_svm_livepatch_post_unpatch,
+	.objname = NULL,
+};
+#endif
 #endif
 
 /*

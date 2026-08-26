@@ -55,9 +55,11 @@
 #include <linux/utsname.h>
 #include <linux/freezer.h>
 #include <linux/iversion.h>
-#ifdef CONFIG_LIVEPATCH
+#if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
 #include <linux/livepatch.h>
 #include <linux/vpsadminos-livepatch.h>
+#include <linux/vpsadminos-livepatch-build.h>
+#include <linux/vpsadminos-livepatch-foundation.h>
 #include <net/net_namespace.h>
 #endif
 
@@ -10938,6 +10940,11 @@ static int nfs41_free_stateid(struct nfs_server *server,
 }
 
 #ifdef CONFIG_LIVEPATCH
+#if LIVEPATCH_IS_CHECKPOINT
+static struct vpsadminos_klp_target_token *
+	vpsadminos_nfs_free_stateid_target_token;
+#endif
+
 static bool
 vpsadminos_nfs_free_stateid_task_match(const struct rpc_task *task,
 				       const void *data)
@@ -10992,15 +10999,29 @@ static int vpsadminos_nfs_freeid_pre_patch(struct klp_object *obj)
 {
 	struct vpsadminos_nfs_free_stateid_control *control;
 	bool busy;
+#if LIVEPATCH_IS_CHECKPOINT
+	int ret;
 
+	ret = vpsadminos_klp_checkpoint_target_claim(obj,
+						     &vpsadminos_nfs_free_stateid_target_token);
+	if (ret)
+		return ret;
+#else
 	(void)obj;
+#endif
 	control = klp_shadow_get_or_alloc((void *)&nfs41_free_stateid_ops,
 					  VPSADMINOS_NFS_FREE_STATEID_CONTROL_SHADOW_ID,
 					  sizeof(*control), GFP_KERNEL,
 					  vpsadminos_nfs_free_stateid_control_ctor,
 					  NULL);
-	if (!control)
+	if (!control) {
+#if LIVEPATCH_IS_CHECKPOINT
+		ret = -ENOMEM;
+		goto release_target;
+#else
 		return -ENOMEM;
+#endif
+	}
 
 	mutex_lock(&control->gate);
 	spin_lock(&control->lock);
@@ -11008,10 +11029,22 @@ static int vpsadminos_nfs_freeid_pre_patch(struct klp_object *obj)
 	spin_unlock(&control->lock);
 	if (!control->active && busy) {
 		mutex_unlock(&control->gate);
+#if LIVEPATCH_IS_CHECKPOINT
+		ret = -EBUSY;
+		goto release_target;
+#else
 		return -EBUSY;
+#endif
 	}
 	mutex_unlock(&control->gate);
 	return 0;
+
+#if LIVEPATCH_IS_CHECKPOINT
+release_target:
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_nfs_free_stateid_target_token);
+	return ret;
+#endif
 }
 
 static void vpsadminos_nfs_freeid_post_patch(struct klp_object *obj)
@@ -11034,8 +11067,13 @@ static void vpsadminos_nfs_freeid_pre_unpatch(struct klp_object *obj)
 
 	(void)obj;
 	control = vpsadminos_nfs_free_stateid_control_get();
-	if (!control)
+	if (!control) {
+#if LIVEPATCH_IS_CHECKPOINT
+		vpsadminos_klp_checkpoint_target_release(
+			obj, &vpsadminos_nfs_free_stateid_target_token);
+#endif
 		return;
+	}
 
 	mutex_lock(&control->gate);
 	control->active = false;
@@ -11079,6 +11117,10 @@ static void vpsadminos_nfs_freeid_post_unpatch(struct klp_object *obj)
 		klp_shadow_free((void *)&nfs41_free_stateid_ops,
 				VPSADMINOS_NFS_FREE_STATEID_CONTROL_SHADOW_ID,
 				NULL);
+#if LIVEPATCH_IS_CHECKPOINT
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_nfs_free_stateid_target_token);
+#endif
 }
 
 struct vpsadminos_nfs_pre_patch_callback {

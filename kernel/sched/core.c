@@ -68,11 +68,28 @@
 #include <linux/workqueue_api.h>
 #include <linux/user_namespace.h>
 #include <linux/vpsadminos.h>
+#include <linux/vpsadminos-livepatch-build.h>
+
+#ifdef CONFIG_LIVEPATCH
+#include "kpatch-macros.h"
+#endif
 
 #ifdef CONFIG_PREEMPT_DYNAMIC
 # ifdef CONFIG_GENERIC_ENTRY
 #  include <linux/entry-common.h>
 # endif
+#endif
+
+#ifdef CONFIG_LIVEPATCH
+DECLARE_STATIC_KEY_FALSE(klp_sched_try_switch_key);
+
+static __always_inline void klp_sched_try_switch_preempt(void)
+{
+	if (static_branch_unlikely(&klp_sched_try_switch_key))
+		__klp_sched_try_switch();
+}
+#else
+static __always_inline void klp_sched_try_switch_preempt(void) {}
 #endif
 
 #include <uapi/linux/sched/types.h>
@@ -6910,6 +6927,7 @@ static void __sched notrace preempt_schedule_common(void)
 		 */
 		preempt_disable_notrace();
 		preempt_latency_start(1);
+		klp_sched_try_switch_preempt();
 		__schedule(SM_PREEMPT);
 		preempt_latency_stop(1);
 		preempt_enable_no_resched_notrace();
@@ -6997,6 +7015,7 @@ asmlinkage __visible void __sched notrace preempt_schedule_notrace(void)
 		 */
 		preempt_disable_notrace();
 		preempt_latency_start(1);
+		klp_sched_try_switch_preempt();
 		/*
 		 * Needs preempt disabled in case user_exit() is traced
 		 * and the tracer calls preempt_enable_notrace() causing
@@ -7053,6 +7072,7 @@ asmlinkage __visible void __sched preempt_schedule_irq(void)
 	do {
 		preempt_disable();
 		local_irq_enable();
+		klp_sched_try_switch_preempt();
 		__schedule(SM_PREEMPT);
 		local_irq_disable();
 		sched_preempt_enable_no_resched();
@@ -10901,3 +10921,9 @@ void sched_enq_and_set_task(struct sched_enq_and_set_ctx *ctx)
 		set_next_task(rq, ctx->p);
 }
 #endif	/* CONFIG_SCHED_CLASS_EXT */
+
+#if LIVEPATCH_IS_GUARD
+KPATCH_IGNORE_FUNCTION(preempt_schedule_common)
+KPATCH_IGNORE_FUNCTION(preempt_schedule_notrace)
+KPATCH_IGNORE_FUNCTION(preempt_schedule_irq)
+#endif

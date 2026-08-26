@@ -6,6 +6,8 @@
 
 extern struct klp_patch *klp_transition_patch;
 
+int klp_prepare_transition(struct klp_patch *patch);
+bool klp_transition_targets_module(const char *name);
 void klp_init_transition(struct klp_patch *patch, int state);
 void klp_cancel_transition(void);
 void klp_start_transition(void);

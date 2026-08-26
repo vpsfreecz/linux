@@ -54,7 +54,7 @@
 #include <linux/highmem.h>
 #include <linux/uio.h>
 #include <linux/sched/mm.h>
-#ifdef CONFIG_LIVEPATCH
+#if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
 #include <linux/atomic.h>
 #include <linux/kallsyms.h>
 #include <linux/kprobes.h>

@@ -16,9 +16,15 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/nf_tables.h>
+#include <linux/vpsadminos-livepatch-build.h>
 #if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
 #include <linux/livepatch.h>
 #include <linux/vpsadminos-livepatch.h>
+#include <linux/vpsadminos-livepatch-foundation.h>
+#endif
+#ifdef __GENKSYMS__
+#undef LIVEPATCH_IS_CHECKPOINT
+#define LIVEPATCH_IS_CHECKPOINT 0
 #endif
 #include <net/netfilter/nf_flow_table.h>
 #include <net/netfilter/nf_tables_core.h>
@@ -11143,6 +11149,9 @@ struct vpsadminos_nftables_post_unpatch_callback {
 
 static bool vpsadminos_nftables_transition_quiesced;
 static bool vpsadminos_nftables_patch_active;
+#if LIVEPATCH_IS_CHECKPOINT
+static struct vpsadminos_klp_target_token *vpsadminos_nftables_target_token;
+#endif
 
 static noinline void vpsadminos_nftables_livepatch_notifier_frame(void)
 {
@@ -11171,24 +11180,52 @@ vpsadminos_nftables_livepatch_quiesce(struct klp_object *obj)
 {
 	int ret;
 
+#if LIVEPATCH_IS_CHECKPOINT
+	ret = vpsadminos_klp_checkpoint_target_claim(obj,
+						     &vpsadminos_nftables_target_token);
+	if (ret)
+		return ret;
+#endif
 	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
 		return 0;
-	if (WARN_ON_ONCE(vpsadminos_nftables_transition_quiesced))
+	if (WARN_ON_ONCE(vpsadminos_nftables_transition_quiesced)) {
+#if LIVEPATCH_IS_CHECKPOINT
+		ret = -EBUSY;
+		goto release_target;
+#else
 		return -EBUSY;
+#endif
+	}
 
 	ret = vpsadminos_pernet_try_register
 				(&vpsadminos_nftables_netns_guard);
-	if (ret)
+	if (ret) {
+#if LIVEPATCH_IS_CHECKPOINT
+		goto release_target;
+#else
 		return ret;
+#endif
+	}
 
 	ret = vpsadminos_nfnl_try_unregister(&nf_tables_subsys);
 	if (ret) {
 		unregister_pernet_subsys(&vpsadminos_nftables_netns_guard);
+#if LIVEPATCH_IS_CHECKPOINT
+		goto release_target;
+#else
 		return ret;
+#endif
 	}
 
 	WRITE_ONCE(vpsadminos_nftables_transition_quiesced, true);
 	return 0;
+
+#if LIVEPATCH_IS_CHECKPOINT
+release_target:
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_nftables_target_token);
+	return ret;
+#endif
 }
 
 static void
@@ -11250,11 +11287,21 @@ vpsadminos_nftables_livepatch_post_unpatch(struct klp_object *obj)
 {
 	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE) {
 		WRITE_ONCE(vpsadminos_nftables_patch_active, false);
+#if LIVEPATCH_IS_CHECKPOINT
+		goto release_target;
+#else
 		return;
+#endif
 	}
 
 	WRITE_ONCE(vpsadminos_nftables_patch_active, false);
 	vpsadminos_nftables_livepatch_restore();
+
+#if LIVEPATCH_IS_CHECKPOINT
+release_target:
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_nftables_target_token);
+#endif
 }
 
 static struct vpsadminos_nftables_pre_patch_callback

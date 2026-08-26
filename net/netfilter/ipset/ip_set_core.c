@@ -21,8 +21,14 @@
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter/ipset/ip_set.h>
+#include <linux/vpsadminos-livepatch-build.h>
 #if defined(CONFIG_LIVEPATCH) && !defined(__GENKSYMS__)
 #include <linux/livepatch.h>
+#include <linux/vpsadminos-livepatch-foundation.h>
+#endif
+#ifdef __GENKSYMS__
+#undef LIVEPATCH_IS_CHECKPOINT
+#define LIVEPATCH_IS_CHECKPOINT 0
 #endif
 
 static LIST_HEAD(ip_set_type_list);		/* all registered set types */
@@ -2262,6 +2268,9 @@ struct vpsadminos_ipset_post_unpatch_callback {
 };
 
 static bool vpsadminos_ipset_transition_quiesced;
+#if LIVEPATCH_IS_CHECKPOINT
+static struct vpsadminos_klp_target_token *vpsadminos_ipset_target_token;
+#endif
 
 static int vpsadminos_ipset_netns_hold(struct net *net)
 {
@@ -2284,23 +2293,51 @@ static int vpsadminos_ipset_livepatch_quiesce(struct klp_object *obj)
 {
 	int ret;
 
-	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
-		return 0;
-	if (WARN_ON_ONCE(vpsadminos_ipset_transition_quiesced))
-		return -EBUSY;
-
-	ret = vpsadminos_pernet_try_register(&vpsadminos_ipset_netns_guard);
+#if LIVEPATCH_IS_CHECKPOINT
+	ret = vpsadminos_klp_checkpoint_target_claim(obj,
+						     &vpsadminos_ipset_target_token);
 	if (ret)
 		return ret;
+#endif
+	if (!obj->mod || obj->mod->state != MODULE_STATE_LIVE)
+		return 0;
+	if (WARN_ON_ONCE(vpsadminos_ipset_transition_quiesced)) {
+#if LIVEPATCH_IS_CHECKPOINT
+		ret = -EBUSY;
+		goto release_target;
+#else
+		return -EBUSY;
+#endif
+	}
+
+	ret = vpsadminos_pernet_try_register(&vpsadminos_ipset_netns_guard);
+	if (ret) {
+#if LIVEPATCH_IS_CHECKPOINT
+		goto release_target;
+#else
+		return ret;
+#endif
+	}
 
 	ret = vpsadminos_nfnl_try_unregister(&ip_set_netlink_subsys);
 	if (ret) {
 		unregister_pernet_subsys(&vpsadminos_ipset_netns_guard);
+#if LIVEPATCH_IS_CHECKPOINT
+		goto release_target;
+#else
 		return ret;
+#endif
 	}
 
 	WRITE_ONCE(vpsadminos_ipset_transition_quiesced, true);
 	return 0;
+
+#if LIVEPATCH_IS_CHECKPOINT
+release_target:
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_ipset_target_token);
+	return ret;
+#endif
 }
 
 static void vpsadminos_ipset_livepatch_restore(struct klp_object *obj)
@@ -2317,6 +2354,15 @@ static void vpsadminos_ipset_livepatch_restore(struct klp_object *obj)
 	unregister_pernet_subsys(&vpsadminos_ipset_netns_guard);
 	WRITE_ONCE(vpsadminos_ipset_transition_quiesced, false);
 }
+
+#if LIVEPATCH_IS_CHECKPOINT
+static void vpsadminos_ipset_livepatch_post_unpatch(struct klp_object *obj)
+{
+	vpsadminos_ipset_livepatch_restore(obj);
+	vpsadminos_klp_checkpoint_target_release(obj,
+						 &vpsadminos_ipset_target_token);
+}
+#endif
 
 static struct vpsadminos_ipset_pre_patch_callback
 vpsadminos_ipset_pre_patch_data
@@ -2335,7 +2381,11 @@ __section(".kpatch.callbacks.post_patch") __used = {
 static struct vpsadminos_ipset_post_unpatch_callback
 vpsadminos_ipset_post_unpatch_data
 __section(".kpatch.callbacks.post_unpatch") __used = {
+#if LIVEPATCH_IS_CHECKPOINT
+	.fn = vpsadminos_ipset_livepatch_post_unpatch,
+#else
 	.fn = vpsadminos_ipset_livepatch_restore,
+#endif
 	.objname = NULL,
 };
 #endif

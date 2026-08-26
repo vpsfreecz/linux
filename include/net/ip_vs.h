@@ -516,10 +516,16 @@ struct ip_vs_protocol {
 
 	const char *(*state_name)(int state);
 
+#ifdef __GENKSYMS__
+	void (*state_transition)(struct ip_vs_conn *cp, int direction,
+				 const struct sk_buff *skb,
+				 struct ip_vs_proto_data *pd);
+#else
 	void (*state_transition)(struct ip_vs_conn *cp, int direction,
 				 const struct sk_buff *skb,
 				 struct ip_vs_proto_data *pd,
 				 unsigned int iph_len);
+#endif
 
 	int (*register_app)(struct netns_ipvs *ipvs, struct ip_vs_app *inc);
 
@@ -1625,9 +1631,15 @@ int ip_vs_tunnel_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 		      struct ip_vs_protocol *pp, struct ip_vs_iphdr *iph);
 int ip_vs_dr_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 		  struct ip_vs_protocol *pp, struct ip_vs_iphdr *iph);
+#ifdef __GENKSYMS__
+int ip_vs_icmp_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
+		    struct ip_vs_protocol *pp, int offset,
+		    unsigned int hooknum, struct ip_vs_iphdr *iph);
+#else
 int ip_vs_icmp_xmit(struct sk_buff *skb, struct ip_vs_conn *cp,
 		    struct ip_vs_protocol *pp, unsigned int toff,
 		    unsigned int hooknum, struct ip_vs_iphdr *ciph);
+#endif
 void ip_vs_dest_dst_rcu_free(struct rcu_head *head);
 
 #ifdef CONFIG_IP_VS_IPV6
@@ -1639,9 +1651,15 @@ int ip_vs_tunnel_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 			 struct ip_vs_protocol *pp, struct ip_vs_iphdr *iph);
 int ip_vs_dr_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 		     struct ip_vs_protocol *pp, struct ip_vs_iphdr *iph);
+#ifdef __GENKSYMS__
+int ip_vs_icmp_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
+		       struct ip_vs_protocol *pp, int offset,
+		       unsigned int hooknum, struct ip_vs_iphdr *iph);
+#else
 int ip_vs_icmp_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 		       struct ip_vs_protocol *pp, unsigned int toff,
 		       unsigned int hooknum, struct ip_vs_iphdr *ciph);
+#endif
 #endif
 
 #ifdef CONFIG_SYSCTL
@@ -1705,14 +1723,24 @@ static inline char ip_vs_fwd_tag(struct ip_vs_conn *cp)
 	return fwd;
 }
 
+#ifdef __GENKSYMS__
+void ip_vs_nat_icmp(struct sk_buff *skb, struct ip_vs_protocol *pp,
+		    struct ip_vs_conn *cp, int dir);
+#else
 void ip_vs_nat_icmp(struct sk_buff *skb, struct ip_vs_protocol *pp,
 		    struct ip_vs_conn *cp, int dir, unsigned int toff,
 		    bool has_ports, struct ip_vs_iphdr *ciph);
+#endif
 
 #ifdef CONFIG_IP_VS_IPV6
+#ifdef __GENKSYMS__
+void ip_vs_nat_icmp_v6(struct sk_buff *skb, struct ip_vs_protocol *pp,
+		       struct ip_vs_conn *cp, int dir);
+#else
 void ip_vs_nat_icmp_v6(struct sk_buff *skb, struct ip_vs_protocol *pp,
 		       struct ip_vs_conn *cp, int dir, unsigned int toff,
 		       bool has_ports, struct ip_vs_iphdr *ciph);
+#endif
 #endif
 
 static inline __wsum ip_vs_check_diff4(__be32 old, __be32 new, __wsum oldsum)

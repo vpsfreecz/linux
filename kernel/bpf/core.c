@@ -41,6 +41,8 @@
 #include <linux/vpsadminos-livepatch.h>
 #ifdef CONFIG_LIVEPATCH
 #include <linux/livepatch.h>
+#include <linux/vpsadminos-livepatch-build.h>
+#include <linux/vpsadminos-livepatch-foundation.h>
 #endif
 
 #include <asm/barrier.h>
@@ -1015,10 +1017,16 @@ static int vpsadminos_livepatch_pre_patch(struct klp_object *obj)
 {
 	int ret;
 
-	(void)obj;
-	ret = vpsadminos_saferet_livepatch_pre_patch();
+#if LIVEPATCH_IS_CHECKPOINT
+	ret = vpsadminos_v7_checkpoint_pre_patch(obj);
 	if (ret)
 		return ret;
+#else
+	(void)obj;
+#endif
+	ret = vpsadminos_saferet_livepatch_pre_patch();
+	if (ret)
+		goto cancel_checkpoint;
 
 	ret = vpsadminos_rhashtable_livepatch_pre_patch();
 	if (ret)
@@ -1038,6 +1046,10 @@ restore_rhashtable:
 	vpsadminos_rhashtable_livepatch_post_unpatch();
 restore_saferet:
 	vpsadminos_saferet_livepatch_post_unpatch();
+cancel_checkpoint:
+#if LIVEPATCH_IS_CHECKPOINT
+	vpsadminos_v7_checkpoint_post_unpatch(obj);
+#endif
 	return ret;
 }
 
@@ -1071,6 +1083,9 @@ static void vpsadminos_livepatch_post_unpatch(struct klp_object *obj)
 	vpsadminos_pipapo_livepatch_post_unpatch();
 	vpsadminos_rhashtable_livepatch_post_unpatch();
 	vpsadminos_saferet_livepatch_post_unpatch();
+#if LIVEPATCH_IS_CHECKPOINT
+	vpsadminos_v7_checkpoint_post_unpatch(obj);
+#endif
 }
 
 static struct vpsadminos_pre_patch_callback vpsadminos_pre_patch_data
