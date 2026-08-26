@@ -203,9 +203,9 @@ static bool vpsadminos_klp_foundation_state_valid(
 
 static const struct vpsadminos_klp_artifact_spec
 vpsadminos_klp_foundation_anchor_spec = {
-	.module_name = "livepatch_6",
-	.artifact_id = VPSADMINOS_KLP_ID(VPSADMINOS_KLP_V6_ANCHOR_ID_HI,
-					 VPSADMINOS_KLP_V6_ANCHOR_ID_LO),
+	.module_name = VPSADMINOS_KLP_ANCHOR_MODULE_NAME,
+	.artifact_id = VPSADMINOS_KLP_ID(VPSADMINOS_KLP_ANCHOR_ID_HI,
+					 VPSADMINOS_KLP_ANCHOR_ID_LO),
 	.inventory_id = VPSADMINOS_KLP_ID(LIVEPATCH_ANCHOR_INVENTORY_ID_HI,
 					  LIVEPATCH_ANCHOR_INVENTORY_ID_LO),
 	.function_count = LIVEPATCH_ANCHOR_FUNCTIONS,
@@ -215,9 +215,9 @@ vpsadminos_klp_foundation_anchor_spec = {
 
 static const struct vpsadminos_klp_artifact_spec
 vpsadminos_klp_foundation_guard_spec = {
-	.module_name = "livepatch_transition_guard",
-	.artifact_id = VPSADMINOS_KLP_ID(VPSADMINOS_KLP_V7_GUARD_ID_HI,
-					 VPSADMINOS_KLP_V7_GUARD_ID_LO),
+	.module_name = VPSADMINOS_KLP_GUARD_MODULE_NAME,
+	.artifact_id = VPSADMINOS_KLP_ID(VPSADMINOS_KLP_GUARD_ID_HI,
+					 VPSADMINOS_KLP_GUARD_ID_LO),
 	.inventory_id = VPSADMINOS_KLP_ID(LIVEPATCH_GUARD_INVENTORY_ID_HI,
 					  LIVEPATCH_GUARD_INVENTORY_ID_LO),
 	.function_count = LIVEPATCH_GUARD_FUNCTIONS,
@@ -227,9 +227,9 @@ vpsadminos_klp_foundation_guard_spec = {
 
 static const struct vpsadminos_klp_artifact_spec
 vpsadminos_klp_foundation_self_spec = {
-	.module_name = "lp61295_foundation",
-	.artifact_id = VPSADMINOS_KLP_ID(VPSADMINOS_KLP_V7_FOUNDATION_ID_HI,
-					 VPSADMINOS_KLP_V7_FOUNDATION_ID_LO),
+	.module_name = VPSADMINOS_KLP_FOUNDATION_MODULE_NAME,
+	.artifact_id = VPSADMINOS_KLP_ID(VPSADMINOS_KLP_FOUNDATION_ID_HI,
+					 VPSADMINOS_KLP_FOUNDATION_ID_LO),
 	.inventory_id = VPSADMINOS_KLP_ID(LIVEPATCH_INVENTORY_ID_HI,
 					  LIVEPATCH_INVENTORY_ID_LO),
 	.function_count = LIVEPATCH_EXPECTED_FUNCTIONS,
@@ -387,7 +387,8 @@ static int vpsadminos_klp_target_claim(
 	provisional = !state->active && klp_transition_patch &&
 		      klp_transition_patch->replace &&
 		      klp_transition_patch->mod &&
-		      !strcmp(klp_transition_patch->mod->name, "livepatch_7");
+		      !strcmp(klp_transition_patch->mod->name,
+			      VPSADMINOS_KLP_CHECKPOINT_MODULE_NAME);
 #endif
 	available = state->active || prepared;
 #if LIVEPATCH_IS_CHECKPOINT
@@ -710,8 +711,8 @@ static void vpsadminos_klp_foundation_commit_absorb(
 
 	WRITE_ONCE(new->owner, prepared->checkpoint);
 	new->owner_id =
-		VPSADMINOS_KLP_ID(VPSADMINOS_KLP_V7_CHECKPOINT_ID_HI,
-				  VPSADMINOS_KLP_V7_CHECKPOINT_ID_LO);
+		VPSADMINOS_KLP_ID(VPSADMINOS_KLP_CHECKPOINT_ID_HI,
+				  VPSADMINOS_KLP_CHECKPOINT_ID_LO);
 	WRITE_ONCE(new->absorbing, false);
 	smp_store_release(&new->active, true);
 	kfree(prepared);
