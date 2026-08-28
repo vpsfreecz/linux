@@ -8,11 +8,13 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/livepatch.h>
+#if !defined(__GENKSYMS__)
 #include <linux/moduleparam.h>
 #include <linux/string.h>
 #include <linux/utsname.h>
 #include <linux/vpsadminos-livepatch-build.h>
 #include <linux/vpsadminos-livepatch-foundation.h>
+#endif
 #include "core.h"
 #include "state.h"
 #include "transition.h"
@@ -20,7 +22,7 @@
 #define klp_for_each_state(patch, state)		\
 	for (state = patch->states; state && state->id; state++)
 
-#if LIVEPATCH_IS_GENERATION_FINAL || LIVEPATCH_IS_CHECKPOINT
+#if !defined(__GENKSYMS__) && (LIVEPATCH_IS_GENERATION_FINAL || LIVEPATCH_IS_CHECKPOINT)
 static struct vpsadminos_klp_coverage_state vpsadminos_coverage = {
 	.magic = VPSADMINOS_KLP_COVERAGE_MAGIC,
 	.abi_version = 1,

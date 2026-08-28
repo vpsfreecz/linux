@@ -159,6 +159,7 @@ int vpsadminos_nfnl_try_unregister(const struct nfnetlink_subsystem *n)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(vpsadminos_nfnl_try_unregister);
 #endif
 
 static inline const struct nfnetlink_subsystem *nfnetlink_get_subsys(u16 type)

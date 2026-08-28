@@ -1398,6 +1398,7 @@ int vpsadminos_pernet_try_register(struct pernet_operations *ops)
 
 	return error;
 }
+EXPORT_SYMBOL_GPL(vpsadminos_pernet_try_register);
 #endif
 
 /**
