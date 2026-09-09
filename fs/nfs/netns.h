@@ -19,6 +19,8 @@ struct bl_dev_msg {
 struct nfs_netns_client;
 
 struct nfs_net {
+	struct list_head ns_list; /* Protected by nfs_net_list_lock */
+	struct net *net;
 	struct cache_detail *nfs_dns_resolve;
 	struct rpc_pipe *bl_device_pipe;
 	struct bl_dev_msg bl_mount_reply;
@@ -26,6 +28,9 @@ struct nfs_net {
 	struct mutex bl_mutex;
 	struct list_head nfs_client_list;
 	struct list_head nfs_volume_list;
+	/* Serialize volume publication/removal with explicit shutdown. */
+	struct mutex nfs_server_lock;
+	bool shutdown;
 #if IS_ENABLED(CONFIG_NFS_V4)
 	struct idr cb_ident_idr; /* Protected by nfs_client_lock */
 	unsigned short nfs_callback_tcpport;

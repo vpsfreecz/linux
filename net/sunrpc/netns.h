@@ -20,6 +20,7 @@ struct sunrpc_net {
 
 	struct list_head all_clients;
 	spinlock_t rpc_client_lock;
+	bool clients_shutdown;
 
 	struct rpc_clnt *rpcb_local_clnt;
 	struct rpc_clnt *rpcb_local_clnt4;

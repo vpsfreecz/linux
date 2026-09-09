@@ -1,0 +1,54 @@
+What:		/sys/fs/nfs/net/nfs_client/shutdown
+Date:		September 2026
+Contact:	vpsAdminOS developers <jakub.skokan@vpsfree.cz>
+Description:
+		Host-controlled, terminal cancellation of NFS client activity in
+		the network namespace selected by the sysfs mount. Mode is 0600.
+		Reading returns 0 before cancellation and 1 after cancellation.
+		Writing the integer 1 marks NFS clients and volumes shut down,
+		wakes initialization/recovery waiters and cancels client SUNRPC
+		tasks with EIO. Subsequent client RPC admission is terminally
+		cancelled, including clients created by a concurrent mount.
+
+		Writes require CAP_SYS_ADMIN in the initial user namespace.
+		Network namespaces owned by the initial user namespace are
+		rejected with EPERM, including non-initial network namespaces.
+		Values other than 1 are rejected with EINVAL. Repeated writes
+		of 1 are permitted. There is no operation to undo cancellation.
+
+		This is a teardown operation, not a retry policy or a substitute
+		for sync/unmount. It can discard pending writes and does not
+		wait for all tasks, mounts or namespace references to drain.
+		It cancels all client SUNRPC activity in the namespace, not
+		only RPC belonging to one NFS mount (for example, NLM and
+		rpcbind client calls are also affected). NFS server activity is
+		not itself shut down. Other network namespaces are not selected.
+		Create fresh namespaces before restarting the workload.
+
+What:		/sys/fs/nfs/net/nfs_client/shutdown_tree
+Date:		September 2026
+Contact:	vpsAdminOS developers <jakub.skokan@vpsfree.cz>
+Description:
+		Host-controlled, terminal cancellation of client SUNRPC and NFS
+		for the user namespace owning the network namespace selected by
+		the sysfs mount, and all descendants of that user namespace.
+		The permissions, accepted write value, error handling, data-loss
+		warning and non-waiting semantics are as for shutdown above.
+
+		Writing 1 installs a permanent user-namespace admission barrier
+		before cancelling existing clients and marking NFS volumes shut
+		down. The scope includes every network namespace owned by that
+		user namespace or a descendant, even if no process occupies it
+		or its creation is still in progress. Future network namespaces
+		and future descendant user namespaces inherit the barrier.
+		Sibling or ancestor user namespaces are not selected.
+
+		Reading returns 1 when the owner or any ancestor carries this
+		barrier, otherwise 0. Cancelling only one network namespace via
+		shutdown does not set the tree barrier. There is no reset: a
+		restarted workload needs a fresh user namespace outside the
+		cancelled subtree, as well as fresh network namespaces.
+
+		The caller must authenticate namespace ownership and select
+		the intended teardown root. Two workloads sharing the same
+		owner user namespace cannot be isolated by this operation.

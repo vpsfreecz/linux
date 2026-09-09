@@ -212,11 +212,13 @@ extern void nfs_umount(const struct nfs_mount_request *info);
 extern const struct rpc_program nfs_program;
 extern void nfs_clients_init(struct net *net);
 extern void nfs_clients_exit(struct net *net);
+void nfs_shutdown_net(struct net *net);
+void nfs_shutdown_userns(struct user_namespace *user_ns);
 extern struct nfs_client *nfs_alloc_client(const struct nfs_client_initdata *);
 int nfs_create_rpc_client(struct nfs_client *, const struct nfs_client_initdata *, rpc_authflavor_t);
 struct nfs_client *nfs_get_client(const struct nfs_client_initdata *);
 int nfs_probe_server(struct nfs_server *, struct nfs_fh *);
-void nfs_server_insert_lists(struct nfs_server *);
+int nfs_server_insert_lists(struct nfs_server *server);
 void nfs_server_remove_lists(struct nfs_server *);
 void nfs_init_timeout_values(struct rpc_timeout *to, int proto, int timeo, int retrans);
 int nfs_init_server_rpcclient(struct nfs_server *, const struct rpc_timeout *t,
@@ -246,6 +248,7 @@ extern bool nfs_client_init_is_complete(const struct nfs_client *clp);
 extern int nfs_client_init_status(const struct nfs_client *clp);
 extern int nfs_wait_client_init_complete(const struct nfs_client *clp);
 extern void nfs_mark_client_ready(struct nfs_client *clp, int state);
+extern void nfs_mark_client_ready_locked(struct nfs_client *clp, int state);
 extern struct nfs_client *nfs4_set_ds_client(struct nfs_server *mds_srv,
 					     const struct sockaddr_storage *ds_addr,
 					     int ds_addrlen, int ds_proto,
