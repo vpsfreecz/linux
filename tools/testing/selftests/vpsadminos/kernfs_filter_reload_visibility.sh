@@ -349,11 +349,35 @@ CHILD
 	rm -f "$ready" "$go" "$out"
 }
 
+assert_mounts_survive_view_changes()
+{
+	# Run only in a disposable mount namespace; never alter the caller's
+	# propagation tree. Both views allow these paths under the empty policy.
+	if ! unshare -m sh -eu -s <<'CHILD'
+mount --make-rprivate /
+mount --bind /proc/sys/net /proc/sys/net
+mount --bind /sys/devices/system/cpu/cpu0 /sys/devices/system/cpu/cpu0
+before=$(cat /proc/self/mountinfo)
+unshare -Ur sh -eu -c '
+	test -d /proc/sys
+	test -d /sys/devices/system/cpu/cpu0
+'
+test -d /proc/sys
+test -d /sys/devices/system/cpu/cpu0
+after=$(cat /proc/self/mountinfo)
+test "$before" = "$after"
+CHILD
+	then
+		fail "caller visibility changes detached procfs or sysfs mounts"
+	fi
+}
+
 require_root_and_feature
 make_policy_files
 trap restore_policy EXIT HUP INT TERM
 
 install_policy "$EMPTY_POLICY" || exit 1
+assert_mounts_survive_view_changes
 if ! "$TRANSACTION_HELPER" "$REPLACE" "$ACTIVE" "$STATS" "$EMPTY_POLICY"; then
 	fail "kernfs-filter replacement transaction checks failed"
 fi

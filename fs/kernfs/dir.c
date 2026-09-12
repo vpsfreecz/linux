@@ -1381,11 +1381,11 @@ static int kernfs_dop_revalidate(struct inode *dir, const struct qstr *name,
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
-	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
-		return 0;
-
 	/* Negative hashed dentry? */
 	if (d_really_is_negative(dentry)) {
+		if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
+			return 0;
+
 		/* If the kernfs parent node has changed discard and
 		 * proceed to ->lookup.
 		 *
@@ -1450,8 +1450,15 @@ static int kernfs_dop_revalidate(struct inode *dir, const struct qstr *name,
 	    kernfs_info(dentry->d_sb)->ns != kn->ns)
 		goto out_bad;
 
-	if (kernfs_vpsa_cpu_path_hidden_locked(kn, NULL, NULL))
-		goto out_bad;
+	/* Visibility is per caller, but positive dentries and their submounts
+	 * are shared. Deny this lookup without invalidating another view.
+	 */
+	if (kernfs_vpsa_cpu_path_hidden_locked(kn, NULL, NULL) ||
+	    kernfs_vpsa_kernfs_filter_kn_decide_locked(kn, NULL, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE) {
+		up_read(&root->kernfs_rwsem);
+		return -ENOENT;
+	}
 
 	up_read(&root->kernfs_rwsem);
 	return 1;

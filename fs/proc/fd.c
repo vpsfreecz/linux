@@ -164,8 +164,9 @@ static int tid_fd_revalidate(struct inode *dir, const struct qstr *name,
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
-	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
-		return 0;
+	if (proc_kernfs_filter_dentry_decide(dentry, NULL, MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
 
 	inode = d_inode(dentry);
 	task = get_proc_task(inode);

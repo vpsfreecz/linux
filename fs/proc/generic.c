@@ -357,11 +357,15 @@ static int proc_misc_d_revalidate(struct inode *dir, const struct qstr *name,
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
-	if (vpsa_kernfs_filter_dentry_visibility_stale(dentry))
-		return 0;
-
 	if (atomic_read(&PDE(d_inode(dentry))->in_use) < 0)
 		return 0; /* revalidate */
+	/* A policy view change does not remove the underlying proc entry.
+	 * Returning zero would invalidate this shared dentry and detach mounts
+	 * below it, including mounts installed by a different user namespace.
+	 */
+	if (vpsa_proc_pde_decide(PDE(d_inode(dentry)), MAY_READ) ==
+	    VPSA_KERNFS_FILTER_DECISION_HIDE)
+		return -ENOENT;
 	return 1;
 }
 
