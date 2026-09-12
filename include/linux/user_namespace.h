@@ -85,6 +85,8 @@ struct user_namespace {
 	kgid_t			group;
 	struct ns_common	ns;
 	unsigned long		flags;
+	/* Host-only terminal SUNRPC admission barrier for this subtree. */
+	bool			sunrpc_shutdown;
 	/* parent_could_setfcap: true if the creator if this ns had CAP_SETFCAP
 	 * in its effective capability set at the child ns creation time. */
 	bool			parent_could_setfcap;
