@@ -30,6 +30,7 @@
 #include <linux/sunrpc/xprtmultipath.h>
 
 struct rpc_inode;
+struct user_namespace;
 struct rpc_sysfs_client {
 	struct kobject kobject;
 	struct net *net;
@@ -44,7 +45,9 @@ struct rpc_sysfs_client {
 struct rpc_clnt {
 	refcount_t		cl_count;	/* Number of references */
 	unsigned int		cl_clid;	/* client id */
-	struct list_head	cl_clients;	/* Global list of clients */
+	struct list_head	cl_clients;	/* Per-net list of clients */
+	struct list_head	cl_global_list; /* All registered clients */
+	struct net		*cl_registered_net; /* Pinned until unregister */
 	struct list_head	cl_tasks;	/* List of tasks */
 	atomic_t		cl_pid;		/* task PID counter */
 	spinlock_t		cl_lock;	/* spinlock */
@@ -63,8 +66,8 @@ struct rpc_clnt {
 				cl_discrtry : 1,/* disconnect before retry */
 				cl_noretranstimeo: 1,/* No retransmit timeouts */
 				cl_autobind : 1,/* use getport() */
-				cl_chatty   : 1,/* be verbose */
-				cl_shutdown : 1;/* rpc immediate -EIO */
+				cl_chatty   : 1;/* be verbose */
+	bool			cl_shutdown;	/* terminal cancellation, cl_lock */
 	struct xprtsec_parms	cl_xprtsec;	/* transport security policy */
 
 	struct rpc_rtt *	cl_rtt;		/* RTO estimator data */
@@ -187,6 +190,10 @@ int		rpc_switch_client_transport(struct rpc_clnt *,
 
 void		rpc_shutdown_client(struct rpc_clnt *);
 void		rpc_hold_client(struct rpc_clnt *);
+void		rpc_cancel_client(struct rpc_clnt *clnt);
+void		rpc_cancel_net(struct net *net);
+bool		rpc_userns_shutdown(const struct user_namespace *user_ns);
+void		rpc_cancel_userns(struct user_namespace *user_ns);
 void		rpc_release_client(struct rpc_clnt *);
 void		rpc_task_release_transport(struct rpc_task *);
 void		rpc_task_release_client(struct rpc_task *);
