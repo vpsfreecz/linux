@@ -29,6 +29,7 @@
 #include <linux/rcupdate.h>
 #include <linux/utsname.h>
 #include <linux/workqueue.h>
+#include <linux/user_namespace.h>
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/un.h>
@@ -49,6 +50,12 @@
 #endif
 
 static DECLARE_WAIT_QUEUE_HEAD(destroy_wait);
+/* Serializes subtree shutdown with RPC admission, including clients in
+ * network namespaces whose pernet initialization has not yet completed.
+ * Lock order: rpc_global_lock -> sn->rpc_client_lock -> clnt->cl_lock.
+ */
+static DEFINE_SPINLOCK(rpc_global_lock);
+static LIST_HEAD(rpc_global_clients);
 
 static void	call_start(struct rpc_task *task);
 static void	call_reserve(struct rpc_task *task);
@@ -74,24 +81,54 @@ static int	rpc_ping(struct rpc_clnt *clnt);
 static int	rpc_ping_noreply(struct rpc_clnt *clnt);
 static void	rpc_check_timeout(struct rpc_task *task);
 
+bool rpc_userns_shutdown(const struct user_namespace *user_ns)
+{
+	for (; user_ns; user_ns = user_ns->parent) {
+		if (READ_ONCE(user_ns->sunrpc_shutdown))
+			return true;
+	}
+	return false;
+}
+EXPORT_SYMBOL_GPL(rpc_userns_shutdown);
+
 static void rpc_register_client(struct rpc_clnt *clnt)
 {
-	struct net *net = rpc_net_ns(clnt);
+	struct net *net = get_net(rpc_net_ns(clnt));
 	struct sunrpc_net *sn = net_generic(net, sunrpc_net_id);
 
+	spin_lock(&rpc_global_lock);
 	spin_lock(&sn->rpc_client_lock);
+	if (sn->clients_shutdown || rpc_userns_shutdown(net->user_ns))
+		rpc_cancel_client(clnt);
+	clnt->cl_registered_net = net;
 	list_add(&clnt->cl_clients, &sn->all_clients);
+	list_add(&clnt->cl_global_list, &rpc_global_clients);
 	spin_unlock(&sn->rpc_client_lock);
+	spin_unlock(&rpc_global_lock);
 }
 
 static void rpc_unregister_client(struct rpc_clnt *clnt)
 {
-	struct net *net = rpc_net_ns(clnt);
-	struct sunrpc_net *sn = net_generic(net, sunrpc_net_id);
+	struct net *net;
+	struct sunrpc_net *sn;
 
+	spin_lock(&rpc_global_lock);
+	net = clnt->cl_registered_net;
+	/* A failed transport replacement may also fail to re-register the
+	 * original transport. Final release must tolerate that empty state.
+	 */
+	if (!net) {
+		spin_unlock(&rpc_global_lock);
+		return;
+	}
+	sn = net_generic(net, sunrpc_net_id);
 	spin_lock(&sn->rpc_client_lock);
 	list_del(&clnt->cl_clients);
+	list_del(&clnt->cl_global_list);
+	clnt->cl_registered_net = NULL;
 	spin_unlock(&sn->rpc_client_lock);
+	spin_unlock(&rpc_global_lock);
+	put_net(net);
 }
 
 static void __rpc_clnt_remove_pipedir(struct rpc_clnt *clnt)
@@ -931,6 +968,71 @@ unsigned long rpc_cancel_tasks(struct rpc_clnt *clnt, int error,
 }
 EXPORT_SYMBOL_GPL(rpc_cancel_tasks);
 
+/**
+ * rpc_cancel_client - permanently cancel a client's RPC operations
+ * @clnt: client whose operations are to be aborted
+ *
+ * Unlike rpc_shutdown_client(), this does not wait for tasks or release the
+ * client. Serialize with task activation so that a task cannot miss both
+ * the cancellation walk and the shutdown check before it starts executing.
+ */
+void rpc_cancel_client(struct rpc_clnt *clnt)
+{
+	struct rpc_task *task;
+
+	spin_lock(&clnt->cl_lock);
+	WRITE_ONCE(clnt->cl_shutdown, true);
+	list_for_each_entry(task, &clnt->cl_tasks, tk_task) {
+		if (RPC_IS_ACTIVATED(task))
+			rpc_task_try_cancel(task, -EIO);
+	}
+	spin_unlock(&clnt->cl_lock);
+}
+EXPORT_SYMBOL_GPL(rpc_cancel_client);
+
+/**
+ * rpc_cancel_net - permanently abort client RPC in a network namespace
+ * @net: namespace being forcibly torn down
+ *
+ * Serialize with client registration, including clients created by an
+ * in-progress mount or recovery after the shutdown walk has passed.
+ */
+void rpc_cancel_net(struct net *net)
+{
+	struct sunrpc_net *sn = net_generic(net, sunrpc_net_id);
+	struct rpc_clnt *clnt;
+
+	spin_lock(&sn->rpc_client_lock);
+	sn->clients_shutdown = true;
+	list_for_each_entry(clnt, &sn->all_clients, cl_clients)
+		rpc_cancel_client(clnt);
+	spin_unlock(&sn->rpc_client_lock);
+}
+EXPORT_SYMBOL_GPL(rpc_cancel_net);
+
+/**
+ * rpc_cancel_userns - stop RPC admission and cancel a user namespace subtree
+ * @user_ns: non-initial owner namespace selected by host teardown
+ *
+ * The global list includes clients in initializing and processless network
+ * namespaces. Future descendants inherit the barrier by walking ancestors.
+ */
+void rpc_cancel_userns(struct user_namespace *user_ns)
+{
+	struct rpc_clnt *clnt;
+
+	if (WARN_ON_ONCE(user_ns == &init_user_ns))
+		return;
+	spin_lock(&rpc_global_lock);
+	WRITE_ONCE(user_ns->sunrpc_shutdown, true);
+	list_for_each_entry(clnt, &rpc_global_clients, cl_global_list) {
+		if (rpc_userns_shutdown(clnt->cl_registered_net->user_ns))
+			rpc_cancel_client(clnt);
+	}
+	spin_unlock(&rpc_global_lock);
+}
+EXPORT_SYMBOL_GPL(rpc_cancel_userns);
+
 static int rpc_clnt_disconnect_xprt(struct rpc_clnt *clnt,
 				    struct rpc_xprt *xprt, void *dummy)
 {
@@ -1685,10 +1787,20 @@ EXPORT_SYMBOL_GPL(rpc_force_rebind);
 static int
 __rpc_restart_call(struct rpc_task *task, void (*action)(struct rpc_task *))
 {
+	struct rpc_clnt *clnt = task->tk_client;
+	int ret = 0;
+
+	/* Do not erase a cancellation racing with a completion callback. */
+	spin_lock(&clnt->cl_lock);
+	if (clnt->cl_shutdown)
+		goto out;
 	task->tk_status = 0;
 	task->tk_rpc_status = 0;
 	task->tk_action = action;
-	return 1;
+	ret = 1;
+out:
+	spin_unlock(&clnt->cl_lock);
+	return ret;
 }
 
 /*
@@ -1757,7 +1869,7 @@ call_start(struct rpc_task *task)
 
 	trace_rpc_request(task);
 
-	if (task->tk_client->cl_shutdown) {
+	if (READ_ONCE(task->tk_client->cl_shutdown)) {
 		rpc_call_rpcerror(task, -EIO);
 		return;
 	}

@@ -38,6 +38,7 @@
 #include <linux/sunrpc/bc_xprt.h>
 #include <linux/nsproxy.h>
 #include <linux/pid_namespace.h>
+#include <linux/user_namespace.h>
 
 
 #include "nfs4_fs.h"
@@ -420,6 +421,14 @@ struct nfs_client *nfs_get_client(const struct nfs_client_initdata *cl_init)
 	do {
 		spin_lock(&nn->nfs_client_lock);
 
+		if (READ_ONCE(nn->shutdown) ||
+		    rpc_userns_shutdown(cl_init->net->user_ns)) {
+			spin_unlock(&nn->nfs_client_lock);
+			if (new)
+				new->rpc_ops->free_client(new);
+			return ERR_PTR(-EIO);
+		}
+
 		clp = nfs_match_client(cl_init);
 		if (clp) {
 			spin_unlock(&nn->nfs_client_lock);
@@ -451,11 +460,29 @@ EXPORT_SYMBOL_GPL(nfs_get_client);
 /*
  * Mark a server as ready or failed
  */
+void nfs_mark_client_ready_locked(struct nfs_client *clp, int state)
+{
+	struct nfs_net *nn = net_generic(clp->cl_net, nfs_net_id);
+
+	lockdep_assert_held(&nn->nfs_client_lock);
+	/* A client invalidated by shutdown must never be published as ready. */
+	if (clp->cl_cons_state < 0)
+		state = clp->cl_cons_state;
+	if (READ_ONCE(nn->shutdown) ||
+	    rpc_userns_shutdown(clp->cl_net->user_ns))
+		state = -EIO;
+	smp_wmb();
+	WRITE_ONCE(clp->cl_cons_state, state);
+	wake_up_all(&nfs_client_active_wq);
+}
+
 void nfs_mark_client_ready(struct nfs_client *clp, int state)
 {
-	smp_wmb();
-	clp->cl_cons_state = state;
-	wake_up_all(&nfs_client_active_wq);
+	struct nfs_net *nn = net_generic(clp->cl_net, nfs_net_id);
+
+	spin_lock(&nn->nfs_client_lock);
+	nfs_mark_client_ready_locked(clp, state);
+	spin_unlock(&nn->nfs_client_lock);
 }
 EXPORT_SYMBOL_GPL(nfs_mark_client_ready);
 
@@ -987,17 +1014,28 @@ void nfs_server_copy_userdata(struct nfs_server *target, struct nfs_server *sour
 }
 EXPORT_SYMBOL_GPL(nfs_server_copy_userdata);
 
-void nfs_server_insert_lists(struct nfs_server *server)
+int nfs_server_insert_lists(struct nfs_server *server)
 {
 	struct nfs_client *clp = server->nfs_client;
 	struct nfs_net *nn = net_generic(clp->cl_net, nfs_net_id);
+	int ret = 0;
 
+	mutex_lock(&nn->nfs_server_lock);
 	spin_lock(&nn->nfs_client_lock);
+	if (READ_ONCE(nn->shutdown) ||
+	    rpc_userns_shutdown(clp->cl_net->user_ns) ||
+	    READ_ONCE(clp->cl_rpcclient->cl_shutdown) ||
+	    READ_ONCE(server->client->cl_shutdown)) {
+		ret = -EIO;
+		goto out;
+	}
 	list_add_tail_rcu(&server->client_link, &clp->cl_superblocks);
 	list_add_tail(&server->master_link, &nn->nfs_volume_list);
 	clear_bit(NFS_CS_STOP_RENEW, &clp->cl_res_state);
+out:
 	spin_unlock(&nn->nfs_client_lock);
-
+	mutex_unlock(&nn->nfs_server_lock);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(nfs_server_insert_lists);
 
@@ -1009,14 +1047,22 @@ void nfs_server_remove_lists(struct nfs_server *server)
 	if (clp == NULL)
 		return;
 	nn = net_generic(clp->cl_net, nfs_net_id);
+	mutex_lock(&nn->nfs_server_lock);
 	spin_lock(&nn->nfs_client_lock);
+	if (list_empty(&server->master_link)) {
+		spin_unlock(&nn->nfs_client_lock);
+		mutex_unlock(&nn->nfs_server_lock);
+		return;
+	}
 	list_del_rcu(&server->client_link);
 	if (list_empty(&clp->cl_superblocks))
 		set_bit(NFS_CS_STOP_RENEW, &clp->cl_res_state);
-	list_del(&server->master_link);
+	list_del_init(&server->master_link);
 	spin_unlock(&nn->nfs_client_lock);
 
 	synchronize_rcu();
+	INIT_LIST_HEAD(&server->client_link);
+	mutex_unlock(&nn->nfs_server_lock);
 }
 EXPORT_SYMBOL_GPL(nfs_server_remove_lists);
 
@@ -1086,6 +1132,10 @@ static void delayed_free(struct rcu_head *p)
  */
 void nfs_free_server(struct nfs_server *server)
 {
+	/* Drain sysfs callbacks before destroying anything they can access. */
+	if (server->kobj.state_initialized)
+		nfs_sysfs_remove_server(server);
+
 	nfs_server_remove_lists(server);
 
 	if (server->destroy != NULL)
@@ -1098,10 +1148,8 @@ void nfs_free_server(struct nfs_server *server)
 
 	nfs_put_client(server->nfs_client);
 
-	if (server->kobj.state_initialized) {
-		nfs_sysfs_remove_server(server);
+	if (server->kobj.state_initialized)
 		kobject_put(&server->kobj);
-	}
 	ida_free(&s_sysfs_ids, server->s_sysfs_id);
 
 	put_cred(server->cred);
@@ -1167,7 +1215,9 @@ struct nfs_server *nfs_create_server(struct fs_context *fc)
 		(unsigned long long) server->fsid.major,
 		(unsigned long long) server->fsid.minor);
 
-	nfs_server_insert_lists(server);
+	error = nfs_server_insert_lists(server);
+	if (error < 0)
+		goto error;
 	server->mount_time = jiffies;
 	nfs_free_fattr(fattr);
 	return server;
@@ -1229,7 +1279,9 @@ struct nfs_server *nfs_clone_server(struct nfs_server *source,
 	if (error < 0)
 		goto out_free_server;
 
-	nfs_server_insert_lists(server);
+	error = nfs_server_insert_lists(server);
+	if (error < 0)
+		goto out_free_server;
 	server->mount_time = jiffies;
 
 	return server;
@@ -1240,12 +1292,56 @@ out_free_server:
 }
 EXPORT_SYMBOL_GPL(nfs_clone_server);
 
+/* List initialized NFS pernet objects, even before net core publishes them.
+ * Removal follows sysfs callback drain and precedes pernet memory release.
+ * Lock order: nfs_net_list_lock -> nn->nfs_server_lock -> RPC/client locks.
+ */
+static DEFINE_MUTEX(nfs_net_list_lock);
+static LIST_HEAD(nfs_net_list);
+
+void nfs_shutdown_net(struct net *net)
+{
+	struct nfs_net *nn = net_generic(net, nfs_net_id);
+	struct nfs_server *server;
+	struct nfs_client *clp;
+
+	mutex_lock(&nn->nfs_server_lock);
+	WRITE_ONCE(nn->shutdown, true);
+	/* Stop admission before waking recovery and initialization waiters. */
+	rpc_cancel_net(net);
+	spin_lock(&nn->nfs_client_lock);
+	list_for_each_entry(server, &nn->nfs_volume_list, master_link)
+		WRITE_ONCE(server->flags, server->flags | NFS_MOUNT_SHUTDOWN);
+	list_for_each_entry(clp, &nn->nfs_client_list, cl_share_link) {
+		nfs_mark_client_ready_locked(clp, -EIO);
+#if IS_ENABLED(CONFIG_NFS_V4)
+		wake_up_var(&clp->cl_state);
+#endif
+	}
+	spin_unlock(&nn->nfs_client_lock);
+	mutex_unlock(&nn->nfs_server_lock);
+}
+
+void nfs_shutdown_userns(struct user_namespace *user_ns)
+{
+	struct nfs_net *nn;
+
+	rpc_cancel_userns(user_ns);
+	mutex_lock(&nfs_net_list_lock);
+	list_for_each_entry(nn, &nfs_net_list, ns_list) {
+		if (rpc_userns_shutdown(nn->net->user_ns))
+			nfs_shutdown_net(nn->net);
+	}
+	mutex_unlock(&nfs_net_list_lock);
+}
+
 void nfs_clients_init(struct net *net)
 {
 	struct nfs_net *nn = net_generic(net, nfs_net_id);
 
 	INIT_LIST_HEAD(&nn->nfs_client_list);
 	INIT_LIST_HEAD(&nn->nfs_volume_list);
+	mutex_init(&nn->nfs_server_lock);
 #if IS_ENABLED(CONFIG_NFS_V4)
 	idr_init(&nn->cb_ident_idr);
 #endif
@@ -1254,6 +1350,11 @@ void nfs_clients_init(struct net *net)
 	memset(&nn->rpcstats, 0, sizeof(nn->rpcstats));
 	nn->rpcstats.program = &nfs_program;
 
+	mutex_lock(&nfs_net_list_lock);
+	nn->net = net;
+	nn->shutdown = rpc_userns_shutdown(net->user_ns);
+	list_add_tail(&nn->ns_list, &nfs_net_list);
+	mutex_unlock(&nfs_net_list_lock);
 	nfs_netns_sysfs_setup(nn, net);
 }
 
@@ -1262,6 +1363,9 @@ void nfs_clients_exit(struct net *net)
 	struct nfs_net *nn = net_generic(net, nfs_net_id);
 
 	nfs_netns_sysfs_destroy(nn);
+	mutex_lock(&nfs_net_list_lock);
+	list_del(&nn->ns_list);
+	mutex_unlock(&nfs_net_list_lock);
 	nfs_cleanup_cb_ident_idr(net);
 	WARN_ON_ONCE(!list_empty(&nn->nfs_client_list));
 	WARN_ON_ONCE(!list_empty(&nn->nfs_volume_list));

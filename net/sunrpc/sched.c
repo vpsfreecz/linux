@@ -1015,8 +1015,16 @@ out:
 void rpc_execute(struct rpc_task *task)
 {
 	bool is_async = RPC_IS_ASYNC(task);
+	struct rpc_clnt *clnt = task->tk_client;
 
+	if (clnt)
+		spin_lock(&clnt->cl_lock);
 	rpc_set_active(task);
+	if (clnt) {
+		if (clnt->cl_shutdown)
+			rpc_task_set_rpc_status(task, -EIO);
+		spin_unlock(&clnt->cl_lock);
+	}
 	rpc_make_runnable(rpciod_workqueue, task);
 	if (!is_async) {
 		unsigned int pflags = memalloc_nofs_save();
