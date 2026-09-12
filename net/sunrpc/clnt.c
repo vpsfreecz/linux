@@ -327,6 +327,7 @@ static void rpc_clnt_set_nodename(struct rpc_clnt *clnt, const char *nodename)
 }
 
 static int rpc_client_register(struct rpc_clnt *clnt,
+			       struct rpc_xprt_switch *xps,
 			       rpc_authflavor_t pseudoflavor,
 			       const char *client_name)
 {
@@ -339,6 +340,7 @@ static int rpc_client_register(struct rpc_clnt *clnt,
 	struct super_block *pipefs_sb;
 	int err;
 
+	rpc_sysfs_client_setup(clnt, xps, net);
 	rpc_clnt_debugfs_register(clnt);
 
 	pipefs_sb = rpc_get_sb_net(net);
@@ -466,8 +468,7 @@ static struct rpc_clnt * rpc_new_client(const struct rpc_create_args *args,
 	/* save the nodename */
 	rpc_clnt_set_nodename(clnt, nodename);
 
-	rpc_sysfs_client_setup(clnt, xps, rpc_net_ns(clnt));
-	err = rpc_client_register(clnt, args->authflavor, args->client_name);
+	err = rpc_client_register(clnt, xps, args->authflavor, args->client_name);
 	if (err)
 		goto out_no_path;
 	if (parent)
@@ -810,7 +811,7 @@ int rpc_switch_client_transport(struct rpc_clnt *clnt,
 	 * contexts in particular are between a single
 	 * client and server.
 	 */
-	err = rpc_client_register(clnt, pseudoflavor, NULL);
+	err = rpc_client_register(clnt, xps, pseudoflavor, NULL);
 	if (err)
 		goto out_revert;
 
@@ -826,7 +827,7 @@ out_revert:
 	xps = xprt_iter_xchg_switch(&clnt->cl_xpi, oldxps);
 	rpc_clnt_set_transport(clnt, old, old_timeo);
 	clnt->cl_parent = parent;
-	rpc_client_register(clnt, pseudoflavor, NULL);
+	rpc_client_register(clnt, oldxps, pseudoflavor, NULL);
 	xprt_switch_put(xps);
 	xprt_put(xprt);
 	trace_rpc_clnt_replace_xprt_err(clnt);

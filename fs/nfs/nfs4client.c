@@ -1358,6 +1358,8 @@ int nfs4_update_server(struct nfs_server *server, const char *hostname,
 		return -EINVAL;
 
 	error = rpc_switch_client_transport(clnt, &xargs, clnt->cl_timeout);
+	/* A failed switch can also recreate the original RPC sysfs object. */
+	nfs_sysfs_link_rpc_client(server, clnt, NULL);
 	if (error != 0)
 		return error;
 
