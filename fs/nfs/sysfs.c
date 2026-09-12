@@ -12,7 +12,9 @@
 #include <linux/string.h>
 #include <linux/nfs_fs.h>
 #include <linux/rcupdate.h>
-#include <linux/lockd/lockd.h>
+#include <linux/lockd/bind.h>
+#include <linux/capability.h>
+#include <linux/user_namespace.h>
 
 #include "internal.h"
 #include "nfs4_fs.h"
@@ -125,6 +127,8 @@ static void nfs_netns_client_release(struct kobject *kobj)
 			kobject);
 
 	kfree(rcu_dereference_raw(c->identifier));
+	/* Keep the shared allocation until this child has been released. */
+	kobject_put(&c->nfs_net_kobj);
 }
 
 static const void *nfs_netns_client_namespace(const struct kobject *kobj)
@@ -135,8 +139,71 @@ static const void *nfs_netns_client_namespace(const struct kobject *kobj)
 static struct kobj_attribute nfs_netns_client_id = __ATTR(identifier,
 		0644, nfs_netns_identifier_show, nfs_netns_identifier_store);
 
+static ssize_t nfs_netns_shutdown_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	struct nfs_netns_client *c = container_of(kobj,
+			struct nfs_netns_client, kobject);
+	struct nfs_net *nn = net_generic(c->net, nfs_net_id);
+
+	return sysfs_emit(buf, "%d\n", READ_ONCE(nn->shutdown));
+}
+
+static ssize_t nfs_netns_shutdown_store_common(struct kobject *kobj,
+		const char *buf, size_t count, bool subtree)
+{
+	struct nfs_netns_client *c = container_of(kobj,
+			struct nfs_netns_client, kobject);
+	int ret, val;
+
+	/* A host teardown operation, never a tenant or initial-netns control. */
+	if (!ns_capable(&init_user_ns, CAP_SYS_ADMIN) ||
+	    c->net->user_ns == &init_user_ns)
+		return -EPERM;
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+	if (val != 1)
+		return -EINVAL;
+
+	if (subtree)
+		nfs_shutdown_userns(c->net->user_ns);
+	else
+		nfs_shutdown_net(c->net);
+	return count;
+}
+
+static ssize_t nfs_netns_shutdown_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	return nfs_netns_shutdown_store_common(kobj, buf, count, false);
+}
+
+static ssize_t nfs_netns_shutdown_tree_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	struct nfs_netns_client *c = container_of(kobj,
+			struct nfs_netns_client, kobject);
+
+	return sysfs_emit(buf, "%d\n", rpc_userns_shutdown(c->net->user_ns));
+}
+
+static ssize_t nfs_netns_shutdown_tree_store(struct kobject *kobj,
+		struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	return nfs_netns_shutdown_store_common(kobj, buf, count, true);
+}
+
+static struct kobj_attribute nfs_netns_shutdown_tree = __ATTR(shutdown_tree,
+		0600, nfs_netns_shutdown_tree_show, nfs_netns_shutdown_tree_store);
+
+static struct kobj_attribute nfs_netns_shutdown = __ATTR(shutdown, 0600,
+		nfs_netns_shutdown_show, nfs_netns_shutdown_store);
+
 static struct attribute *nfs_netns_client_attrs[] = {
 	&nfs_netns_client_id.attr,
+	&nfs_netns_shutdown.attr,
+	&nfs_netns_shutdown_tree.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(nfs_netns_client);
@@ -184,6 +251,8 @@ static struct nfs_netns_client *nfs_netns_client_alloc(struct kobject *parent,
 			return NULL;
 		}
 
+		/* kobject_del() drops the hierarchy reference before release. */
+		kobject_get(&p->nfs_net_kobj);
 		if (kobject_init_and_add(&p->kobject, &nfs_netns_client_type,
 					&p->nfs_net_kobj, "nfs_client") == 0)
 			return p;
@@ -219,15 +288,9 @@ void nfs_netns_sysfs_destroy(struct nfs_net *netns)
 	}
 }
 
-static bool shutdown_match_client(const struct rpc_task *task, const void *data)
-{
-	return true;
-}
-
 static void shutdown_client(struct rpc_clnt *clnt)
 {
-	clnt->cl_shutdown = 1;
-	rpc_cancel_tasks(clnt, -EIO, shutdown_match_client, NULL);
+	rpc_cancel_client(clnt);
 }
 
 /*
@@ -236,17 +299,35 @@ static void shutdown_client(struct rpc_clnt *clnt)
  */
 static void shutdown_nfs_client(struct nfs_client *clp)
 {
+	struct nfs_net *nn = net_generic(clp->cl_net, nfs_net_id);
 	struct nfs_server *server;
-	rcu_read_lock();
-	list_for_each_entry_rcu(server, &clp->cl_superblocks, client_link) {
+
+	lockdep_assert_held(&nn->nfs_server_lock);
+	spin_lock(&nn->nfs_client_lock);
+	list_for_each_entry(server, &clp->cl_superblocks, client_link) {
 		if (!(server->flags & NFS_MOUNT_SHUTDOWN)) {
-			rcu_read_unlock();
+			spin_unlock(&nn->nfs_client_lock);
 			return;
 		}
 	}
-	rcu_read_unlock();
-	nfs_mark_client_ready(clp, -EIO);
+	nfs_mark_client_ready_locked(clp, -EIO);
+	spin_unlock(&nn->nfs_client_lock);
 	shutdown_client(clp->cl_rpcclient);
+}
+
+static void shutdown_nlm_client(struct nfs_server *server, struct nfs_net *nn)
+{
+	struct nfs_server *other;
+
+	if (!server->nlm_host)
+		return;
+	lockdep_assert_held(&nn->nfs_server_lock);
+	list_for_each_entry(other, &nn->nfs_volume_list, master_link) {
+		if (other->nlm_host == server->nlm_host &&
+		    !(other->flags & NFS_MOUNT_SHUTDOWN))
+			return;
+	}
+	nlmclnt_shutdown_rpc_clnt(server->nlm_host);
 }
 
 static ssize_t
@@ -254,7 +335,7 @@ shutdown_show(struct kobject *kobj, struct kobj_attribute *attr,
 				char *buf)
 {
 	struct nfs_server *server = container_of(kobj, struct nfs_server, kobj);
-	bool shutdown = server->flags & NFS_MOUNT_SHUTDOWN;
+	bool shutdown = READ_ONCE(server->flags) & NFS_MOUNT_SHUTDOWN;
 	return sysfs_emit(buf, "%d\n", shutdown);
 }
 
@@ -263,6 +344,7 @@ shutdown_store(struct kobject *kobj, struct kobj_attribute *attr,
 				const char *buf, size_t count)
 {
 	struct nfs_server *server;
+	struct nfs_net *nn;
 	int ret, val;
 
 	server = container_of(kobj, struct nfs_server, kobj);
@@ -274,20 +356,29 @@ shutdown_store(struct kobject *kobj, struct kobj_attribute *attr,
 	if (val != 1)
 		return -EINVAL;
 
+	/* nfs_client can be replaced during migration or mount error unwind. */
+	nn = net_generic(server->sysfs_net, nfs_net_id);
+	mutex_lock(&nn->nfs_server_lock);
+	/* The temporary server-N object can be visible before mount setup. */
+	if (list_empty(&server->master_link) || IS_ERR_OR_NULL(server->client)) {
+		mutex_unlock(&nn->nfs_server_lock);
+		return -EAGAIN;
+	}
+
 	/* already shut down? */
 	if (server->flags & NFS_MOUNT_SHUTDOWN)
 		goto out;
 
-	server->flags |= NFS_MOUNT_SHUTDOWN;
+	WRITE_ONCE(server->flags, server->flags | NFS_MOUNT_SHUTDOWN);
 	shutdown_client(server->client);
 
 	if (!IS_ERR(server->client_acl))
 		shutdown_client(server->client_acl);
 
-	if (server->nlm_host)
-		shutdown_client(server->nlm_host->h_rpcclnt);
 out:
+	shutdown_nlm_client(server, nn);
 	shutdown_nfs_client(server->nfs_client);
+	mutex_unlock(&nn->nfs_server_lock);
 	return count;
 }
 
@@ -315,12 +406,12 @@ EXPORT_SYMBOL_GPL(nfs_sysfs_link_rpc_client);
 
 static void nfs_sysfs_sb_release(struct kobject *kobj)
 {
-	/* no-op: why? see lib/kobject.c kobject_cleanup() */
+	nfs_release_server(container_of(kobj, struct nfs_server, kobj));
 }
 
 static const void *nfs_netns_server_namespace(const struct kobject *kobj)
 {
-	return container_of(kobj, struct nfs_server, kobj)->nfs_client->cl_net;
+	return container_of(kobj, struct nfs_server, kobj)->sysfs_net;
 }
 
 static struct kobj_type nfs_sb_ktype = {
@@ -334,6 +425,11 @@ void nfs_sysfs_add_server(struct nfs_server *server)
 {
 	int ret;
 
+	/* Migration replaces the client, not the existing sysfs object. */
+	if (server->kobj.state_initialized)
+		return;
+
+	server->sysfs_net = get_net(server->nfs_client->cl_net);
 	ret = kobject_init_and_add(&server->kobj, &nfs_sb_ktype,
 				&nfs_kset->kobj, "server-%d", server->s_sysfs_id);
 	if (ret < 0) {

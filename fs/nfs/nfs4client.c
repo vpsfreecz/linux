@@ -1128,7 +1128,9 @@ static int nfs4_server_common_setup(struct nfs_server *server,
 	if (server->namelen == 0 || server->namelen > NFS4_MAXNAMLEN)
 		server->namelen = NFS4_MAXNAMLEN;
 
-	nfs_server_insert_lists(server);
+	error = nfs_server_insert_lists(server);
+	if (error < 0)
+		goto out;
 	server->mount_time = jiffies;
 	server->destroy = nfs4_destroy_server;
 out:
@@ -1351,6 +1353,10 @@ int nfs4_update_server(struct nfs_server *server, const char *hostname,
 	struct sockaddr *localaddr = (struct sockaddr *)&address;
 	int error;
 
+	/* The server and its published sysfs object stay in their original net. */
+	if (net != clp->cl_net)
+		return -EINVAL;
+
 	error = rpc_switch_client_transport(clnt, &xargs, clnt->cl_timeout);
 	if (error != 0)
 		return error;
@@ -1381,7 +1387,9 @@ int nfs4_update_server(struct nfs_server *server, const char *hostname,
 		if (server->nfs_client->cl_hostname == NULL)
 			return -ENOMEM;
 	}
-	nfs_server_insert_lists(server);
+	error = nfs_server_insert_lists(server);
+	if (error < 0)
+		return error;
 
 	return nfs_probe_server(server, NFS_FH(d_inode(server->super->s_root)));
 }

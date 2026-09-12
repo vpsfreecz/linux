@@ -16331,6 +16331,7 @@ L:	linux-nfs@vger.kernel.org
 S:	Maintained
 W:	http://client.linux-nfs.org
 T:	git git://git.linux-nfs.org/projects/trondmy/linux-nfs.git
+F:	Documentation/ABI/testing/sysfs-fs-nfs-cancellation
 F:	Documentation/filesystems/nfs/
 F:	fs/lockd/
 F:	fs/nfs/
