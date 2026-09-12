@@ -292,6 +292,8 @@ struct nfs_server {
 	const struct cred	*cred;
 	bool			has_sec_mnt_opts;
 	struct kobject		kobj;
+	/* Immutable while the server's sysfs object can be accessed. */
+	struct net		*sysfs_net;
 	struct rcu_head		rcu;
 };
 
