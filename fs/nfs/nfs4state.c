@@ -1198,7 +1198,7 @@ void nfs4_schedule_state_manager(struct nfs_client *clp)
 	struct rpc_clnt *clnt = clp->cl_rpcclient;
 	bool swapon = false;
 
-	if (clp->cl_cons_state < 0)
+	if (READ_ONCE(clnt->cl_shutdown) || READ_ONCE(clp->cl_cons_state) < 0)
 		return;
 
 	set_bit(NFS4CLNT_RUN_MANAGER, &clp->cl_state);
@@ -2611,6 +2611,8 @@ static void nfs4_state_manager(struct nfs_client *clp)
 	do {
 		trace_nfs4_state_mgr(clp);
 		clear_bit(NFS4CLNT_RUN_MANAGER, &clp->cl_state);
+		if (READ_ONCE(clp->cl_rpcclient->cl_shutdown))
+			goto out_drain;
 		if (test_bit(NFS4CLNT_PURGE_STATE, &clp->cl_state)) {
 			section = "purge state";
 			status = nfs4_purge_lease(clp);
@@ -2768,12 +2770,17 @@ static int nfs4_run_state_manager(void *ptr)
 	allow_signal(SIGKILL);
 again:
 	nfs4_state_manager(clp);
+	if (READ_ONCE(clp->cl_rpcclient->cl_shutdown))
+		goto out;
 
 	if (test_bit(NFS4CLNT_MANAGER_AVAILABLE, &clp->cl_state) &&
 	    !test_bit(NFS4CLNT_MANAGER_RUNNING, &clp->cl_state)) {
 		wait_var_event_interruptible(&clp->cl_state,
+					     READ_ONCE(clp->cl_rpcclient->cl_shutdown) ||
 					     test_bit(NFS4CLNT_RUN_MANAGER,
 						      &clp->cl_state));
+		if (READ_ONCE(clp->cl_rpcclient->cl_shutdown))
+			goto out;
 		if (!atomic_read(&cl->cl_swapper))
 			clear_bit(NFS4CLNT_MANAGER_AVAILABLE, &clp->cl_state);
 		if (refcount_read(&clp->cl_count) > 1 && !signalled() &&
@@ -2788,6 +2795,7 @@ again:
 	    !test_and_set_bit(NFS4CLNT_MANAGER_RUNNING, &clp->cl_state))
 		goto again;
 
+out:
 	nfs_put_client(clp);
 	module_put_and_kthread_exit(0);
 	return 0;

@@ -259,6 +259,9 @@ struct nlm_host *nlmclnt_lookup_host(const struct sockaddr *sap,
 			continue;
 		if (host->h_version != version)
 			continue;
+		/* An aborted mount must not poison a later mount to this peer. */
+		if (host->h_rpcclnt && READ_ONCE(host->h_rpcclnt->cl_shutdown))
+			continue;
 
 		nlm_get_host(host);
 		dprintk("lockd: %s found host %s (%s)\n", __func__,
@@ -306,12 +309,6 @@ void nlmclnt_release_host(struct nlm_host *host)
 	}
 }
 
-/* Callback for rpc_cancel_tasks() - matches all tasks for cancellation */
-static bool nlmclnt_match_all(const struct rpc_task *task, const void *data)
-{
-	return true;
-}
-
 /**
  * nlmclnt_shutdown_rpc_clnt - safely shut down NLM client RPC operations
  * @host: nlm_host to shut down
@@ -327,10 +324,8 @@ void nlmclnt_shutdown_rpc_clnt(struct nlm_host *host)
 
 	mutex_lock(&nlm_host_mutex);
 	clnt = host->h_rpcclnt;
-	if (clnt) {
-		clnt->cl_shutdown = 1;
-		rpc_cancel_tasks(clnt, -EIO, nlmclnt_match_all, NULL);
-	}
+	if (clnt)
+		rpc_cancel_client(clnt);
 	mutex_unlock(&nlm_host_mutex);
 }
 EXPORT_SYMBOL_GPL(nlmclnt_shutdown_rpc_clnt);

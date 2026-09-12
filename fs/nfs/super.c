@@ -1245,7 +1245,7 @@ static int nfs_compare_super(struct super_block *sb, struct fs_context *fc)
 	if (!nfs_compare_super_address(old, server))
 		return 0;
 	/* Note: NFS_MOUNT_UNSHARED == NFS4_MOUNT_UNSHARED */
-	if (old->flags & NFS_MOUNT_UNSHARED)
+	if (READ_ONCE(old->flags) & (NFS_MOUNT_UNSHARED | NFS_MOUNT_SHUTDOWN))
 		return 0;
 	if (memcmp(&old->fsid, &server->fsid, sizeof(old->fsid)) != 0)
 		return 0;
