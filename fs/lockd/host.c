@@ -259,6 +259,9 @@ struct nlm_host *nlmclnt_lookup_host(const struct sockaddr *sap,
 			continue;
 		if (host->h_version != version)
 			continue;
+		/* An aborted mount must not poison a later mount to this peer. */
+		if (host->h_rpcclnt && READ_ONCE(host->h_rpcclnt->cl_shutdown))
+			continue;
 
 		nlm_get_host(host);
 		dprintk("lockd: %s found host %s (%s)\n", __func__,
@@ -305,6 +308,27 @@ void nlmclnt_release_host(struct nlm_host *host)
 		mutex_unlock(&nlm_host_mutex);
 	}
 }
+
+/**
+ * nlmclnt_shutdown_rpc_clnt - safely shut down NLM client RPC operations
+ * @host: nlm_host to shut down
+ *
+ * Cancels outstanding RPC tasks and marks the client as shut down.
+ * Synchronizes with nlmclnt_release_host() via nlm_host_mutex to prevent
+ * races between shutdown and host destruction. Safe to call if h_rpcclnt
+ * is NULL or already shut down.
+ */
+void nlmclnt_shutdown_rpc_clnt(struct nlm_host *host)
+{
+	struct rpc_clnt *clnt;
+
+	mutex_lock(&nlm_host_mutex);
+	clnt = host->h_rpcclnt;
+	if (clnt)
+		rpc_cancel_client(clnt);
+	mutex_unlock(&nlm_host_mutex);
+}
+EXPORT_SYMBOL_GPL(nlmclnt_shutdown_rpc_clnt);
 
 /**
  * nlmsvc_lookup_host - Find an NLM host handle matching a remote client
