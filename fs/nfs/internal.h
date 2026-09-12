@@ -220,6 +220,7 @@ struct nfs_client *nfs_get_client(const struct nfs_client_initdata *);
 int nfs_probe_server(struct nfs_server *, struct nfs_fh *);
 int nfs_server_insert_lists(struct nfs_server *server);
 void nfs_server_remove_lists(struct nfs_server *);
+void nfs_release_server(struct nfs_server *server);
 void nfs_init_timeout_values(struct rpc_timeout *to, int proto, int timeo, int retrans);
 int nfs_init_server_rpcclient(struct nfs_server *, const struct rpc_timeout *t,
 		rpc_authflavor_t);

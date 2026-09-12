@@ -39,6 +39,7 @@
 #include <linux/nsproxy.h>
 #include <linux/pid_namespace.h>
 #include <linux/user_namespace.h>
+#include <linux/error-injection.h>
 
 
 #include "nfs4_fs.h"
@@ -671,6 +672,7 @@ int nfs_init_server_rpcclient(struct nfs_server *server,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(nfs_init_server_rpcclient);
+ALLOW_ERROR_INJECTION(nfs_init_server_rpcclient, ERRNO);
 
 /**
  * nfs_init_client - Initialise an NFS2 or NFS3 client
@@ -841,8 +843,7 @@ static int nfs_init_server(struct nfs_server *server,
 	return 0;
 
 error:
-	server->nfs_client = NULL;
-	nfs_put_client(clp);
+	/* nfs_free_server() drains sysfs before releasing the client. */
 	return error;
 }
 
@@ -1127,6 +1128,14 @@ static void delayed_free(struct rcu_head *p)
 	kfree(server);
 }
 
+/* The sysfs kobject may defer its final release. */
+void nfs_release_server(struct nfs_server *server)
+{
+	if (server->sysfs_net)
+		put_net(server->sysfs_net);
+	call_rcu(&server->rcu, delayed_free);
+}
+
 /*
  * Free up a server record
  */
@@ -1148,13 +1157,14 @@ void nfs_free_server(struct nfs_server *server)
 
 	nfs_put_client(server->nfs_client);
 
-	if (server->kobj.state_initialized)
-		kobject_put(&server->kobj);
 	ida_free(&s_sysfs_ids, server->s_sysfs_id);
 
 	put_cred(server->cred);
 	nfs_release_automount_timer();
-	call_rcu(&server->rcu, delayed_free);
+	if (server->kobj.state_initialized)
+		kobject_put(&server->kobj);
+	else
+		nfs_release_server(server);
 }
 EXPORT_SYMBOL_GPL(nfs_free_server);
 

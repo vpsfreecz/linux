@@ -127,6 +127,8 @@ static void nfs_netns_client_release(struct kobject *kobj)
 			kobject);
 
 	kfree(rcu_dereference_raw(c->identifier));
+	/* Keep the shared allocation until this child has been released. */
+	kobject_put(&c->nfs_net_kobj);
 }
 
 static const void *nfs_netns_client_namespace(const struct kobject *kobj)
@@ -249,6 +251,8 @@ static struct nfs_netns_client *nfs_netns_client_alloc(struct kobject *parent,
 			return NULL;
 		}
 
+		/* kobject_del() drops the hierarchy reference before release. */
+		kobject_get(&p->nfs_net_kobj);
 		if (kobject_init_and_add(&p->kobject, &nfs_netns_client_type,
 					&p->nfs_net_kobj, "nfs_client") == 0)
 			return p;
@@ -352,10 +356,11 @@ shutdown_store(struct kobject *kobj, struct kobj_attribute *attr,
 	if (val != 1)
 		return -EINVAL;
 
-	nn = net_generic(server->nfs_client->cl_net, nfs_net_id);
+	/* nfs_client can be replaced during migration or mount error unwind. */
+	nn = net_generic(server->sysfs_net, nfs_net_id);
 	mutex_lock(&nn->nfs_server_lock);
 	/* The temporary server-N object can be visible before mount setup. */
-	if (list_empty(&server->master_link) || IS_ERR(server->client)) {
+	if (list_empty(&server->master_link) || IS_ERR_OR_NULL(server->client)) {
 		mutex_unlock(&nn->nfs_server_lock);
 		return -EAGAIN;
 	}
@@ -401,12 +406,12 @@ EXPORT_SYMBOL_GPL(nfs_sysfs_link_rpc_client);
 
 static void nfs_sysfs_sb_release(struct kobject *kobj)
 {
-	/* no-op: why? see lib/kobject.c kobject_cleanup() */
+	nfs_release_server(container_of(kobj, struct nfs_server, kobj));
 }
 
 static const void *nfs_netns_server_namespace(const struct kobject *kobj)
 {
-	return container_of(kobj, struct nfs_server, kobj)->nfs_client->cl_net;
+	return container_of(kobj, struct nfs_server, kobj)->sysfs_net;
 }
 
 static struct kobj_type nfs_sb_ktype = {
@@ -420,6 +425,11 @@ void nfs_sysfs_add_server(struct nfs_server *server)
 {
 	int ret;
 
+	/* Migration replaces the client, not the existing sysfs object. */
+	if (server->kobj.state_initialized)
+		return;
+
+	server->sysfs_net = get_net(server->nfs_client->cl_net);
 	ret = kobject_init_and_add(&server->kobj, &nfs_sb_ktype,
 				&nfs_kset->kobj, "server-%d", server->s_sysfs_id);
 	if (ret < 0) {

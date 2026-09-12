@@ -1353,6 +1353,10 @@ int nfs4_update_server(struct nfs_server *server, const char *hostname,
 	struct sockaddr *localaddr = (struct sockaddr *)&address;
 	int error;
 
+	/* The server and its published sysfs object stay in their original net. */
+	if (net != clp->cl_net)
+		return -EINVAL;
+
 	error = rpc_switch_client_transport(clnt, &xargs, clnt->cl_timeout);
 	if (error != 0)
 		return error;
