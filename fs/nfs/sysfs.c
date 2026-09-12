@@ -392,10 +392,16 @@ void nfs_sysfs_link_rpc_client(struct nfs_server *server,
 	char name[RPC_CLIENT_NAME_SIZE];
 	int ret;
 
+	/* RPC sysfs allocation is optional and may have failed. */
+	if (!server->kobj.state_in_sysfs || !clnt->cl_sysfs)
+		return;
+
 	strscpy(name, clnt->cl_program->name, sizeof(name));
 	strncat(name, uniq ? uniq : "", sizeof(name) - strlen(name) - 1);
 	strncat(name, "_client", sizeof(name) - strlen(name) - 1);
 
+	/* Migration keeps this directory but can replace either RPC client. */
+	sysfs_delete_link(&server->kobj, &clnt->cl_sysfs->kobject, name);
 	ret = sysfs_create_link_nowarn(&server->kobj,
 						&clnt->cl_sysfs->kobject, name);
 	if (ret < 0)
