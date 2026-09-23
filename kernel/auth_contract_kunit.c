@@ -206,6 +206,27 @@ static void auth_contract_row_accepts_inventoried_values(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
 }
 
+static void auth_contract_row_accepts_extended_inventory(struct kunit *test)
+{
+	struct auth_transition_row row = {
+		.kind = AUTH_CONTRACT_KIND_CHECKPOINT_IMPORT,
+		.subject_class = AUTH_CONTRACT_SUBJECT_MANAGER,
+		.root_class = AUTH_CONTRACT_ROOT_HOST_FILES,
+		.trigger = AUTH_CONTRACT_TRIGGER_PROCFS_AUTHORITY,
+		.caller = AUTH_CONTRACT_SUBJECT_MANAGER,
+		.leaf = AUTH_CONTRACT_LEAF_FORBIDDEN,
+	};
+
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+
+	row.kind = AUTH_CONTRACT_KIND_IO_URING_REGISTER;
+	row.trigger = AUTH_CONTRACT_TRIGGER_IO_URING_REGISTER;
+	row.subject_class = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+	row.root_class = AUTH_CONTRACT_ROOT_CONTAINER_FILES;
+	row.caller = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+}
+
 static void auth_contract_row_rejects_unknown_values(struct kunit *test)
 {
 	struct auth_transition_row row = {
@@ -404,6 +425,7 @@ static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_contract_table_verify_rejects_unsealed),
 	KUNIT_CASE(auth_contract_table_rejects_bad_row_count),
 	KUNIT_CASE(auth_contract_row_accepts_inventoried_values),
+	KUNIT_CASE(auth_contract_row_accepts_extended_inventory),
 	KUNIT_CASE(auth_contract_row_rejects_unknown_values),
 	KUNIT_CASE(auth_contract_row_rejects_tenant_with_host_root),
 	KUNIT_CASE(auth_contract_load_accepts_sealed_table),
