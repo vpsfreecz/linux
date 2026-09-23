@@ -65,10 +65,59 @@ static int __init auth_guard_setup(char *str)
 }
 early_param("auth_guard", auth_guard_setup);
 
+#ifdef CONFIG_AUTH_GUARD_TEST
+/* Synthetic-test knob: force the CRNG-readiness refusal path. */
+static bool auth_guard_test_crng_unready __initdata;
+
+static int __init auth_guard_test_crng_setup(char *str)
+{
+	if (!str)
+		return -EINVAL;
+
+	if (!strcmp(str, "crng-unready"))
+		auth_guard_test_crng_unready = true;
+	else
+		return -EINVAL;
+
+	return 0;
+}
+early_param("auth_guard_test", auth_guard_test_crng_setup);
+#endif
+
+static bool __init auth_guard_crng_confirmed(void)
+{
+#ifdef CONFIG_AUTH_GUARD_TEST
+	if (unlikely(auth_guard_test_crng_unready))
+		return false;
+#endif
+
+	return wait_for_random_bytes() == 0 && rng_is_initialized();
+}
+
 void __init auth_guard_init_domain(struct auth_guard_domain *domain)
 {
+	/*
+	 * Key material quality: never draw seal keys before the CRNG is
+	 * cryptographically initialized. A key drawn from a not-yet-ready
+	 * generator would silently weaken every seal in the domain, and
+	 * unlike a key exposure that weakness would not be observable
+	 * afterwards. Once the CRNG is ready this is a cheap read.
+	 *
+	 * If initialization cannot be confirmed, refuse: leave the domain
+	 * unseeded, disable the guard for this boot, and record the decision
+	 * in the boot log. A node in that state must fail containment
+	 * preflight rather than serve tenants with keys of unproven quality.
+	 */
+	if (!auth_guard_crng_confirmed()) {
+		pr_err("CRNG not initialized: refusing %s seed, disabling guard\n",
+		       domain->name);
+		auth_guard_mode = AUTH_GUARD_MODE_OFF;
+		return;
+	}
+
 	get_random_bytes(&domain->key, sizeof(domain->key));
 	domain->seeded = true;
+	pr_info("%s: key seeded (CRNG initialized)\n", domain->name);
 }
 
 bool auth_guard_enabled(void)
