@@ -226,6 +226,29 @@ config AUTH_GUARD_TEST
 
 	  Do not enable this option in production kernels.
 
+config AUTH_EXPECTATION
+	bool "Authority expectation store"
+	depends on AUTH_GUARD_CORE
+	default y
+	help
+	  Record the expected measured value of the regions the
+	  authority-transition contract depends on: guard text and rodata,
+	  the contract table, and the policy.  Consumers compare a fresh
+	  measurement against the recorded value and fail closed when a
+	  region has no recorded expectation.
+
+	  The store is sealed once during boot and read-only afterwards.
+
+config AUTH_EXPECTATION_KUNIT_TEST
+	tristate "KUnit tests for the authority expectation store" if !KUNIT_ALL_TESTS
+	depends on AUTH_EXPECTATION && KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  KUnit tests for the expectation store semantics: fail-closed
+	  lookups, record and lookup round trips, invalid inputs, duplicate
+	  records, and the sealed-store refusal.  Enabled by default only
+	  when KUNIT_ALL_TESTS is enabled.
+
 config INIT_ON_ALLOC_DEFAULT_ON
 	bool "Enable heap memory zeroing on allocation by default"
 	depends on !KMSAN

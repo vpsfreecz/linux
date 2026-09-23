@@ -13,6 +13,8 @@ obj-y     = fork.o exec_domain.o panic.o \
 	    async.o range.o smpboot.o ucount.o regset.o ksyms_common.o vpsadminos.o
 
 obj-$(CONFIG_AUTH_GUARD_CORE) += auth_guard.o
+obj-$(CONFIG_AUTH_EXPECTATION) += auth_contract.o
+obj-$(CONFIG_AUTH_EXPECTATION_KUNIT_TEST) += auth_contract_kunit.o
 obj-$(CONFIG_MULTIUSER) += groups.o
 obj-$(CONFIG_VHOST_TASK) += vhost_task.o
 
