@@ -184,6 +184,7 @@ struct auth_guard_domain {
 	}
 
 void __init auth_guard_init_domain(struct auth_guard_domain *domain);
+bool auth_guard_crng_gate_allows(bool crng_ready, bool forced_unready);
 bool auth_guard_enabled(void);
 u64 auth_guard_next_generation(struct auth_guard_domain *domain);
 u64 auth_guard_nonce(void);

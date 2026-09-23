@@ -84,14 +84,35 @@ static int __init auth_guard_test_crng_setup(char *str)
 early_param("auth_guard_test", auth_guard_test_crng_setup);
 #endif
 
+/**
+ * auth_guard_crng_gate_allows - the P-01 gate decision, as a pure function
+ * @crng_ready: whether the CRNG is cryptographically initialized
+ * @forced_unready: the synthetic-test knob that forces the refusal path
+ *
+ * Split out of the confirmation path so the decision matrix is unit-testable
+ * (the caller supplies the live CRNG state and the boot-parameter knob); the
+ * gate is permissive only when the generator is confirmed ready and nothing
+ * forces a refusal.
+ */
+bool auth_guard_crng_gate_allows(bool crng_ready, bool forced_unready)
+{
+	if (forced_unready)
+		return false;
+
+	return crng_ready;
+}
+EXPORT_SYMBOL_GPL(auth_guard_crng_gate_allows);
+
 static bool __init auth_guard_crng_confirmed(void)
 {
 #ifdef CONFIG_AUTH_GUARD_TEST
 	if (unlikely(auth_guard_test_crng_unready))
-		return false;
+		return auth_guard_crng_gate_allows(false, true);
 #endif
 
-	return wait_for_random_bytes() == 0 && rng_is_initialized();
+	return auth_guard_crng_gate_allows(wait_for_random_bytes() == 0 &&
+						   rng_is_initialized(),
+					   false);
 }
 
 void __init auth_guard_init_domain(struct auth_guard_domain *domain)

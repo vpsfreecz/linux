@@ -239,6 +239,16 @@ config AUTH_EXPECTATION
 
 	  The store is sealed once during boot and read-only afterwards.
 
+config AUTH_GUARD_KUNIT_TEST
+	tristate "KUnit tests for the authority guard CRNG gate" if !KUNIT_ALL_TESTS
+	depends on AUTH_GUARD_CORE && KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  KUnit tests for the P-01 gate decision: seeding is allowed only when
+	  the CRNG is cryptographically initialized and the synthetic refusal
+	  knob is off.  The boot-parameter refusal path itself is covered by the
+	  cred-guard guest script.
+
 config AUTH_EXPECTATION_KUNIT_TEST
 	tristate "KUnit tests for the authority expectation store" if !KUNIT_ALL_TESTS
 	depends on AUTH_EXPECTATION && KUNIT
