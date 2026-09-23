@@ -286,6 +286,78 @@ static void auth_contract_load_rejects_invalid_row(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, auth_contract_load(table), -EINVAL);
 }
 
+static struct auth_transition_tuple *
+auth_contract_test_tuple(struct kunit *test, unsigned int roots)
+{
+	struct auth_transition_tuple *tuple;
+
+	tuple = kunit_kzalloc(test, sizeof(*tuple), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, tuple);
+
+	tuple->kind = AUTH_CONTRACT_KIND_CRED_COMMIT;
+	tuple->trigger = AUTH_CONTRACT_TRIGGER_COMMIT_CREDS;
+	tuple->caller = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+	tuple->roots = roots;
+	tuple->subject.template_id = 7;
+	tuple->subject.klass = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+
+	return tuple;
+}
+
+static void auth_contract_judge_without_table_is_unknown(struct kunit *test)
+{
+	struct auth_transition_tuple *tuple;
+	unsigned int roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_CRED);
+
+	tuple = auth_contract_test_tuple(test, roots);
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_UNKNOWN);
+}
+
+static void auth_contract_table_publish_rejects_unsealed(struct kunit *test)
+{
+	struct auth_transition_table *table = auth_contract_test_table(test, 2);
+
+	KUNIT_EXPECT_EQ(test, auth_contract_table_publish(table), -EKEYREJECTED);
+}
+
+static void auth_contract_table_publish_and_judge(struct kunit *test)
+{
+	struct auth_transition_table *table = auth_contract_test_table(test, 2);
+	struct auth_transition_tuple *tuple;
+
+	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
+	KUNIT_ASSERT_EQ(test, auth_contract_table_publish(table), 0);
+	KUNIT_EXPECT_PTR_EQ(test, auth_contract_table_get(), table);
+
+	/* Row 0: allowed credential commit for a tenant task. */
+	tuple = auth_contract_test_tuple(test,
+					 BIT(AUTH_CONTRACT_ROOT_CONTAINER_CRED));
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_DECLARED);
+	KUNIT_EXPECT_EQ(test, auth_contract_row_count(0), 1UL);
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_DECLARED);
+	KUNIT_EXPECT_EQ(test, auth_contract_row_count(0), 2UL);
+
+	/* Row 1: forbidden namespace join for a tenant task. */
+	tuple->kind = AUTH_CONTRACT_KIND_NS_JOIN;
+	tuple->trigger = AUTH_CONTRACT_TRIGGER_SETNS;
+	tuple->caller = AUTH_CONTRACT_SUBJECT_MANAGER;
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY);
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_FORBIDDEN);
+	KUNIT_EXPECT_EQ(test, auth_contract_row_count(1), 0UL);
+
+	/* A root class the row does not cover stays undeclared. */
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_HOST_CRED);
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_UNKNOWN);
+
+	/* Another template is not this table's business. */
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_CRED);
+	tuple->subject.template_id = 8;
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_UNKNOWN);
+
+	/* A second publication is refused. */
+	KUNIT_EXPECT_EQ(test, auth_contract_table_publish(table), -EBUSY);
+}
+
 static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_expectation_missing_region_fails_closed),
 	KUNIT_CASE(auth_expectation_record_lookup_roundtrip),
@@ -303,6 +375,9 @@ static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_contract_load_accepts_sealed_table),
 	KUNIT_CASE(auth_contract_load_rejects_unsealed_table),
 	KUNIT_CASE(auth_contract_load_rejects_invalid_row),
+	KUNIT_CASE(auth_contract_judge_without_table_is_unknown),
+	KUNIT_CASE(auth_contract_table_publish_rejects_unsealed),
+	KUNIT_CASE(auth_contract_table_publish_and_judge),
 	{}
 };
 

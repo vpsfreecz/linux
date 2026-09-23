@@ -7,6 +7,8 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/overflow.h>
+#include <linux/rcupdate.h>
+#include <linux/slab.h>
 
 static bool auth_expectation_region_valid(enum auth_expectation_region region)
 {
@@ -271,3 +273,99 @@ int auth_contract_load(const struct auth_transition_table *table)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(auth_contract_load);
+
+/*
+ * Publication and judging.  One table is published per template per boot in
+ * this cut; replacement lands with the manager-signed table work.  The judge
+ * is a lock-free scan over the class fields, and the counters are published
+ * together with the table.
+ */
+static struct auth_transition_table __rcu *auth_contract_active;
+static atomic_long_t *auth_contract_counters;
+
+int auth_contract_table_publish(struct auth_transition_table *table)
+{
+	atomic_long_t *counters;
+	int ret;
+
+	if (!table)
+		return -EINVAL;
+	if (rcu_access_pointer(auth_contract_active))
+		return -EBUSY;
+
+	ret = auth_contract_load(table);
+	if (ret)
+		return ret;
+
+	counters = kcalloc(table->row_count, sizeof(*counters), GFP_KERNEL);
+	if (!counters)
+		return -ENOMEM;
+
+	/* Counters first: a reader that sees the table must see them. */
+	smp_store_release(&auth_contract_counters, counters);
+	rcu_assign_pointer(auth_contract_active, table);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(auth_contract_table_publish);
+
+const struct auth_transition_table *auth_contract_table_get(void)
+{
+	return rcu_dereference(auth_contract_active);
+}
+EXPORT_SYMBOL_GPL(auth_contract_table_get);
+
+unsigned long auth_contract_row_count(unsigned int index)
+{
+	struct auth_transition_table *table = rcu_dereference(auth_contract_active);
+	/* Pairs with the counter publication in the table publish path. */
+	atomic_long_t *counters = smp_load_acquire(&auth_contract_counters);
+
+	if (!table || !counters || index >= table->row_count)
+		return 0;
+
+	return atomic_long_read(&counters[index]);
+}
+EXPORT_SYMBOL_GPL(auth_contract_row_count);
+
+enum auth_contract_verdict
+auth_contract_judge(const struct auth_transition_tuple *tuple)
+{
+	struct auth_transition_table *table;
+	atomic_long_t *counters;
+	unsigned int i;
+
+	if (!tuple)
+		return AUTH_VERDICT_UNKNOWN;
+
+	table = rcu_dereference(auth_contract_active);
+	if (!table)
+		return AUTH_VERDICT_UNKNOWN;
+	if (table->template_id != tuple->subject.template_id)
+		return AUTH_VERDICT_UNKNOWN;
+
+	/* Pairs with the counter publication in the table publish path. */
+	counters = smp_load_acquire(&auth_contract_counters);
+	if (!counters)
+		return AUTH_VERDICT_UNKNOWN;
+
+	for (i = 0; i < table->row_count; i++) {
+		const struct auth_transition_row *row = &table->rows[i];
+
+		if (row->kind != tuple->kind || row->trigger != tuple->trigger ||
+		    row->caller != tuple->caller ||
+		    row->subject_class != tuple->subject.klass)
+			continue;
+		if (!(tuple->roots & BIT(row->root_class)))
+			continue;
+
+		if (row->leaf == AUTH_CONTRACT_LEAF_FORBIDDEN)
+			return AUTH_VERDICT_FORBIDDEN;
+
+		atomic_long_inc(&counters[i]);
+		return AUTH_VERDICT_DECLARED;
+	}
+
+	return AUTH_VERDICT_UNKNOWN;
+}
+EXPORT_SYMBOL_GPL(auth_contract_judge);

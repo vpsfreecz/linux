@@ -229,4 +229,46 @@ int auth_contract_table_verify(const struct auth_transition_table *table);
 int auth_contract_row_check(const struct auth_transition_row *row);
 int auth_contract_load(const struct auth_transition_table *table);
 
+/*
+ * A transition instance.  The fields are classes, never identities: the
+ * subject carries the sealed template identity, roots is the bitmask of the
+ * root classes the transition touches, and the stamps are the authority
+ * stamps on both sides of the change.
+ */
+struct auth_subject {
+	u64 container_id;
+	u64 template_id;
+	u8 userns_level;
+	u8 lifecycle;
+	u8 klass;
+	u64 seal;
+};
+
+struct auth_transition_tuple {
+	u8 kind;
+	u8 trigger;
+	u8 caller;
+	u32 roots;
+	struct auth_subject subject;
+	struct auth_guard_stamp old;
+	struct auth_guard_stamp new;
+};
+
+/*
+ * The judge's verdict for one transition instance: declared, forbidden, or
+ * undeclared (unknown).  Unknown has a defined, non-fatal path at the call
+ * site; it is never a silent pass.
+ */
+enum auth_contract_verdict {
+	AUTH_VERDICT_UNKNOWN = 0,
+	AUTH_VERDICT_DECLARED,
+	AUTH_VERDICT_FORBIDDEN,
+};
+
+int auth_contract_table_publish(struct auth_transition_table *table);
+const struct auth_transition_table *auth_contract_table_get(void);
+unsigned long auth_contract_row_count(unsigned int index);
+enum auth_contract_verdict
+auth_contract_judge(const struct auth_transition_tuple *tuple);
+
 #endif /* _LINUX_AUTH_CONTRACT_H */
