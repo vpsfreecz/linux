@@ -260,6 +260,36 @@ static void auth_contract_row_accepts_extended_inventory(struct kunit *test)
 	row.root_class = AUTH_CONTRACT_ROOT_CONTAINER_FILES;
 	row.caller = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
 	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+
+	/*
+	 * P-11L: authority-bearing object creation/entry (nsfs namespace fds,
+	 * pidfds, procfs-mediated opens, device fds).  These are entries, not
+	 * fd transfers.
+	 */
+	row.kind = AUTH_CONTRACT_KIND_NSFS_ENTRY;
+	row.trigger = AUTH_CONTRACT_TRIGGER_NSFS_OPEN;
+	row.subject_class = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+	row.root_class = AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY;
+	row.caller = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+
+	row.kind = AUTH_CONTRACT_KIND_PIDFD_ENTRY;
+	row.trigger = AUTH_CONTRACT_TRIGGER_PIDFD_OPEN;
+	row.root_class = AUTH_CONTRACT_ROOT_CONTAINER_CRED;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+
+	row.kind = AUTH_CONTRACT_KIND_PROCFS_ENTRY;
+	row.trigger = AUTH_CONTRACT_TRIGGER_PROCFS_OPEN;
+	row.root_class = AUTH_CONTRACT_ROOT_CONTAINER_FILES;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+
+	/* A device entry that reaches host hardware needs a manager subject. */
+	row.kind = AUTH_CONTRACT_KIND_DEVICE_ENTRY;
+	row.trigger = AUTH_CONTRACT_TRIGGER_DEVICE_OPEN;
+	row.subject_class = AUTH_CONTRACT_SUBJECT_MANAGER;
+	row.root_class = AUTH_CONTRACT_ROOT_HOST_FILES;
+	row.caller = AUTH_CONTRACT_SUBJECT_MANAGER;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
 }
 
 static void auth_contract_row_rejects_unknown_values(struct kunit *test)
