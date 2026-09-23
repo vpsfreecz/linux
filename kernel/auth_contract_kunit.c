@@ -110,14 +110,9 @@ static void auth_expectation_sealed_store_rejects_records(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, 0);
 }
 
-static struct auth_transition_table *
-auth_contract_test_table(struct kunit *test, unsigned int rows)
+static void auth_contract_test_fill_table(struct auth_transition_table *table,
+					  unsigned int rows)
 {
-	struct auth_transition_table *table;
-
-	table = kunit_kzalloc(test, struct_size(table, rows, rows), GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, table);
-
 	table->template_id = 7;
 	table->row_count = rows;
 	table->row_hash = 0x1223344556677889ULL;
@@ -140,8 +135,48 @@ auth_contract_test_table(struct kunit *test, unsigned int rows)
 			.caller = AUTH_CONTRACT_SUBJECT_MANAGER,
 			.leaf = AUTH_CONTRACT_LEAF_FORBIDDEN,
 		};
+}
+
+static struct auth_transition_table *
+auth_contract_test_table(struct kunit *test, unsigned int rows)
+{
+	struct auth_transition_table *table;
+
+	table = kunit_kzalloc(test, struct_size(table, rows, rows), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, table);
+
+	auth_contract_test_fill_table(table, rows);
 
 	return table;
+}
+
+/*
+ * A table that is handed to the kernel outlives the case that publishes it:
+ * kunit_kzalloc() memory is freed when the case ends, which would leave the
+ * published pointer dangling for the cases that follow (the note case judges
+ * against it).  Publishable tables therefore come from kernel memory and are
+ * released when the suite exits.
+ */
+static struct auth_transition_table *auth_contract_test_published;
+
+static struct auth_transition_table *
+auth_contract_test_publishable_table(struct kunit *test, unsigned int rows)
+{
+	struct auth_transition_table *table;
+
+	table = kzalloc(struct_size(table, rows, rows), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, table);
+
+	auth_contract_test_fill_table(table, rows);
+	auth_contract_test_published = table;
+
+	return table;
+}
+
+static void auth_contract_test_suite_exit(struct kunit_suite *suite)
+{
+	kfree(auth_contract_test_published);
+	auth_contract_test_published = NULL;
 }
 
 static void auth_contract_table_seal_roundtrip(struct kunit *test)
@@ -353,7 +388,8 @@ static void auth_contract_table_publish_rejects_unsealed(struct kunit *test)
 
 static void auth_contract_table_publish_and_judge(struct kunit *test)
 {
-	struct auth_transition_table *table = auth_contract_test_table(test, 2);
+	struct auth_transition_table *table =
+		auth_contract_test_publishable_table(test, 2);
 	struct auth_transition_tuple *tuple;
 
 	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
@@ -441,6 +477,7 @@ static struct kunit_case auth_contract_test_cases[] = {
 
 static struct kunit_suite auth_contract_test_suite = {
 	.name = "auth_contract",
+	.suite_exit = auth_contract_test_suite_exit,
 	.test_cases = auth_contract_test_cases,
 };
 
