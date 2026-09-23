@@ -124,20 +124,20 @@ auth_contract_test_table(struct kunit *test, unsigned int rows)
 
 	if (rows > 0)
 		table->rows[0] = (struct auth_transition_row) {
-			.kind = 1,
-			.subject_class = 2,
-			.root_class = 3,
-			.trigger = 4,
-			.caller = 5,
+			.kind = AUTH_CONTRACT_KIND_CRED_COMMIT,
+			.subject_class = AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+			.root_class = AUTH_CONTRACT_ROOT_CONTAINER_CRED,
+			.trigger = AUTH_CONTRACT_TRIGGER_COMMIT_CREDS,
+			.caller = AUTH_CONTRACT_SUBJECT_TENANT_TASK,
 			.leaf = AUTH_CONTRACT_LEAF_ALLOWED,
 		};
 	if (rows > 1)
 		table->rows[1] = (struct auth_transition_row) {
-			.kind = 6,
-			.subject_class = 7,
-			.root_class = 8,
-			.trigger = 9,
-			.caller = 10,
+			.kind = AUTH_CONTRACT_KIND_NS_JOIN,
+			.subject_class = AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+			.root_class = AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY,
+			.trigger = AUTH_CONTRACT_TRIGGER_SETNS,
+			.caller = AUTH_CONTRACT_SUBJECT_MANAGER,
 			.leaf = AUTH_CONTRACT_LEAF_FORBIDDEN,
 		};
 
@@ -192,6 +192,100 @@ static void auth_contract_table_rejects_bad_row_count(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, auth_contract_table_verify(table), -EINVAL);
 }
 
+static void auth_contract_row_accepts_inventoried_values(struct kunit *test)
+{
+	struct auth_transition_row row = {
+		.kind = AUTH_CONTRACT_KIND_FD_TRANSFER,
+		.subject_class = AUTH_CONTRACT_SUBJECT_GUEST_AGENT,
+		.root_class = AUTH_CONTRACT_ROOT_HOST_BPF,
+		.trigger = AUTH_CONTRACT_TRIGGER_SCM_RIGHTS,
+		.caller = AUTH_CONTRACT_SUBJECT_MANAGER,
+		.leaf = AUTH_CONTRACT_LEAF_ALLOWED,
+	};
+
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+}
+
+static void auth_contract_row_rejects_unknown_values(struct kunit *test)
+{
+	struct auth_transition_row row = {
+		.kind = AUTH_CONTRACT_KIND_CRED_COMMIT,
+		.subject_class = AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+		.root_class = AUTH_CONTRACT_ROOT_CONTAINER_CRED,
+		.trigger = AUTH_CONTRACT_TRIGGER_COMMIT_CREDS,
+		.caller = AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+		.leaf = AUTH_CONTRACT_LEAF_ALLOWED,
+	};
+
+	row.kind = AUTH_CONTRACT_KIND_UNKNOWN;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+	row.kind = AUTH_CONTRACT_KIND_COUNT;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+
+	row.kind = AUTH_CONTRACT_KIND_CRED_COMMIT;
+	row.trigger = AUTH_CONTRACT_TRIGGER_UNKNOWN;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+	row.trigger = AUTH_CONTRACT_TRIGGER_COUNT;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+
+	row.trigger = AUTH_CONTRACT_TRIGGER_COMMIT_CREDS;
+	row.subject_class = AUTH_CONTRACT_SUBJECT_UNKNOWN;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+	row.subject_class = AUTH_CONTRACT_SUBJECT_CLASS_COUNT;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+
+	row.subject_class = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+	row.root_class = AUTH_CONTRACT_ROOT_UNKNOWN;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+	row.root_class = AUTH_CONTRACT_ROOT_CLASS_COUNT;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+
+	row.root_class = AUTH_CONTRACT_ROOT_CONTAINER_CRED;
+	row.leaf = AUTH_CONTRACT_LEAF_UNKNOWN;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+}
+
+static void auth_contract_row_rejects_tenant_with_host_root(struct kunit *test)
+{
+	struct auth_transition_row row = {
+		.kind = AUTH_CONTRACT_KIND_CRED_COMMIT,
+		.subject_class = AUTH_CONTRACT_SUBJECT_TENANT_CONTAINER,
+		.root_class = AUTH_CONTRACT_ROOT_HOST_CRED,
+		.trigger = AUTH_CONTRACT_TRIGGER_COMMIT_CREDS,
+		.caller = AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+		.leaf = AUTH_CONTRACT_LEAF_ALLOWED,
+	};
+
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), -EINVAL);
+
+	row.subject_class = AUTH_CONTRACT_SUBJECT_MANAGER;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+}
+
+static void auth_contract_load_accepts_sealed_table(struct kunit *test)
+{
+	struct auth_transition_table *table = auth_contract_test_table(test, 2);
+
+	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
+	KUNIT_EXPECT_EQ(test, auth_contract_load(table), 0);
+}
+
+static void auth_contract_load_rejects_unsealed_table(struct kunit *test)
+{
+	struct auth_transition_table *table = auth_contract_test_table(test, 2);
+
+	KUNIT_EXPECT_EQ(test, auth_contract_load(table), -EKEYREJECTED);
+}
+
+static void auth_contract_load_rejects_invalid_row(struct kunit *test)
+{
+	struct auth_transition_table *table = auth_contract_test_table(test, 2);
+
+	table->rows[1].leaf = AUTH_CONTRACT_LEAF_UNKNOWN;
+	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
+	KUNIT_EXPECT_EQ(test, auth_contract_load(table), -EINVAL);
+}
+
 static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_expectation_missing_region_fails_closed),
 	KUNIT_CASE(auth_expectation_record_lookup_roundtrip),
@@ -203,6 +297,12 @@ static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_contract_table_verify_rejects_tampered_head),
 	KUNIT_CASE(auth_contract_table_verify_rejects_unsealed),
 	KUNIT_CASE(auth_contract_table_rejects_bad_row_count),
+	KUNIT_CASE(auth_contract_row_accepts_inventoried_values),
+	KUNIT_CASE(auth_contract_row_rejects_unknown_values),
+	KUNIT_CASE(auth_contract_row_rejects_tenant_with_host_root),
+	KUNIT_CASE(auth_contract_load_accepts_sealed_table),
+	KUNIT_CASE(auth_contract_load_rejects_unsealed_table),
+	KUNIT_CASE(auth_contract_load_rejects_invalid_row),
 	{}
 };
 

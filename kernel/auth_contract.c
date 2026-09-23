@@ -214,3 +214,60 @@ static int __init auth_contract_init(void)
 	return 0;
 }
 late_initcall(auth_contract_init);
+
+/*
+ * Load-time invariants.  A row must stay inside the inventoried sets and may
+ * not give a tenant subject a host-authority root.  The narrowing rule (a
+ * table may narrow the global response policy, never widen it) needs the
+ * global-policy artefact that the policy region will carry; until that exists
+ * the load path enforces the inventory and class rules and rejects anything
+ * undeclared.  Publication to the judge lands with the judge itself.
+ */
+int auth_contract_row_check(const struct auth_transition_row *row)
+{
+	if (!row)
+		return -EINVAL;
+
+	if (row->kind == AUTH_CONTRACT_KIND_UNKNOWN ||
+	    row->kind >= AUTH_CONTRACT_KIND_COUNT)
+		return -EINVAL;
+	if (row->trigger == AUTH_CONTRACT_TRIGGER_UNKNOWN ||
+	    row->trigger >= AUTH_CONTRACT_TRIGGER_COUNT)
+		return -EINVAL;
+	if (row->subject_class == AUTH_CONTRACT_SUBJECT_UNKNOWN ||
+	    row->subject_class >= AUTH_CONTRACT_SUBJECT_CLASS_COUNT)
+		return -EINVAL;
+	if (row->root_class == AUTH_CONTRACT_ROOT_UNKNOWN ||
+	    row->root_class >= AUTH_CONTRACT_ROOT_CLASS_COUNT)
+		return -EINVAL;
+	if (row->leaf != AUTH_CONTRACT_LEAF_ALLOWED &&
+	    row->leaf != AUTH_CONTRACT_LEAF_FORBIDDEN)
+		return -EINVAL;
+
+	/* Tenant subjects may not reference host-authority roots. */
+	if (auth_contract_is_tenant_class(row->subject_class) &&
+	    auth_contract_is_host_root_class(row->root_class))
+		return -EINVAL;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(auth_contract_row_check);
+
+int auth_contract_load(const struct auth_transition_table *table)
+{
+	unsigned int i;
+	int ret;
+
+	ret = auth_contract_table_verify(table);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < table->row_count; i++) {
+		ret = auth_contract_row_check(&table->rows[i]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(auth_contract_load);
