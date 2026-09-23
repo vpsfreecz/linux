@@ -29,6 +29,14 @@ int auth_expectation_store_record(struct auth_expectation_store *store,
 		return -EINVAL;
 	if (!auth_expectation_value_valid(hash, len))
 		return -EINVAL;
+	/*
+	 * Provenance is part of the record, not decoration: the claim may only
+	 * rest on an externally rooted expectation, and a record with no source
+	 * (or an unknown one) would let that distinction be lost silently.
+	 */
+	if (source != AUTH_EXPECTATION_SOURCE_LEXICAL &&
+	    source != AUTH_EXPECTATION_SOURCE_EXTERNAL)
+		return -EINVAL;
 	if (store->sealed)
 		return -EPERM;
 	if (store->entries[region].hash)

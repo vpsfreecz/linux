@@ -40,6 +40,28 @@ static void auth_expectation_record_lookup_roundtrip(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, out.len, 64);
 	KUNIT_EXPECT_EQ(test, out.region, AUTH_EXPECTATION_REGION_GUARD_TEXT);
 	KUNIT_EXPECT_EQ(test, out.source, AUTH_EXPECTATION_SOURCE_LEXICAL);
+
+	/*
+	 * An externally rooted record must stay distinguishable from a lexical
+	 * one: the "externally measured" claim rests on that difference.
+	 */
+	ret = auth_expectation_store_record(&store,
+					    AUTH_EXPECTATION_REGION_POLICY,
+					    0x5678, 32,
+					    AUTH_EXPECTATION_SOURCE_EXTERNAL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = auth_expectation_store_lookup(&store,
+					    AUTH_EXPECTATION_REGION_POLICY,
+					    &out);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, out.source, AUTH_EXPECTATION_SOURCE_EXTERNAL);
+
+	ret = auth_expectation_store_lookup(&store,
+					    AUTH_EXPECTATION_REGION_GUARD_TEXT,
+					    &out);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, out.source, AUTH_EXPECTATION_SOURCE_LEXICAL);
 }
 
 static void auth_expectation_rejects_invalid_values(struct kunit *test)
@@ -65,6 +87,17 @@ static void auth_expectation_rejects_invalid_values(struct kunit *test)
 	ret = auth_expectation_store_lookup(&store,
 					    AUTH_EXPECTATION_REGION_POLICY,
 					    NULL);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+
+	/* Provenance must be declared: no source, or an unknown one, fails. */
+	ret = auth_expectation_store_record(&store,
+					    AUTH_EXPECTATION_REGION_POLICY, 1, 1,
+					    AUTH_EXPECTATION_SOURCE_NONE);
+	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
+
+	ret = auth_expectation_store_record(&store,
+					    AUTH_EXPECTATION_REGION_POLICY, 1, 1,
+					    (enum auth_expectation_source)3);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
