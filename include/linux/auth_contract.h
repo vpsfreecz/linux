@@ -271,4 +271,13 @@ unsigned long auth_contract_row_count(unsigned int index);
 enum auth_contract_verdict
 auth_contract_judge(const struct auth_transition_tuple *tuple);
 
+/*
+ * Log-only judge note: the call sites use it before enforcement exists.  A
+ * declared transition stays silent (the judge's counter is the record);
+ * forbidden and undeclared ones are logged once per class pattern, and the
+ * verdict is returned so a call site can act on it once enforcement lands.
+ */
+enum auth_contract_verdict
+auth_contract_note(const struct auth_transition_tuple *tuple, const char *where);
+
 #endif /* _LINUX_AUTH_CONTRACT_H */

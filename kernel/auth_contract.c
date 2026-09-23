@@ -9,6 +9,7 @@
 #include <linux/overflow.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 
 static bool auth_expectation_region_valid(enum auth_expectation_region region)
 {
@@ -369,3 +370,60 @@ auth_contract_judge(const struct auth_transition_tuple *tuple)
 	return AUTH_VERDICT_UNKNOWN;
 }
 EXPORT_SYMBOL_GPL(auth_contract_judge);
+
+#define AUTH_CONTRACT_PATTERN_SLOTS 64
+
+static DEFINE_SPINLOCK(auth_contract_pattern_lock);
+static u64 auth_contract_patterns[AUTH_CONTRACT_PATTERN_SLOTS];
+static unsigned int auth_contract_pattern_count;
+
+enum auth_contract_verdict
+auth_contract_note(const struct auth_transition_tuple *tuple, const char *where)
+{
+	enum auth_contract_verdict verdict;
+	unsigned long flags;
+	unsigned int i;
+	bool first = false;
+	u64 pattern;
+
+	if (!tuple)
+		return AUTH_VERDICT_UNKNOWN;
+
+	verdict = auth_contract_judge(tuple);
+	if (verdict == AUTH_VERDICT_DECLARED)
+		return verdict;
+	/* Without a table there is nothing to note against yet. */
+	if (!auth_contract_table_get())
+		return verdict;
+
+	pattern = (u64)tuple->kind << 56 | (u64)tuple->trigger << 48 |
+		(u64)tuple->caller << 40 | (u64)tuple->subject.klass << 32 |
+		tuple->roots;
+	if (!pattern)
+		pattern = 1;
+
+	spin_lock_irqsave(&auth_contract_pattern_lock, flags);
+	for (i = 0; i < auth_contract_pattern_count; i++) {
+		if (auth_contract_patterns[i] == pattern)
+			break;
+	}
+	if (i == auth_contract_pattern_count) {
+		if (auth_contract_pattern_count < AUTH_CONTRACT_PATTERN_SLOTS)
+			auth_contract_patterns[auth_contract_pattern_count++] =
+				pattern;
+		first = true;
+	}
+	spin_unlock_irqrestore(&auth_contract_pattern_lock, flags);
+
+	if (first)
+		pr_warn("auth_contract: %s: %s transition kind=%u trigger=%u caller=%u subject=%u roots=%#x template=%llu\n",
+			where,
+			verdict == AUTH_VERDICT_FORBIDDEN ? "forbidden" :
+							   "undeclared",
+			tuple->kind, tuple->trigger, tuple->caller,
+			tuple->subject.klass, tuple->roots,
+			tuple->subject.template_id);
+
+	return verdict;
+}
+EXPORT_SYMBOL_GPL(auth_contract_note);

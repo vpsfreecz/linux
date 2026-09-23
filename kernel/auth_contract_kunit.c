@@ -313,6 +313,16 @@ static void auth_contract_judge_without_table_is_unknown(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_UNKNOWN);
 }
 
+static void auth_contract_note_without_table_is_unknown(struct kunit *test)
+{
+	struct auth_transition_tuple *tuple;
+	unsigned int roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_CRED);
+
+	tuple = auth_contract_test_tuple(test, roots);
+	KUNIT_EXPECT_EQ(test, auth_contract_note(tuple, "test"),
+			AUTH_VERDICT_UNKNOWN);
+}
+
 static void auth_contract_table_publish_rejects_unsealed(struct kunit *test)
 {
 	struct auth_transition_table *table = auth_contract_test_table(test, 2);
@@ -358,6 +368,30 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, auth_contract_table_publish(table), -EBUSY);
 }
 
+static void auth_contract_note_reports_the_verdict(struct kunit *test)
+{
+	struct auth_transition_tuple *tuple;
+
+	/* The table is published by the previous case. */
+	KUNIT_ASSERT_NOT_NULL(test, auth_contract_table_get());
+
+	tuple = auth_contract_test_tuple(test,
+					 BIT(AUTH_CONTRACT_ROOT_CONTAINER_CRED));
+	KUNIT_EXPECT_EQ(test, auth_contract_note(tuple, "test"),
+			AUTH_VERDICT_DECLARED);
+
+	tuple->kind = AUTH_CONTRACT_KIND_NS_JOIN;
+	tuple->trigger = AUTH_CONTRACT_TRIGGER_SETNS;
+	tuple->caller = AUTH_CONTRACT_SUBJECT_MANAGER;
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY);
+	KUNIT_EXPECT_EQ(test, auth_contract_note(tuple, "test"),
+			AUTH_VERDICT_FORBIDDEN);
+
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_HOST_CRED);
+	KUNIT_EXPECT_EQ(test, auth_contract_note(tuple, "test"),
+			AUTH_VERDICT_UNKNOWN);
+}
+
 static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_expectation_missing_region_fails_closed),
 	KUNIT_CASE(auth_expectation_record_lookup_roundtrip),
@@ -376,8 +410,10 @@ static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_contract_load_rejects_unsealed_table),
 	KUNIT_CASE(auth_contract_load_rejects_invalid_row),
 	KUNIT_CASE(auth_contract_judge_without_table_is_unknown),
+	KUNIT_CASE(auth_contract_note_without_table_is_unknown),
 	KUNIT_CASE(auth_contract_table_publish_rejects_unsealed),
 	KUNIT_CASE(auth_contract_table_publish_and_judge),
+	KUNIT_CASE(auth_contract_note_reports_the_verdict),
 	{}
 };
 
