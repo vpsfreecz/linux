@@ -290,6 +290,18 @@ static void auth_contract_row_accepts_extended_inventory(struct kunit *test)
 	row.root_class = AUTH_CONTRACT_ROOT_HOST_FILES;
 	row.caller = AUTH_CONTRACT_SUBJECT_MANAGER;
 	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
+
+	/*
+	 * P-12L: registration-time registration that changes authority — io_uring
+	 * personalities are registered separately from the file bundles, so they
+	 * carry their own inventoried trigger.
+	 */
+	row.kind = AUTH_CONTRACT_KIND_IO_URING_REGISTER;
+	row.trigger = AUTH_CONTRACT_TRIGGER_IO_URING_PERSONALITY;
+	row.subject_class = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+	row.root_class = AUTH_CONTRACT_ROOT_CONTAINER_CRED;
+	row.caller = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
+	KUNIT_EXPECT_EQ(test, auth_contract_row_check(&row), 0);
 }
 
 static void auth_contract_row_rejects_unknown_values(struct kunit *test)
