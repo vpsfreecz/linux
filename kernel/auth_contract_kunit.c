@@ -27,8 +27,7 @@ static void auth_expectation_record_lookup_roundtrip(struct kunit *test)
 
 	ret = auth_expectation_store_record(&store,
 					    AUTH_EXPECTATION_REGION_GUARD_TEXT,
-					    0x1234, 64,
-					    AUTH_EXPECTATION_SOURCE_LEXICAL);
+					    0x1234, 64);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 
 	ret = auth_expectation_store_lookup(&store,
@@ -40,15 +39,15 @@ static void auth_expectation_record_lookup_roundtrip(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, out.len, 64);
 	KUNIT_EXPECT_EQ(test, out.region, AUTH_EXPECTATION_REGION_GUARD_TEXT);
 	KUNIT_EXPECT_EQ(test, out.source, AUTH_EXPECTATION_SOURCE_LEXICAL);
+	KUNIT_EXPECT_EQ(test, out.transcript, 0);
 
 	/*
 	 * An externally rooted record must stay distinguishable from a lexical
 	 * one: the "externally measured" claim rests on that difference.
 	 */
-	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_POLICY,
-					    0x5678, 32,
-					    AUTH_EXPECTATION_SOURCE_EXTERNAL);
+	ret = auth_expectation_store_record_external(&store,
+						     AUTH_EXPECTATION_REGION_POLICY,
+						     0x5678, 32, 0xbeefcafe);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 
 	ret = auth_expectation_store_lookup(&store,
@@ -56,6 +55,7 @@ static void auth_expectation_record_lookup_roundtrip(struct kunit *test)
 					    &out);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, out.source, AUTH_EXPECTATION_SOURCE_EXTERNAL);
+	KUNIT_EXPECT_EQ(test, out.transcript, 0xbeefcafe);
 
 	ret = auth_expectation_store_lookup(&store,
 					    AUTH_EXPECTATION_REGION_GUARD_TEXT,
@@ -70,18 +70,15 @@ static void auth_expectation_rejects_invalid_values(struct kunit *test)
 	int ret;
 
 	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_COUNT, 1, 1,
-					    AUTH_EXPECTATION_SOURCE_LEXICAL);
+					    AUTH_EXPECTATION_REGION_COUNT, 1, 1);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 
 	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_POLICY, 0, 1,
-					    AUTH_EXPECTATION_SOURCE_LEXICAL);
+					    AUTH_EXPECTATION_REGION_POLICY, 0, 1);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 
 	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_POLICY, 1, 0,
-					    AUTH_EXPECTATION_SOURCE_LEXICAL);
+					    AUTH_EXPECTATION_REGION_POLICY, 1, 0);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 
 	ret = auth_expectation_store_lookup(&store,
@@ -89,15 +86,14 @@ static void auth_expectation_rejects_invalid_values(struct kunit *test)
 					    NULL);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 
-	/* Provenance must be declared: no source, or an unknown one, fails. */
-	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_POLICY, 1, 1,
-					    AUTH_EXPECTATION_SOURCE_NONE);
-	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
-
-	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_POLICY, 1, 1,
-					    (enum auth_expectation_source)3);
+	/*
+	 * Externality is not a label: the lexical entry point cannot mint it at
+	 * all (the source is not a parameter), and the external entry point
+	 * refuses a claim that carries no transcript seal.
+	 */
+	ret = auth_expectation_store_record_external(&store,
+						     AUTH_EXPECTATION_REGION_POLICY,
+						     1, 1, 0);
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
@@ -107,13 +103,12 @@ static void auth_expectation_duplicate_record_rejected(struct kunit *test)
 	int ret;
 
 	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_POLICY, 1, 1,
-					    AUTH_EXPECTATION_SOURCE_LEXICAL);
+					    AUTH_EXPECTATION_REGION_POLICY, 1, 1);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 
-	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_POLICY, 2, 2,
-					    AUTH_EXPECTATION_SOURCE_EXTERNAL);
+	ret = auth_expectation_store_record_external(&store,
+						     AUTH_EXPECTATION_REGION_POLICY,
+						     2, 2, 0x5a5a);
 	KUNIT_EXPECT_EQ(test, ret, -EEXIST);
 }
 
@@ -125,16 +120,14 @@ static void auth_expectation_sealed_store_rejects_records(struct kunit *test)
 
 	ret = auth_expectation_store_record(&store,
 					    AUTH_EXPECTATION_REGION_GUARD_TEXT,
-					    1, 1,
-					    AUTH_EXPECTATION_SOURCE_LEXICAL);
+					    1, 1);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 
 	auth_expectation_store_seal(&store);
 	KUNIT_EXPECT_TRUE(test, auth_expectation_store_sealed(&store));
 
 	ret = auth_expectation_store_record(&store,
-					    AUTH_EXPECTATION_REGION_POLICY, 1, 1,
-					    AUTH_EXPECTATION_SOURCE_LEXICAL);
+					    AUTH_EXPECTATION_REGION_POLICY, 1, 1);
 	KUNIT_EXPECT_EQ(test, ret, -EPERM);
 
 	ret = auth_expectation_store_lookup(&store,

@@ -38,6 +38,7 @@ struct auth_expectation {
 	u32 len;
 	u16 region;
 	u16 source;
+	u64 transcript;
 };
 
 /*
@@ -73,7 +74,9 @@ static inline bool auth_expectation_sealed(void)
 #else
 
 int auth_expectation_record(enum auth_expectation_region region, u64 hash,
-			    u32 len, enum auth_expectation_source source);
+			    u32 len);
+int auth_expectation_record_external(enum auth_expectation_region region,
+				     u64 hash, u32 len, u64 transcript);
 int auth_expectation_lookup(enum auth_expectation_region region,
 			    struct auth_expectation *out);
 bool auth_expectation_sealed(void);
@@ -82,7 +85,10 @@ bool auth_expectation_sealed(void);
 
 int auth_expectation_store_record(struct auth_expectation_store *store,
 				  enum auth_expectation_region region, u64 hash,
-				  u32 len, enum auth_expectation_source source);
+				  u32 len);
+int auth_expectation_store_record_external(struct auth_expectation_store *store,
+					   enum auth_expectation_region region,
+					   u64 hash, u32 len, u64 transcript);
 int auth_expectation_store_lookup(const struct auth_expectation_store *store,
 				  enum auth_expectation_region region,
 				  struct auth_expectation *out);

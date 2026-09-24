@@ -21,19 +21,16 @@ static bool auth_expectation_value_valid(u64 hash, u32 len)
 	return hash != 0 && len != 0;
 }
 
-int auth_expectation_store_record(struct auth_expectation_store *store,
-				  enum auth_expectation_region region, u64 hash,
-				  u32 len, enum auth_expectation_source source)
+static int auth_expectation_store_put(struct auth_expectation_store *store,
+				      enum auth_expectation_region region,
+				      u64 hash, u32 len,
+				      enum auth_expectation_source source,
+				      u64 transcript)
 {
-	if (!auth_expectation_region_valid(region))
+	if (!store || !auth_expectation_region_valid(region))
 		return -EINVAL;
 	if (!auth_expectation_value_valid(hash, len))
 		return -EINVAL;
-	/*
-	 * Provenance is part of the record, not decoration: the claim may only
-	 * rest on an externally rooted expectation, and a record with no source
-	 * (or an unknown one) would let that distinction be lost silently.
-	 */
 	if (source != AUTH_EXPECTATION_SOURCE_LEXICAL &&
 	    source != AUTH_EXPECTATION_SOURCE_EXTERNAL)
 		return -EINVAL;
@@ -47,11 +44,61 @@ int auth_expectation_store_record(struct auth_expectation_store *store,
 		.len = len,
 		.region = region,
 		.source = source,
+		.transcript = transcript,
 	};
 
 	return 0;
 }
+
+/**
+ * auth_expectation_store_record - record a lexical (in-kernel) expectation
+ * @store: the store to write to
+ * @region: the measured region
+ * @hash: the measured value
+ * @len: the measured length
+ *
+ * The entry point fixes the provenance: a caller cannot declare its own
+ * measurement external.  Externality is a claim about where the value came
+ * from, not a label, so it may only be produced by the path that actually
+ * received the external transcript (see
+ * auth_expectation_store_record_external()).
+ */
+int auth_expectation_store_record(struct auth_expectation_store *store,
+				  enum auth_expectation_region region, u64 hash,
+				  u32 len)
+{
+	return auth_expectation_store_put(store, region, hash, len,
+					  AUTH_EXPECTATION_SOURCE_LEXICAL, 0);
+}
 EXPORT_SYMBOL_GPL(auth_expectation_store_record);
+
+/**
+ * auth_expectation_store_record_external - record an externally measured
+ * expectation
+ * @store: the store to write to
+ * @region: the measured region
+ * @hash: the externally measured value
+ * @len: the measured length
+ * @transcript: identifying seal of the external transcript the value came
+ *              from; zero is refused
+ *
+ * This is the only producer of AUTH_EXPECTATION_SOURCE_EXTERNAL.  The seal is
+ * stored with the record, so the claim carries the evidence it rests on
+ * instead of being a bare label; verifying the transcript itself belongs to
+ * the external measurement path (P-14S/P-17), which owns this entry point.
+ */
+int auth_expectation_store_record_external(struct auth_expectation_store *store,
+					   enum auth_expectation_region region,
+					   u64 hash, u32 len, u64 transcript)
+{
+	if (!transcript)
+		return -EINVAL;
+
+	return auth_expectation_store_put(store, region, hash, len,
+					  AUTH_EXPECTATION_SOURCE_EXTERNAL,
+					  transcript);
+}
+EXPORT_SYMBOL_GPL(auth_expectation_store_record_external);
 
 int auth_expectation_store_lookup(const struct auth_expectation_store *store,
 				  enum auth_expectation_region region,
@@ -89,12 +136,21 @@ EXPORT_SYMBOL_GPL(auth_expectation_store_seal);
 static struct auth_expectation_store auth_expectation_store __ro_after_init;
 
 int auth_expectation_record(enum auth_expectation_region region, u64 hash,
-			    u32 len, enum auth_expectation_source source)
+			    u32 len)
 {
 	return auth_expectation_store_record(&auth_expectation_store, region,
-					     hash, len, source);
+					     hash, len);
 }
 EXPORT_SYMBOL_GPL(auth_expectation_record);
+
+int auth_expectation_record_external(enum auth_expectation_region region,
+				     u64 hash, u32 len, u64 transcript)
+{
+	return auth_expectation_store_record_external(&auth_expectation_store,
+						      region, hash, len,
+						      transcript);
+}
+EXPORT_SYMBOL_GPL(auth_expectation_record_external);
 
 int auth_expectation_lookup(enum auth_expectation_region region,
 			    struct auth_expectation *out)
