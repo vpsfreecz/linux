@@ -476,7 +476,15 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 
 	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
 	KUNIT_ASSERT_EQ(test, auth_contract_table_publish(table), 0);
-	KUNIT_EXPECT_PTR_EQ(test, auth_contract_table_get(), table);
+	/*
+	 * Publication transfers ownership: the kernel publishes its own copy of
+	 * the table, so a caller that keeps, mutates or frees its buffer
+	 * afterwards cannot change what the kernel enforces.
+	 */
+	KUNIT_EXPECT_PTR_NE(test, auth_contract_table_get(), table);
+	KUNIT_EXPECT_EQ(test, 0,
+			memcmp(auth_contract_table_get(), table,
+			       struct_size(table, rows, table->row_count)));
 
 	/* Row 0: allowed credential commit for a tenant task. */
 	tuple = auth_contract_test_tuple(test,
@@ -505,6 +513,15 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 
 	/* A second publication is refused. */
 	KUNIT_EXPECT_EQ(test, auth_contract_table_publish(table), -EBUSY);
+
+	/*
+	 * A mutation of the caller's buffer — row 1 turned from forbidden into
+	 * allowed — must not reach the live table.
+	 */
+	table->rows[1].leaf = AUTH_CONTRACT_LEAF_ALLOWED;
+	tuple->subject.template_id = 7;
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY);
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_FORBIDDEN);
 }
 
 static void auth_contract_note_reports_the_verdict(struct kunit *test)

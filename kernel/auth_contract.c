@@ -379,9 +379,25 @@ EXPORT_SYMBOL_GPL(auth_contract_load);
 static struct auth_transition_table __rcu *auth_contract_active;
 static atomic_long_t *auth_contract_counters;
 
+/**
+ * auth_contract_table_publish - make a table the one the kernel uses
+ * @table: the verified table to publish
+ *
+ * Publication transfers ownership: the kernel takes a private copy of exactly
+ * struct_size(rows, row_count) bytes and publishes that.  Publishing the
+ * caller's buffer would leave the live policy caller-owned — mutable after
+ * the seal was checked, and freeable while readers still dereference it — so
+ * a later edit or reuse of the buffer could change what the kernel enforces
+ * without any verification seeing it.
+ *
+ * At most one table is active per boot, and the copy is never released: that
+ * is the lifetime the active table has.
+ */
 int auth_contract_table_publish(struct auth_transition_table *table)
 {
+	struct auth_transition_table *copy;
 	atomic_long_t *counters;
+	size_t len;
 	int ret;
 
 	if (!table)
@@ -393,13 +409,27 @@ int auth_contract_table_publish(struct auth_transition_table *table)
 	if (ret)
 		return ret;
 
-	counters = kcalloc(table->row_count, sizeof(*counters), GFP_KERNEL);
-	if (!counters)
+	len = struct_size(copy, rows, table->row_count);
+	copy = kmemdup(table, len, GFP_KERNEL);
+	if (!copy)
 		return -ENOMEM;
+
+	/* The copy must verify in its own right before it goes live. */
+	ret = auth_contract_table_verify(copy);
+	if (ret) {
+		kfree(copy);
+		return ret;
+	}
+
+	counters = kcalloc(table->row_count, sizeof(*counters), GFP_KERNEL);
+	if (!counters) {
+		kfree(copy);
+		return -ENOMEM;
+	}
 
 	/* Counters first: a reader that sees the table must see them. */
 	smp_store_release(&auth_contract_counters, counters);
-	rcu_assign_pointer(auth_contract_active, table);
+	rcu_assign_pointer(auth_contract_active, copy);
 
 	return 0;
 }
