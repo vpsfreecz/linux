@@ -7,6 +7,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/overflow.h>
+#include <linux/xxhash.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -360,12 +361,50 @@ int auth_contract_row_check(const struct auth_transition_row *row)
 }
 EXPORT_SYMBOL_GPL(auth_contract_row_check);
 
+/**
+ * auth_contract_row_hash - content hash of a table's rows
+ * @rows: the row array
+ * @count: number of rows
+ *
+ * The table carries the hash of the rows it ships (P-04's row_hash) and the
+ * load path must find it consistent with those rows: the kernel seal covers
+ * the field too, so a sealed table whose hash contradicts its rows is a
+ * self-contradictory object, and anything that compares tables by that hash
+ * (the narrowing rule, the fleet records) would otherwise be comparing claims
+ * instead of content.
+ *
+ * xxh64 with seed 0 is deterministic and available on both sides of the
+ * interface (the kernel and the manager-side authoring tooling), which is what
+ * makes the field checkable at all; authentication is the seal's job, not this
+ * hash's.
+ */
+u64 auth_contract_row_hash(const struct auth_transition_row *rows,
+			   unsigned int count)
+{
+	return xxh64(rows, array_size(count, sizeof(*rows)), 0);
+}
+EXPORT_SYMBOL_GPL(auth_contract_row_hash);
+
+static int
+auth_contract_table_row_hash_check(const struct auth_transition_table *table)
+{
+	if (table->row_hash != auth_contract_row_hash(table->rows,
+						      table->row_count))
+		return -EKEYREJECTED;
+
+	return 0;
+}
+
 int auth_contract_load(const struct auth_transition_table *table)
 {
 	unsigned int i;
 	int ret;
 
 	ret = auth_contract_table_verify(table);
+	if (ret)
+		return ret;
+
+	ret = auth_contract_table_row_hash_check(table);
 	if (ret)
 		return ret;
 

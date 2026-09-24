@@ -141,7 +141,6 @@ static void auth_contract_test_fill_table(struct auth_transition_table *table,
 {
 	table->template_id = 7;
 	table->row_count = rows;
-	table->row_hash = 0x1223344556677889ULL;
 
 	if (rows > 0)
 		table->rows[0] = (struct auth_transition_row) {
@@ -186,6 +185,8 @@ static void auth_contract_test_fill_table(struct auth_transition_table *table,
 			.caller = AUTH_CONTRACT_SUBJECT_MANAGER,
 			.leaf = AUTH_CONTRACT_LEAF_FORBIDDEN,
 		};
+
+	table->row_hash = auth_contract_row_hash(table->rows, rows);
 }
 
 static struct auth_transition_table *
@@ -438,6 +439,17 @@ static void auth_contract_load_accepts_sealed_table(struct kunit *test)
 
 	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
 	KUNIT_EXPECT_EQ(test, auth_contract_load(table), 0);
+
+	/*
+	 * A sealed table whose row hash contradicts its rows must not load: the
+	 * seal covers the field, so verify() alone accepts it (the seal matches
+	 * the digest), and the load path is where the claim about the rows is
+	 * checked against the rows.
+	 */
+	table->row_hash ^= 1;
+	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_verify(table), 0);
+	KUNIT_EXPECT_EQ(test, auth_contract_load(table), -EKEYREJECTED);
 }
 
 static void auth_contract_load_rejects_unsealed_table(struct kunit *test)

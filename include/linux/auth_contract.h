@@ -264,6 +264,8 @@ auth_contract_is_host_root_class(enum auth_contract_root_class klass)
 int auth_contract_table_seal(struct auth_transition_table *table);
 int auth_contract_table_verify(const struct auth_transition_table *table);
 int auth_contract_table_verify_buffer(const void *buf, size_t len);
+u64 auth_contract_row_hash(const struct auth_transition_row *rows,
+			   unsigned int count);
 int auth_contract_row_check(const struct auth_transition_row *row);
 int auth_contract_load(const struct auth_transition_table *table);
 
