@@ -161,6 +161,31 @@ static void auth_contract_test_fill_table(struct auth_transition_table *table,
 			.caller = AUTH_CONTRACT_SUBJECT_MANAGER,
 			.leaf = AUTH_CONTRACT_LEAF_FORBIDDEN,
 		};
+	/*
+	 * Rows 2 and 3 share kind, trigger, caller and subject on purpose: they
+	 * are the multi-root masking pair.  The trusted manager may join its
+	 * container namespace, and the same join against host files is
+	 * forbidden; a tuple that asks for both must not be decided by
+	 * whichever row happens to come first.
+	 */
+	if (rows > 2)
+		table->rows[2] = (struct auth_transition_row) {
+			.kind = AUTH_CONTRACT_KIND_NS_JOIN,
+			.subject_class = AUTH_CONTRACT_SUBJECT_MANAGER,
+			.root_class = AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY,
+			.trigger = AUTH_CONTRACT_TRIGGER_SETNS,
+			.caller = AUTH_CONTRACT_SUBJECT_MANAGER,
+			.leaf = AUTH_CONTRACT_LEAF_ALLOWED,
+		};
+	if (rows > 3)
+		table->rows[3] = (struct auth_transition_row) {
+			.kind = AUTH_CONTRACT_KIND_NS_JOIN,
+			.subject_class = AUTH_CONTRACT_SUBJECT_MANAGER,
+			.root_class = AUTH_CONTRACT_ROOT_HOST_FILES,
+			.trigger = AUTH_CONTRACT_TRIGGER_SETNS,
+			.caller = AUTH_CONTRACT_SUBJECT_MANAGER,
+			.leaf = AUTH_CONTRACT_LEAF_FORBIDDEN,
+		};
 }
 
 static struct auth_transition_table *
@@ -471,7 +496,7 @@ static void auth_contract_table_publish_rejects_unsealed(struct kunit *test)
 static void auth_contract_table_publish_and_judge(struct kunit *test)
 {
 	struct auth_transition_table *table =
-		auth_contract_test_publishable_table(test, 2);
+		auth_contract_test_publishable_table(test, 4);
 	struct auth_transition_tuple *tuple;
 
 	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
@@ -510,6 +535,32 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_CRED);
 	tuple->subject.template_id = 8;
 	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_UNKNOWN);
+
+	/*
+	 * Round 5: the judge covers every requested root.  Row 2 allows the
+	 * manager's container-namespace join and row 3 forbids the same join
+	 * against host files; asking for both must deny, not take row 2.
+	 */
+	tuple->subject.template_id = 7;
+	tuple->subject.klass = AUTH_CONTRACT_SUBJECT_MANAGER;
+	tuple->kind = AUTH_CONTRACT_KIND_NS_JOIN;
+	tuple->trigger = AUTH_CONTRACT_TRIGGER_SETNS;
+	tuple->caller = AUTH_CONTRACT_SUBJECT_MANAGER;
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY) |
+		       BIT(AUTH_CONTRACT_ROOT_HOST_FILES);
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_FORBIDDEN);
+
+	/* An undeclared root in the same tuple keeps it undeclared. */
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY) |
+		       BIT(AUTH_CONTRACT_ROOT_CONTAINER_MOUNT);
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_UNKNOWN);
+
+	/* Every requested root declared is the only declared case, and the
+	 * declared row is the one that counts.
+	 */
+	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY);
+	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_DECLARED);
+	KUNIT_EXPECT_EQ(test, auth_contract_row_count(2), 1UL);
 
 	/* A second publication is refused. */
 	KUNIT_EXPECT_EQ(test, auth_contract_table_publish(table), -EBUSY);
