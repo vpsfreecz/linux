@@ -219,6 +219,10 @@ static void auth_contract_table_seal_roundtrip(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, auth_contract_table_seal(table), 0);
 	KUNIT_EXPECT_TRUE(test, auth_guard_stamp_valid(&table->stamp));
 	KUNIT_EXPECT_EQ(test, auth_contract_table_verify(table), 0);
+	KUNIT_EXPECT_EQ(test,
+			auth_contract_table_verify_buffer(table,
+							      struct_size(table, rows, 2)),
+			0);
 }
 
 static void auth_contract_table_verify_rejects_tampered_row(struct kunit *test)
@@ -258,6 +262,16 @@ static void auth_contract_table_rejects_bad_row_count(struct kunit *test)
 	table->row_count = AUTH_CONTRACT_MAX_ROWS + 1;
 	KUNIT_EXPECT_EQ(test, auth_contract_table_seal(table), -EINVAL);
 	KUNIT_EXPECT_EQ(test, auth_contract_table_verify(table), -EINVAL);
+
+	/* The buffer entry point rejects a length that does not match. */
+	table->row_count = 1;
+	KUNIT_EXPECT_EQ(test,
+			auth_contract_table_verify_buffer(table, sizeof(*table)),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			auth_contract_table_verify_buffer(table,
+							      struct_size(table, rows, 2)),
+			-EINVAL);
 }
 
 static void auth_contract_row_accepts_inventoried_values(struct kunit *test)

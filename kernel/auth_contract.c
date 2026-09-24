@@ -219,6 +219,37 @@ int auth_contract_table_verify(const struct auth_transition_table *table)
 }
 EXPORT_SYMBOL_GPL(auth_contract_table_verify);
 
+/**
+ * auth_contract_table_verify_buffer - verify a table that arrived as a buffer
+ * @buf: the received table image (head followed by its rows)
+ * @len: the received length in bytes
+ *
+ * Tables that reach the kernel from outside (the manager-signed loader, P-03)
+ * arrive as a byte range, and row_count is attacker-supplied like the rest of
+ * the wire form.  Verifying such a buffer without checking that it really
+ * holds row_count rows would read past its end while iterating and digesting:
+ * the keyed seal still prevents forgery, but the read itself is a
+ * memory-safety hole bounded only by AUTH_CONTRACT_MAX_ROWS.  The length gate
+ * is therefore mandatory and exact here, so a truncated row array and
+ * trailing bytes the sender did not sign are both rejected before any row is
+ * touched.
+ */
+int auth_contract_table_verify_buffer(const void *buf, size_t len)
+{
+	const struct auth_transition_table *table = buf;
+	size_t expected;
+
+	if (!buf || len < sizeof(*table))
+		return -EINVAL;
+
+	expected = struct_size(table, rows, table->row_count);
+	if (len != expected)
+		return -EINVAL;
+
+	return auth_contract_table_verify(table);
+}
+EXPORT_SYMBOL_GPL(auth_contract_table_verify_buffer);
+
 static int __init auth_contract_init(void)
 {
 	auth_guard_init_domain(&auth_contract_guard);
