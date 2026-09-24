@@ -213,6 +213,33 @@ u64 auth_guard_seal(struct auth_guard_domain *domain, const void *data,
 		    size_t len);
 void auth_guard_fail(const struct auth_guard_domain *domain, const char *where,
 		     const char *what, const void *object);
+
+/*
+ * LOG-mode failure records.  The guard keeps a bounded latch per failure site
+ * so the first report cannot be evicted from the ring buffer by the flood that
+ * followed it; repeats are counted and reported logarithmically.
+ */
+struct auth_guard_fail_key {
+	const void *domain;
+	const char *where;
+	const char *what;
+};
+
+#define AUTH_GUARD_FAIL_SLOTS 32
+
+#define AUTH_GUARD_FAIL_LOG_FIRST	0
+#define AUTH_GUARD_FAIL_LOG_REPEAT	1
+#define AUTH_GUARD_FAIL_LOG_SKIP	2
+
+struct auth_guard_fail_store {
+	struct auth_guard_fail_key keys[AUTH_GUARD_FAIL_SLOTS];
+	unsigned long counts[AUTH_GUARD_FAIL_SLOTS];
+	unsigned int count;
+};
+
+int auth_guard_fail_store_record(struct auth_guard_fail_store *store,
+				 const struct auth_guard_fail_key *key,
+				 unsigned long *count);
 #else
 struct auth_guard_domain {
 };

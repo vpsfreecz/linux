@@ -46,11 +46,74 @@ static void auth_guard_crng_refusal_keeps_the_guard_mode(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, refusal.mode, AUTH_GUARD_MODE_OFF);
 }
 
+static void auth_guard_fail_logs_each_site_once(struct kunit *test)
+{
+	struct auth_guard_fail_store store = { };
+	struct auth_guard_fail_key key = {
+		.domain = test,
+		.where = "site-a",
+		.what = "reason",
+	};
+	struct auth_guard_fail_key other = {
+		.domain = test,
+		.where = "site-b",
+		.what = "reason",
+	};
+	unsigned long count;
+	unsigned int i;
+
+	/* The first failure of a site is the report that must survive. */
+	KUNIT_EXPECT_EQ(test,
+			auth_guard_fail_store_record(&store, &key, &count),
+			AUTH_GUARD_FAIL_LOG_FIRST);
+	KUNIT_EXPECT_EQ(test, count, 1UL);
+
+	/* Immediate repeats are counted and skipped... */
+	KUNIT_EXPECT_EQ(test,
+			auth_guard_fail_store_record(&store, &key, &count),
+			AUTH_GUARD_FAIL_LOG_SKIP);
+	KUNIT_EXPECT_EQ(test, count, 2UL);
+	KUNIT_EXPECT_EQ(test,
+			auth_guard_fail_store_record(&store, &key, &count),
+			AUTH_GUARD_FAIL_LOG_SKIP);
+	KUNIT_EXPECT_EQ(test, count, 3UL);
+
+	/* ...and the volume reappears on powers of two. */
+	KUNIT_EXPECT_EQ(test,
+			auth_guard_fail_store_record(&store, &key, &count),
+			AUTH_GUARD_FAIL_LOG_REPEAT);
+	KUNIT_EXPECT_EQ(test, count, 4UL);
+
+	/* A different site is a different report. */
+	KUNIT_EXPECT_EQ(test,
+			auth_guard_fail_store_record(&store, &other, &count),
+			AUTH_GUARD_FAIL_LOG_FIRST);
+	KUNIT_EXPECT_EQ(test, count, 1UL);
+
+	/* A full store cannot remember new sites: they log every time. */
+	for (i = 0; i < AUTH_GUARD_FAIL_SLOTS; i++) {
+		struct auth_guard_fail_key filler = {
+			.domain = test,
+			.where = "filler",
+			.what = (const char *)(unsigned long)i,
+		};
+		unsigned long ignored;
+
+		auth_guard_fail_store_record(&store, &filler, &ignored);
+	}
+
+	for (i = 0; i < 2; i++)
+		KUNIT_EXPECT_EQ(test,
+				auth_guard_fail_store_record(&store, &key, &count),
+				AUTH_GUARD_FAIL_LOG_FIRST);
+}
+
 static struct kunit_case auth_guard_test_cases[] = {
 	KUNIT_CASE(auth_guard_crng_gate_allows_initialized),
 	KUNIT_CASE(auth_guard_crng_gate_refuses_uninitialized),
 	KUNIT_CASE(auth_guard_crng_gate_honours_forced_unready),
 	KUNIT_CASE(auth_guard_crng_refusal_keeps_the_guard_mode),
+	KUNIT_CASE(auth_guard_fail_logs_each_site_once),
 	{}
 };
 

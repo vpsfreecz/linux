@@ -12,6 +12,7 @@
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/limits.h>
+#include <linux/log2.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/nsproxy.h>
@@ -209,16 +210,81 @@ u64 auth_guard_seal(struct auth_guard_domain *domain, const void *data,
 	return seal ?: 1;
 }
 
+static DEFINE_SPINLOCK(auth_guard_fail_lock);
+static struct auth_guard_fail_store auth_guard_fail_store;
+
+/**
+ * auth_guard_fail_store_record - record one failure site, bounded
+ * @store: the store to record into
+ * @key: domain, site and reason of the failure
+ * @count: the site's accumulated failure count
+ *
+ * Returns AUTH_GUARD_FAIL_LOG_FIRST for a site's first failure (the report
+ * that must survive), AUTH_GUARD_FAIL_LOG_REPEAT when a repeat count reaches
+ * a power of two (volume stays visible without a flood), and
+ * AUTH_GUARD_FAIL_LOG_SKIP for the repeats in between.  A full store cannot
+ * remember new sites, so those log every time — fail-open toward logging.
+ */
+int auth_guard_fail_store_record(struct auth_guard_fail_store *store,
+				 const struct auth_guard_fail_key *key,
+				 unsigned long *count)
+{
+	unsigned int i;
+
+	for (i = 0; i < store->count; i++) {
+		if (store->keys[i].domain != key->domain ||
+		    store->keys[i].where != key->where ||
+		    store->keys[i].what != key->what)
+			continue;
+
+		store->counts[i]++;
+		*count = store->counts[i];
+
+		if (is_power_of_2(*count))
+			return AUTH_GUARD_FAIL_LOG_REPEAT;
+
+		return AUTH_GUARD_FAIL_LOG_SKIP;
+	}
+
+	*count = 1;
+	if (store->count < AUTH_GUARD_FAIL_SLOTS) {
+		store->keys[store->count] = *key;
+		store->counts[store->count] = 1;
+		store->count++;
+	}
+
+	return AUTH_GUARD_FAIL_LOG_FIRST;
+}
+EXPORT_SYMBOL_GPL(auth_guard_fail_store_record);
+
 void auth_guard_fail(const struct auth_guard_domain *domain, const char *where,
-			     const char *what, const void *object)
+		     const char *what, const void *object)
 {
 	if (auth_guard_mode == AUTH_GUARD_MODE_OFF)
 		return;
 
 	if (auth_guard_mode == AUTH_GUARD_MODE_LOG) {
-		pr_emerg("%s: %s: %s object=%p current=%p pid=%d comm=%s\n",
+		struct auth_guard_fail_key key = {
+			.domain = domain,
+			.where = where,
+			.what = what,
+		};
+		unsigned long flags, count;
+		int action;
+
+		spin_lock_irqsave(&auth_guard_fail_lock, flags);
+		action = auth_guard_fail_store_record(&auth_guard_fail_store,
+						      &key, &count);
+		spin_unlock_irqrestore(&auth_guard_fail_lock, flags);
+
+		if (action == AUTH_GUARD_FAIL_LOG_SKIP)
+			return;
+
+		pr_emerg("%s: %s: %s object=%p current=%p pid=%d comm=%s%s%lu\n",
 			 domain->name, where, what, object, current,
-			 current->pid, current->comm);
+			 current->pid, current->comm,
+			 action == AUTH_GUARD_FAIL_LOG_REPEAT ? " count=" : "",
+			 count);
 		return;
 	}
 
