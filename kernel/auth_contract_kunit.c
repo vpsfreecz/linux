@@ -281,6 +281,13 @@ static void auth_contract_table_rejects_bad_row_count(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, auth_contract_table_seal(table), -EINVAL);
 	KUNIT_EXPECT_EQ(test, auth_contract_table_verify(table), -EINVAL);
 
+	/* The template identity is validated too: zero is unset, not "any". */
+	table->row_count = 1;
+	table->template_id = 0;
+	KUNIT_EXPECT_EQ(test, auth_contract_table_seal(table), -EINVAL);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_verify(table), -EINVAL);
+	table->template_id = 7;
+
 	/* The buffer entry point rejects a length that does not match. */
 	table->row_count = 1;
 	KUNIT_EXPECT_EQ(test,

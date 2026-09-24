@@ -218,6 +218,15 @@ static int auth_contract_table_check(const struct auth_transition_table *table)
 {
 	if (!table)
 		return -EINVAL;
+	/*
+	 * The template identity is part of what a table claims.  Zero is an
+	 * unset identity, not "any template": the judge compares the table's
+	 * template_id against the tuple's subject template, so a table sealed
+	 * with zero would declare transitions for callers whose subject was
+	 * never identified.
+	 */
+	if (!table->template_id)
+		return -EINVAL;
 	if (table->row_count == 0 || table->row_count > AUTH_CONTRACT_MAX_ROWS)
 		return -EINVAL;
 
