@@ -516,8 +516,30 @@ EXPORT_SYMBOL_GPL(auth_contract_judge);
 #define AUTH_CONTRACT_PATTERN_SLOTS 64
 
 static DEFINE_SPINLOCK(auth_contract_pattern_lock);
-static u64 auth_contract_patterns[AUTH_CONTRACT_PATTERN_SLOTS];
+static struct auth_contract_note_key auth_contract_patterns[AUTH_CONTRACT_PATTERN_SLOTS];
 static unsigned int auth_contract_pattern_count;
+
+/**
+ * auth_contract_note_key - the de-duplication key of a transition class
+ * @tuple: the judged transition
+ * @key: filled with the class pattern and the template it belongs to
+ *
+ * The log-only note reports a class once.  Templates are a dimension of that
+ * class — the log line prints the template — so the key carries it: otherwise
+ * the first violation of one template would suppress the first violation of
+ * another, and a node running several templates would under-report silently.
+ */
+void auth_contract_note_key(const struct auth_transition_tuple *tuple,
+			    struct auth_contract_note_key *key)
+{
+	key->pattern = (u64)tuple->kind << 56 | (u64)tuple->trigger << 48 |
+		       (u64)tuple->caller << 40 |
+		       (u64)tuple->subject.klass << 32 | tuple->roots;
+	if (!key->pattern)
+		key->pattern = 1;
+	key->template_id = tuple->subject.template_id;
+}
+EXPORT_SYMBOL_GPL(auth_contract_note_key);
 
 enum auth_contract_verdict
 auth_contract_note(const struct auth_transition_tuple *tuple, const char *where)
@@ -526,7 +548,7 @@ auth_contract_note(const struct auth_transition_tuple *tuple, const char *where)
 	unsigned long flags;
 	unsigned int i;
 	bool first = false;
-	u64 pattern;
+	struct auth_contract_note_key key;
 
 	if (!tuple)
 		return AUTH_VERDICT_UNKNOWN;
@@ -538,21 +560,18 @@ auth_contract_note(const struct auth_transition_tuple *tuple, const char *where)
 	if (!auth_contract_table_get())
 		return verdict;
 
-	pattern = (u64)tuple->kind << 56 | (u64)tuple->trigger << 48 |
-		(u64)tuple->caller << 40 | (u64)tuple->subject.klass << 32 |
-		tuple->roots;
-	if (!pattern)
-		pattern = 1;
+	auth_contract_note_key(tuple, &key);
 
 	spin_lock_irqsave(&auth_contract_pattern_lock, flags);
 	for (i = 0; i < auth_contract_pattern_count; i++) {
-		if (auth_contract_patterns[i] == pattern)
+		if (auth_contract_patterns[i].pattern == key.pattern &&
+		    auth_contract_patterns[i].template_id == key.template_id)
 			break;
 	}
 	if (i == auth_contract_pattern_count) {
 		if (auth_contract_pattern_count < AUTH_CONTRACT_PATTERN_SLOTS)
 			auth_contract_patterns[auth_contract_pattern_count++] =
-				pattern;
+				key;
 		first = true;
 	}
 	spin_unlock_irqrestore(&auth_contract_pattern_lock, flags);

@@ -597,6 +597,27 @@ static void auth_contract_note_reports_the_verdict(struct kunit *test)
 	tuple->roots = BIT(AUTH_CONTRACT_ROOT_HOST_CRED);
 	KUNIT_EXPECT_EQ(test, auth_contract_note(tuple, "test"),
 			AUTH_VERDICT_UNKNOWN);
+
+	/*
+	 * Round 6: the de-duplication key carries the template, so a violation
+	 * on one template is not suppressed by another template's first
+	 * occurrence (the log line reports the template, so it is part of the
+	 * class).
+	 */
+	{
+		struct auth_contract_note_key a, b, c;
+
+		auth_contract_note_key(tuple, &a);
+		auth_contract_note_key(tuple, &b);
+		KUNIT_EXPECT_EQ(test, a.pattern, b.pattern);
+		KUNIT_EXPECT_EQ(test, a.template_id, b.template_id);
+
+		tuple->subject.template_id += 1;
+		auth_contract_note_key(tuple, &c);
+		KUNIT_EXPECT_EQ(test, a.pattern, c.pattern);
+		KUNIT_EXPECT_NE(test, a.template_id, c.template_id);
+		tuple->subject.template_id -= 1;
+	}
 }
 
 static struct kunit_case auth_contract_test_cases[] = {

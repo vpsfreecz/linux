@@ -315,6 +315,14 @@ auth_contract_judge(const struct auth_transition_tuple *tuple);
  * forbidden and undeclared ones are logged once per class pattern, and the
  * verdict is returned so a call site can act on it once enforcement lands.
  */
+struct auth_contract_note_key {
+	u64 pattern;
+	u64 template_id;
+};
+
+void auth_contract_note_key(const struct auth_transition_tuple *tuple,
+			    struct auth_contract_note_key *key);
+
 enum auth_contract_verdict
 auth_contract_note(const struct auth_transition_tuple *tuple, const char *where);
 
