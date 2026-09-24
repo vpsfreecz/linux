@@ -30,12 +30,6 @@
 #include <linux/uaccess.h>
 #include <linux/user_namespace.h>
 
-enum auth_guard_mode {
-	AUTH_GUARD_MODE_PANIC,
-	AUTH_GUARD_MODE_LOG,
-	AUTH_GUARD_MODE_OFF,
-};
-
 enum auth_guard_task_lifecycle {
 	AUTH_GUARD_TASK_LIVE,
 	AUTH_GUARD_TASK_EXITING,
@@ -115,6 +109,26 @@ static bool __init auth_guard_crng_confirmed(void)
 					   false);
 }
 
+/**
+ * auth_guard_crng_refusal_outcome - the P-01 refusal policy, as a pure function
+ * @mode: the operator-selected mode when the refusal is decided
+ *
+ * Refusal must not silently disable containment: the chokepoints key their
+ * enforcement off auth_guard_enabled(), so returning OFF here would fail
+ * open.  The outcome keeps the operator's mode and records the refusal; the
+ * unseeded domain then fails loudly on its first seal or generation, and the
+ * boot log carries the refusal marker the preflight looks for.
+ */
+struct auth_guard_crng_refusal
+auth_guard_crng_refusal_outcome(enum auth_guard_mode mode)
+{
+	return (struct auth_guard_crng_refusal) {
+		.mode = mode,
+		.refused = true,
+	};
+}
+EXPORT_SYMBOL_GPL(auth_guard_crng_refusal_outcome);
+
 void __init auth_guard_init_domain(struct auth_guard_domain *domain)
 {
 	/*
@@ -125,14 +139,19 @@ void __init auth_guard_init_domain(struct auth_guard_domain *domain)
 	 * afterwards. Once the CRNG is ready this is a cheap read.
 	 *
 	 * If initialization cannot be confirmed, refuse: leave the domain
-	 * unseeded, disable the guard for this boot, and record the decision
-	 * in the boot log. A node in that state must fail containment
-	 * preflight rather than serve tenants with keys of unproven quality.
+	 * unseeded, keep the operator's guard mode (a refusal never downgrades
+	 * the guard), and leave a distinct refusal marker in the boot log.  A
+	 * node in that state must fail containment preflight rather than
+	 * serve tenants with keys of unproven quality.
 	 */
 	if (!auth_guard_crng_confirmed()) {
-		pr_err("CRNG not initialized: refusing %s seed, disabling guard\n",
-		       domain->name);
-		auth_guard_mode = AUTH_GUARD_MODE_OFF;
+		struct auth_guard_crng_refusal refusal;
+
+		refusal = auth_guard_crng_refusal_outcome(auth_guard_mode);
+		auth_guard_mode = refusal.mode;
+
+		pr_emerg("auth_guard: crng-refusal: %s: CRNG not initialized; refusing seed; "
+			 "node must fail containment preflight\n", domain->name);
 		return;
 	}
 

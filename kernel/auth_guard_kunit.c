@@ -29,10 +29,28 @@ static void auth_guard_crng_gate_honours_forced_unready(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, auth_guard_crng_gate_allows(true, true));
 }
 
+static void auth_guard_crng_refusal_keeps_the_guard_mode(struct kunit *test)
+{
+	struct auth_guard_crng_refusal refusal;
+
+	refusal = auth_guard_crng_refusal_outcome(AUTH_GUARD_MODE_PANIC);
+	KUNIT_EXPECT_TRUE(test, refusal.refused);
+	KUNIT_EXPECT_EQ(test, refusal.mode, AUTH_GUARD_MODE_PANIC);
+
+	refusal = auth_guard_crng_refusal_outcome(AUTH_GUARD_MODE_LOG);
+	KUNIT_EXPECT_TRUE(test, refusal.refused);
+	KUNIT_EXPECT_EQ(test, refusal.mode, AUTH_GUARD_MODE_LOG);
+
+	refusal = auth_guard_crng_refusal_outcome(AUTH_GUARD_MODE_OFF);
+	KUNIT_EXPECT_TRUE(test, refusal.refused);
+	KUNIT_EXPECT_EQ(test, refusal.mode, AUTH_GUARD_MODE_OFF);
+}
+
 static struct kunit_case auth_guard_test_cases[] = {
 	KUNIT_CASE(auth_guard_crng_gate_allows_initialized),
 	KUNIT_CASE(auth_guard_crng_gate_refuses_uninitialized),
 	KUNIT_CASE(auth_guard_crng_gate_honours_forced_unready),
+	KUNIT_CASE(auth_guard_crng_refusal_keeps_the_guard_mode),
 	{}
 };
 

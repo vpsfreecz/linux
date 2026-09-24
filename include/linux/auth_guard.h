@@ -33,6 +33,24 @@ enum auth_guard_check_result {
 	AUTH_GUARD_CHECK_INVALID,
 };
 
+enum auth_guard_mode {
+	AUTH_GUARD_MODE_PANIC,
+	AUTH_GUARD_MODE_LOG,
+	AUTH_GUARD_MODE_OFF,
+};
+
+/*
+ * The CRNG-refusal outcome (P-01).  A refusal must never downgrade the
+ * guard: every chokepoint keys its enforcement off auth_guard_enabled(),
+ * so forcing the mode to OFF would let all wired checks pass through.
+ * The mode therefore stays as the operator selected it and only the
+ * refusal itself is recorded.
+ */
+struct auth_guard_crng_refusal {
+	enum auth_guard_mode mode;
+	bool refused;
+};
+
 /* Process-context waits must let the task owning a remote writer run. */
 #define AUTH_GUARD_RETRY_BUSY(_operation)                         \
 ({                                                                \
@@ -185,6 +203,8 @@ struct auth_guard_domain {
 
 void __init auth_guard_init_domain(struct auth_guard_domain *domain);
 bool auth_guard_crng_gate_allows(bool crng_ready, bool forced_unready);
+struct auth_guard_crng_refusal
+auth_guard_crng_refusal_outcome(enum auth_guard_mode mode);
 bool auth_guard_enabled(void);
 u64 auth_guard_next_generation(struct auth_guard_domain *domain);
 u64 auth_guard_nonce(void);
