@@ -225,7 +225,13 @@ struct auth_guard_fail_key {
 	const char *what;
 };
 
-#define AUTH_GUARD_FAIL_SLOTS 32
+/*
+ * One slot per failure site: auth_guard_fail() has 147 call sites and the key
+ * is the (domain, where, what) triple, so the table must cover the inventoried
+ * sites with headroom.  A full table cannot remember new sites and logs every
+ * occurrence of them — fail-open toward logging.
+ */
+#define AUTH_GUARD_FAIL_SLOTS 256
 
 #define AUTH_GUARD_FAIL_LOG_FIRST	0
 #define AUTH_GUARD_FAIL_LOG_REPEAT	1

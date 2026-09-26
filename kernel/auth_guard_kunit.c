@@ -48,7 +48,14 @@ static void auth_guard_crng_refusal_keeps_the_guard_mode(struct kunit *test)
 
 static void auth_guard_fail_logs_each_site_once(struct kunit *test)
 {
-	struct auth_guard_fail_store store = { };
+	struct auth_guard_fail_store *store;
+
+	/*
+	 * The latch covers the inventoried sites (256 slots ≈ 8 KB), so the case
+	 * keeps it off the stack.
+	 */
+	store = kunit_kzalloc(test, sizeof(*store), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, store);
 	struct auth_guard_fail_key key = {
 		.domain = test,
 		.where = "site-a",
@@ -64,29 +71,29 @@ static void auth_guard_fail_logs_each_site_once(struct kunit *test)
 
 	/* The first failure of a site is the report that must survive. */
 	KUNIT_EXPECT_EQ(test,
-			auth_guard_fail_store_record(&store, &key, &count),
+			auth_guard_fail_store_record(store, &key, &count),
 			AUTH_GUARD_FAIL_LOG_FIRST);
 	KUNIT_EXPECT_EQ(test, count, 1UL);
 
 	/* Immediate repeats are counted and skipped... */
 	KUNIT_EXPECT_EQ(test,
-			auth_guard_fail_store_record(&store, &key, &count),
+			auth_guard_fail_store_record(store, &key, &count),
 			AUTH_GUARD_FAIL_LOG_SKIP);
 	KUNIT_EXPECT_EQ(test, count, 2UL);
 	KUNIT_EXPECT_EQ(test,
-			auth_guard_fail_store_record(&store, &key, &count),
+			auth_guard_fail_store_record(store, &key, &count),
 			AUTH_GUARD_FAIL_LOG_SKIP);
 	KUNIT_EXPECT_EQ(test, count, 3UL);
 
 	/* ...and the volume reappears on powers of two. */
 	KUNIT_EXPECT_EQ(test,
-			auth_guard_fail_store_record(&store, &key, &count),
+			auth_guard_fail_store_record(store, &key, &count),
 			AUTH_GUARD_FAIL_LOG_REPEAT);
 	KUNIT_EXPECT_EQ(test, count, 4UL);
 
 	/* A different site is a different report. */
 	KUNIT_EXPECT_EQ(test,
-			auth_guard_fail_store_record(&store, &other, &count),
+			auth_guard_fail_store_record(store, &other, &count),
 			AUTH_GUARD_FAIL_LOG_FIRST);
 	KUNIT_EXPECT_EQ(test, count, 1UL);
 
@@ -99,12 +106,12 @@ static void auth_guard_fail_logs_each_site_once(struct kunit *test)
 		};
 		unsigned long ignored;
 
-		auth_guard_fail_store_record(&store, &filler, &ignored);
+		auth_guard_fail_store_record(store, &filler, &ignored);
 	}
 
 	for (i = 0; i < 2; i++)
 		KUNIT_EXPECT_EQ(test,
-				auth_guard_fail_store_record(&store, &key, &count),
+				auth_guard_fail_store_record(store, &key, &count),
 				AUTH_GUARD_FAIL_LOG_FIRST);
 }
 
