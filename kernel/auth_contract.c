@@ -28,6 +28,8 @@ static int auth_expectation_store_put(struct auth_expectation_store *store,
 				      enum auth_expectation_source source,
 				      u64 transcript)
 {
+	struct auth_expectation *existing;
+
 	if (!store || !auth_expectation_region_valid(region))
 		return -EINVAL;
 	if (!auth_expectation_value_valid(hash, len))
@@ -35,10 +37,22 @@ static int auth_expectation_store_put(struct auth_expectation_store *store,
 	if (source != AUTH_EXPECTATION_SOURCE_LEXICAL &&
 	    source != AUTH_EXPECTATION_SOURCE_EXTERNAL)
 		return -EINVAL;
+	existing = &store->entries[region];
 	if (store->sealed)
 		return -EPERM;
-	if (store->entries[region].hash)
-		return -EEXIST;
+	/*
+	 * Provenance is monotonic (round 11): a lexical measurement may be
+	 * upgraded by an externally rooted one — the design's rule is that a claim
+	 * may only rest on external evidence, and a first-arriving lexical record
+	 * must not pin the weaker provenance for the boot — while the reverse
+	 * would silently weaken a record that already rests on external evidence.
+	 * Any other rewrite stays refused.
+	 */
+	if (existing->hash) {
+		if (existing->source != AUTH_EXPECTATION_SOURCE_LEXICAL ||
+		    source != AUTH_EXPECTATION_SOURCE_EXTERNAL)
+			return -EEXIST;
+	}
 
 	store->entries[region] = (struct auth_expectation) {
 		.hash = hash,

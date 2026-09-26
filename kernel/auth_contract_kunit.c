@@ -97,11 +97,13 @@ static void auth_expectation_rejects_invalid_values(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, -EINVAL);
 }
 
-static void auth_expectation_duplicate_record_rejected(struct kunit *test)
+static void auth_expectation_provenance_is_monotonic(struct kunit *test)
 {
 	struct auth_expectation_store store = { };
+	struct auth_expectation out;
 	int ret;
 
+	/* A lexical measurement is a placeholder: the external one upgrades it. */
 	ret = auth_expectation_store_record(&store,
 					    AUTH_EXPECTATION_REGION_POLICY, 1, 1);
 	KUNIT_ASSERT_EQ(test, ret, 0);
@@ -109,6 +111,26 @@ static void auth_expectation_duplicate_record_rejected(struct kunit *test)
 	ret = auth_expectation_store_record_external(&store,
 						     AUTH_EXPECTATION_REGION_POLICY,
 						     2, 2, 0x5a5a);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = auth_expectation_store_lookup(&store,
+					    AUTH_EXPECTATION_REGION_POLICY, &out);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, out.source, AUTH_EXPECTATION_SOURCE_EXTERNAL);
+	KUNIT_EXPECT_EQ(test, out.transcript, 0x5a5a);
+	KUNIT_EXPECT_EQ(test, out.hash, 2);
+
+	/*
+	 * The record is final once it rests on external evidence: no second
+	 * upgrade and no downgrade back to a lexical claim.
+	 */
+	ret = auth_expectation_store_record_external(&store,
+						     AUTH_EXPECTATION_REGION_POLICY,
+						     3, 3, 0x6b6b);
+	KUNIT_EXPECT_EQ(test, ret, -EEXIST);
+
+	ret = auth_expectation_store_record(&store,
+					    AUTH_EXPECTATION_REGION_POLICY, 4, 4);
 	KUNIT_EXPECT_EQ(test, ret, -EEXIST);
 }
 
@@ -643,7 +665,7 @@ static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_expectation_missing_region_fails_closed),
 	KUNIT_CASE(auth_expectation_record_lookup_roundtrip),
 	KUNIT_CASE(auth_expectation_rejects_invalid_values),
-	KUNIT_CASE(auth_expectation_duplicate_record_rejected),
+	KUNIT_CASE(auth_expectation_provenance_is_monotonic),
 	KUNIT_CASE(auth_expectation_sealed_store_rejects_records),
 	KUNIT_CASE(auth_contract_table_seal_roundtrip),
 	KUNIT_CASE(auth_contract_table_verify_rejects_tampered_row),
