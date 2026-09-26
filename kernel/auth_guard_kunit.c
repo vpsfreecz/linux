@@ -66,7 +66,12 @@ static void auth_guard_fail_logs_each_site_once(struct kunit *test)
 		.where = "site-b",
 		.what = "reason",
 	};
-	unsigned long count;
+	struct auth_guard_fail_key fresh = {
+		.domain = test,
+		.where = "site-c",
+		.what = "reason",
+	};
+	unsigned long count, fresh_count;
 	unsigned int i;
 
 	/* The first failure of a site is the report that must survive. */
@@ -75,17 +80,15 @@ static void auth_guard_fail_logs_each_site_once(struct kunit *test)
 			AUTH_GUARD_FAIL_LOG_FIRST);
 	KUNIT_EXPECT_EQ(test, count, 1UL);
 
-	/* Immediate repeats are counted and skipped... */
+	/* ...and the volume reappears on powers of two (2, 4, 8, ...). */
 	KUNIT_EXPECT_EQ(test,
 			auth_guard_fail_store_record(store, &key, &count),
-			AUTH_GUARD_FAIL_LOG_SKIP);
+			AUTH_GUARD_FAIL_LOG_REPEAT);
 	KUNIT_EXPECT_EQ(test, count, 2UL);
 	KUNIT_EXPECT_EQ(test,
 			auth_guard_fail_store_record(store, &key, &count),
 			AUTH_GUARD_FAIL_LOG_SKIP);
 	KUNIT_EXPECT_EQ(test, count, 3UL);
-
-	/* ...and the volume reappears on powers of two. */
 	KUNIT_EXPECT_EQ(test,
 			auth_guard_fail_store_record(store, &key, &count),
 			AUTH_GUARD_FAIL_LOG_REPEAT);
@@ -111,8 +114,9 @@ static void auth_guard_fail_logs_each_site_once(struct kunit *test)
 
 	for (i = 0; i < 2; i++)
 		KUNIT_EXPECT_EQ(test,
-				auth_guard_fail_store_record(store, &key, &count),
+				auth_guard_fail_store_record(store, &fresh, &fresh_count),
 				AUTH_GUARD_FAIL_LOG_FIRST);
+	KUNIT_EXPECT_EQ(test, fresh_count, 1UL);
 }
 
 static struct kunit_case auth_guard_test_cases[] = {

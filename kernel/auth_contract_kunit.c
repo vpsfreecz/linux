@@ -486,6 +486,11 @@ static void auth_contract_load_rejects_invalid_row(struct kunit *test)
 	struct auth_transition_table *table = auth_contract_test_table(test, 2);
 
 	table->rows[1].leaf = AUTH_CONTRACT_LEAF_UNKNOWN;
+	/*
+	 * The declared hash must still match the shipped rows (round 9), so the
+	 * row check is the gate that fires here, not the hash gate.
+	 */
+	table->row_hash = auth_contract_row_hash(table->rows, table->row_count);
 	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
 	KUNIT_EXPECT_EQ(test, auth_contract_load(table), -EINVAL);
 }
@@ -539,6 +544,7 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 	struct auth_transition_table *table =
 		auth_contract_test_publishable_table(test, 4);
 	struct auth_transition_tuple *tuple;
+	unsigned long before;
 
 	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
 	KUNIT_ASSERT_EQ(test, auth_contract_table_publish(table), 0);
@@ -600,8 +606,10 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 	 * declared row is the one that counts.
 	 */
 	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY);
+	before = auth_contract_row_count(2);
 	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_DECLARED);
-	KUNIT_EXPECT_EQ(test, auth_contract_row_count(2), 1UL);
+	/* The earlier aggregation calls already counted this row's matches. */
+	KUNIT_EXPECT_EQ(test, auth_contract_row_count(2), before + 1);
 
 	/* A second publication is refused. */
 	KUNIT_EXPECT_EQ(test, auth_contract_table_publish(table), -EBUSY);
@@ -612,6 +620,7 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 	 */
 	table->rows[1].leaf = AUTH_CONTRACT_LEAF_ALLOWED;
 	tuple->subject.template_id = 7;
+	tuple->subject.klass = AUTH_CONTRACT_SUBJECT_TENANT_TASK;
 	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY);
 	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_FORBIDDEN);
 }
