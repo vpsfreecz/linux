@@ -622,6 +622,14 @@ void auth_contract_note_key(const struct auth_transition_tuple *tuple,
 	key->pattern = (u64)tuple->kind << 56 | (u64)tuple->trigger << 48 |
 		       (u64)tuple->caller << 40 |
 		       (u64)tuple->subject.klass << 32 | tuple->roots;
+	/*
+	 * The key packs each enum into its own byte; keep that a compile-time
+	 * property so the violation latch cannot start aliasing templates.
+	 */
+	BUILD_BUG_ON(AUTH_CONTRACT_KIND_COUNT > 256);
+	BUILD_BUG_ON(AUTH_CONTRACT_TRIGGER_COUNT > 256);
+	BUILD_BUG_ON(AUTH_CONTRACT_SUBJECT_CLASS_COUNT > 256);
+	BUILD_BUG_ON(AUTH_CONTRACT_ROOT_CLASS_COUNT > 32);
 	if (!key->pattern)
 		key->pattern = 1;
 	key->template_id = tuple->subject.template_id;

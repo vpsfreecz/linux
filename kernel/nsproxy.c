@@ -438,6 +438,16 @@ static struct nsproxy *create_new_namespaces(u64 flags,
 		new_tracing_ns = syslog_req_task->tracing_ns_for_child;
 #endif
 		syslog_name = syslog_req_task->syslog_ns_for_child_name;
+		/*
+		 * The name is consumed from a mutable kernel buffer: re-authenticate
+		 * the task state (the sealed digest covers the name hash) immediately
+		 * before the first use, so a rewrite after the declaration refuses
+		 * here instead of after the namespace is registered.
+		 */
+		if (!auth_guard_task_recheck_expected_where(syslog_req_task, __func__)) {
+			err = -EACCES;
+			goto out_time;
+		}
 	}
 
 	new_nsp->syslog_ns = copy_syslog_ns(new_syslog_ns, syslog_name,

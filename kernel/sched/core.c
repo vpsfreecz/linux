@@ -10483,12 +10483,14 @@ cgns_loadavg_read(struct task_struct *task, unsigned long host_value,
 	enum auth_guard_check_result result;
 
 	result = cgns_loadavg_snapshot_get(task, &snapshot, &owner);
-	if (result != AUTH_GUARD_CHECK_VALID) {
-		if (result != AUTH_GUARD_CHECK_UNAVAILABLE)
-			return 0;
-	} else if (owner) {
+	/*
+	 * Every non-VALID class denies: an unauthenticated task must not read the
+	 * host load average (a terminal task is not an authenticated one).
+	 */
+	if (!auth_guard_check_allows(result))
+		return 0;
+	if (owner)
 		return owner_read(owner);
-	}
 	return host_value;
 }
 

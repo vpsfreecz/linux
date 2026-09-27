@@ -1280,6 +1280,7 @@ static bool auth_guard_task_transition_update_expected_where(
 		current_state, expected_state);
 }
 
+
 #undef DEFINE_AUTH_GUARD_TASK_ANCHOR_ADAPTER
 #undef DEFINE_AUTH_GUARD_TASK_BOOL_ADAPTER
 #undef DEFINE_AUTH_GUARD_TASK_RESULT_ADAPTER
@@ -4271,6 +4272,47 @@ static bool auth_guard_task_transition_state_matches(
 	auth_guard_task_transition_quarantine(task);
 	return false;
 }
+
+bool auth_guard_task_recheck_expected_where(struct task_struct *task,
+					    const char *where)
+{
+	struct auth_guard_transition transition;
+	struct auth_guard_stamp stamp;
+	enum auth_guard_transition_anchor anchor;
+	u64 expected_state;
+
+	if (!auth_guard_task_transition_enabled())
+		return true;
+	if (!task)
+		return false;
+	transition = auth_guard_task_transition(task);
+	anchor = auth_guard_transition_anchor_load(&transition);
+	switch (anchor) {
+	case AUTH_GUARD_TRANSITION_ANCHOR_CRED:
+		stamp = auth_guard_stamp_load_acquire(&task->cred_guard_stamp);
+		break;
+#ifdef CONFIG_AUTH_GUARD
+	case AUTH_GUARD_TRANSITION_ANCHOR_AUTHORITY:
+		stamp = auth_guard_stamp_load_acquire(&task->auth_guard_stamp);
+		break;
+#endif
+	default:
+		auth_guard_fail(&task_transition_guard, where,
+				"invalid expectation anchor", task);
+		auth_guard_transition_quarantine(&task_transition_guard, &transition);
+		return false;
+	}
+	if (!__auth_guard_transition_verify(&task_transition_guard, where,
+					    &transition, anchor, &stamp, false, NULL,
+					    &expected_state))
+		return false;
+	if (!auth_guard_task_transition_state_matches(task, expected_state, where)) {
+		auth_guard_transition_quarantine(&task_transition_guard, &transition);
+		return false;
+	}
+	return true;
+}
+EXPORT_SYMBOL_GPL(auth_guard_task_recheck_expected_where);
 
 bool auth_guard_task_validate_transition_result_where(
 	struct task_struct *task, const char *where)

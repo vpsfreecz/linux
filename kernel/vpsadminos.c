@@ -403,8 +403,13 @@ unsigned int online_cpus_in_cpu_cgroup(struct task_struct *p)
 	enum auth_guard_check_result result;
 
 	result = cgroup_task_auth_snapshot_get(p, cpu_cgrp_id, &snapshot);
-	if (result != AUTH_GUARD_CHECK_VALID)
-		return result == AUTH_GUARD_CHECK_UNAVAILABLE ? 0 : 1;
+	/*
+	 * Every non-VALID class denies.  This consumer's conservative value is
+	 * one CPU: 0 here means "no fake view" and would hand the task the
+	 * native host affinity, so a denial must stay the minimal fake view.
+	 */
+	if (!auth_guard_check_allows(result))
+		return 1;
 
 	return online_cpus_in_cpu_snapshot(&snapshot);
 #else

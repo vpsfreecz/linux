@@ -25,6 +25,13 @@ struct user_namespace;
 #define AUTH_GUARD_TEST_CONTEXT(_command) \
 	(AUTH_GUARD_TEST_CONTEXT_PREFIX _command)
 
+/*
+ * Check results.  VALID is the only class a consumer may act on; BUSY is a
+ * retryable writer conflict; CREDENTIAL_ONLY and UNAVAILABLE describe a
+ * terminal or exiting task whose check no longer fully applies.  A disabled
+ * guard reports VALID (native behaviour).  Every other class is a denial at
+ * every consumer: use auth_guard_check_allows(), not per-site discipline.
+ */
 enum auth_guard_check_result {
 	AUTH_GUARD_CHECK_VALID,
 	AUTH_GUARD_CHECK_BUSY,
@@ -32,6 +39,12 @@ enum auth_guard_check_result {
 	AUTH_GUARD_CHECK_UNAVAILABLE,
 	AUTH_GUARD_CHECK_INVALID,
 };
+
+/* The single allow-path: no consumer may invent another one. */
+static inline bool auth_guard_check_allows(enum auth_guard_check_result result)
+{
+	return result == AUTH_GUARD_CHECK_VALID;
+}
 
 enum auth_guard_mode {
 	AUTH_GUARD_MODE_PANIC,
@@ -489,6 +502,15 @@ auth_guard_task_snapshot_begin_where(struct task_struct *task,
 bool auth_guard_task_snapshot_end_where(struct task_struct *task,
 					const char *where);
 bool auth_guard_task_check_where(struct task_struct *task, const char *where);
+
+/*
+ * Re-authenticate the task's current state against the expectation its
+ * transition published.  Consumers that read authenticated data through a
+ * buffer (the syslog child-name string) must call this immediately before use;
+ * a rewrite between declaration and use fails here instead of after the effect.
+ */
+bool auth_guard_task_recheck_expected_where(struct task_struct *task,
+					    const char *where);
 enum auth_guard_check_result
 auth_guard_task_check_real_cred_where(struct task_struct *task,
 				      const struct cred *expected,
@@ -647,6 +669,8 @@ AUTH_GUARD_STUB_VALID(auth_guard_task_snapshot_begin_where,
 AUTH_GUARD_STUB_TRUE(auth_guard_task_snapshot_end_where,
 	(struct task_struct *task, const char *where))
 AUTH_GUARD_STUB_TRUE(auth_guard_task_check_where,
+	(struct task_struct *task, const char *where))
+AUTH_GUARD_STUB_TRUE(auth_guard_task_recheck_expected_where,
 	(struct task_struct *task, const char *where))
 #ifdef CONFIG_CRED_GUARD
 enum auth_guard_check_result
