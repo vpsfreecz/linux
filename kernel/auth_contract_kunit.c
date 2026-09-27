@@ -266,6 +266,34 @@ static void auth_contract_table_seal_roundtrip(struct kunit *test)
 			0);
 }
 
+static void auth_contract_table_verify_buffer_rejects_malformed_length(struct kunit *test)
+{
+	struct auth_transition_table *table = auth_contract_test_table(test, 2);
+	size_t exact = struct_size(table, rows, 2);
+
+	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
+
+	/*
+	 * Round 65: the wire form's row_count is attacker-supplied like the rest
+	 * of the buffer, so the length gate must be exact — a truncated row array
+	 * and a buffer carrying trailing bytes the sender did not sign are both
+	 * refused before any row is touched, and a NULL buffer is refused even
+	 * with a plausible length.  Without this the iterator and the digest
+	 * would walk past the received range while the keyed seal still refused
+	 * the forgery afterwards.
+	 */
+	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(table, exact - 1),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(table, exact + 1),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			auth_contract_table_verify_buffer(table, sizeof(*table) - 1),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(NULL, exact),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(table, exact), 0);
+}
+
 static void auth_contract_table_verify_rejects_tampered_row(struct kunit *test)
 {
 	struct auth_transition_table *table = auth_contract_test_table(test, 2);
@@ -683,6 +711,7 @@ static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_expectation_sealed_store_rejects_records),
 	KUNIT_CASE(auth_contract_table_seal_roundtrip),
 	KUNIT_CASE(auth_contract_table_verify_rejects_tampered_row),
+	KUNIT_CASE(auth_contract_table_verify_buffer_rejects_malformed_length),
 	KUNIT_CASE(auth_contract_table_verify_rejects_tampered_head),
 	KUNIT_CASE(auth_contract_table_verify_rejects_unsealed),
 	KUNIT_CASE(auth_contract_table_rejects_bad_row_count),
