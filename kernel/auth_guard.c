@@ -556,10 +556,41 @@ static void auth_guard_transition_clear(
 	smp_store_release(transition->depth, 0);
 }
 
+/*
+ * A quarantined transition must stay quarantined: the marker is one word a
+ * writer can flip back, so the stored seal is re-derived over the sealed state
+ * and the quarantined marker instead of the marker alone.  A transition whose
+ * seal is already empty stays poisoned (an empty seal never verifies).
+ */
+static u64 auth_guard_quarantined_seal(struct auth_guard_domain *domain,
+				       u64 sealed_state)
+{
+	struct {
+		u64	sealed_state;
+		u32	marker;
+	} digest = {
+		.sealed_state	= sealed_state,
+		.marker		= AUTH_GUARD_TRANSITION_QUARANTINED,
+	};
+
+	return auth_guard_seal(domain, &digest, sizeof(digest));
+}
+
 static void auth_guard_transition_quarantine(
+	struct auth_guard_domain *domain,
 	const struct auth_guard_transition *transition)
 {
-	/* Preserve the authenticated marker while excluding readers and writers. */
+	u64 seal = READ_ONCE(*transition->seal);
+
+	/*
+	 * Preserve the authenticated marker while excluding readers and
+	 * writers: re-derive the stored seal over the marker first, so that a
+	 * flip back to the open marker no longer matches it.
+	 */
+	if (seal)
+		seal = auth_guard_quarantined_seal(domain, seal);
+	/* Publish the re-derived seal before the quarantined marker. */
+	smp_store_release(transition->seal, seal);
 	smp_store_release(transition->depth, AUTH_GUARD_TRANSITION_QUARANTINED);
 }
 
@@ -662,7 +693,7 @@ static enum auth_guard_check_result auth_guard_transition_reserve(
 	if (!auth_guard_transition_marker_empty(transition)) {
 		auth_guard_fail(domain, where, "corrupt idle transition",
 				transition->object);
-		auth_guard_transition_quarantine(transition);
+		auth_guard_transition_quarantine(domain, transition);
 		return AUTH_GUARD_CHECK_INVALID;
 	}
 
@@ -695,7 +726,7 @@ static enum auth_guard_check_result auth_guard_transition_reserve_teardown(
 			auth_guard_fail(domain, where,
 					"abandoned teardown transition",
 					transition->object);
-			auth_guard_transition_quarantine(transition);
+			auth_guard_transition_quarantine(domain, transition);
 			return AUTH_GUARD_CHECK_INVALID;
 		}
 		auth_guard_fail(domain, where, "quarantined teardown transition",
@@ -706,7 +737,7 @@ static enum auth_guard_check_result auth_guard_transition_reserve_teardown(
 	if (!auth_guard_transition_marker_empty(transition)) {
 		auth_guard_fail(domain, where, "corrupt teardown reservation",
 				transition->object);
-		auth_guard_transition_quarantine(transition);
+		auth_guard_transition_quarantine(domain, transition);
 		return AUTH_GUARD_CHECK_INVALID;
 	}
 
@@ -723,7 +754,7 @@ static bool auth_guard_transition_reservation_valid(
 
 	auth_guard_fail(domain, where, "lost transition reservation",
 			transition->object);
-	auth_guard_transition_quarantine(transition);
+	auth_guard_transition_quarantine(domain, transition);
 	return false;
 }
 
@@ -746,7 +777,7 @@ static bool auth_guard_transition_publish(
 	    !auth_guard_stamp_valid(stamp)) {
 		auth_guard_fail(domain, where, "invalid transition anchor",
 				transition->object);
-		auth_guard_transition_quarantine(transition);
+		auth_guard_transition_quarantine(domain, transition);
 		return false;
 	}
 	if (!auth_guard_transition_reservation_valid(domain, where, transition))
@@ -788,6 +819,7 @@ static bool __auth_guard_transition_verify(
 	u64 transition_expected_state;
 	u64 transition_nonce;
 	u64 transition_seal;
+	u64 expected_seal;
 	u32 transition_flags;
 	u32 depth;
 
@@ -825,12 +857,13 @@ static bool __auth_guard_transition_verify(
 				transition->object);
 		return false;
 	}
-	if (auth_guard_transition_hash(
-		    domain, transition, anchor, stamp, transition_opener,
-		    transition_flags, transition_nonce,
-		    transition_restore_state,
-		    transition_expected_state,
-		    AUTH_GUARD_TRANSITION_OPEN) != transition_seal) {
+	expected_seal = auth_guard_transition_hash(
+		domain, transition, anchor, stamp, transition_opener,
+		transition_flags, transition_nonce, transition_restore_state,
+		transition_expected_state, AUTH_GUARD_TRANSITION_OPEN);
+	if (depth == AUTH_GUARD_TRANSITION_QUARANTINED)
+		expected_seal = auth_guard_quarantined_seal(domain, expected_seal);
+	if (expected_seal != transition_seal) {
 		auth_guard_fail(domain, where, "corrupt transition",
 				transition->object);
 		return false;
@@ -862,7 +895,7 @@ static bool auth_guard_transition_can_complete(
 	if (__auth_guard_transition_verify(domain, where, transition, anchor, stamp,
 					  allow_quarantined, NULL, NULL))
 		return true;
-	auth_guard_transition_quarantine(transition);
+	auth_guard_transition_quarantine(domain, transition);
 	return false;
 }
 
@@ -933,7 +966,7 @@ static bool auth_guard_transition_reanchor(
 	return true;
 
 quarantine:
-	auth_guard_transition_quarantine(transition);
+	auth_guard_transition_quarantine(domain, transition);
 	return false;
 }
 
@@ -980,7 +1013,7 @@ static bool auth_guard_transition_update_expected(
 	return true;
 
 quarantine:
-	auth_guard_transition_quarantine(transition);
+	auth_guard_transition_quarantine(domain, transition);
 	return false;
 }
 
@@ -1163,7 +1196,7 @@ auth_guard_task_borrow_subjective_where(struct task_struct *task,
 	if (state == AUTH_GUARD_TRANSITION_QUARANTINED)
 		return AUTH_GUARD_CHECK_INVALID;
 	if (!auth_guard_task_transition_open_where(task, where)) {
-		auth_guard_transition_quarantine(&transition);
+		auth_guard_transition_quarantine(&task_transition_guard, &transition);
 		return AUTH_GUARD_CHECK_INVALID;
 	}
 	flags = READ_ONCE(*transition.flags);
@@ -1239,7 +1272,7 @@ static bool auth_guard_task_transition_update_expected_where(
 	default:
 		auth_guard_fail(&task_transition_guard, where,
 				"invalid expectation anchor", task);
-		auth_guard_transition_quarantine(&transition);
+		auth_guard_transition_quarantine(&task_transition_guard, &transition);
 		return false;
 	}
 	return auth_guard_transition_update_expected(
@@ -1288,7 +1321,7 @@ bool auth_guard_task_transition_cred_published_where(
 				"invalid credential publication", task);
 		if (task) {
 			transition = auth_guard_task_transition(task);
-			auth_guard_transition_quarantine(&transition);
+			auth_guard_transition_quarantine(&task_transition_guard, &transition);
 		}
 		return false;
 	}
@@ -1329,7 +1362,7 @@ bool auth_guard_task_transition_cred_published_where(
 #ifdef CONFIG_AUTH_GUARD
 quarantine:
 #endif
-	auth_guard_transition_quarantine(&transition);
+	auth_guard_transition_quarantine(&task_transition_guard, &transition);
 	return false;
 }
 
@@ -1354,7 +1387,7 @@ void auth_guard_task_transition_quarantine(struct task_struct *task)
 	if (!auth_guard_task_transition_enabled() || !task)
 		return;
 	transition = auth_guard_task_transition(task);
-	auth_guard_transition_quarantine(&transition);
+	auth_guard_transition_quarantine(&task_transition_guard, &transition);
 }
 
 bool auth_guard_task_first_seal_begin_where(struct task_struct *task,
@@ -1384,7 +1417,7 @@ void auth_guard_task_first_seal_complete(struct task_struct *task, bool valid)
 	if (valid)
 		auth_guard_transition_clear(&transition);
 	else
-		auth_guard_transition_quarantine(&transition);
+		auth_guard_transition_quarantine(&task_transition_guard, &transition);
 }
 
 static enum auth_guard_check_result
@@ -2397,7 +2430,7 @@ bool auth_guard_userns_boundary_begin_transition_where(struct user_namespace *us
 		AUTH_GUARD_TRANSITION_ANCHOR_NONE, &stamp, 0, 0, 0);
 
 quarantine:
-	auth_guard_transition_quarantine(&transition);
+	auth_guard_transition_quarantine(&userns_boundary_guard, &transition);
 	return false;
 }
 
@@ -2445,7 +2478,7 @@ bool auth_guard_userns_boundary_finish_transition_where(struct user_namespace *u
 		AUTH_GUARD_TRANSITION_ANCHOR_NONE, &old_stamp);
 
 quarantine:
-	auth_guard_transition_quarantine(&transition);
+	auth_guard_transition_quarantine(&userns_boundary_guard, &transition);
 	return false;
 }
 
@@ -2502,7 +2535,7 @@ bool auth_guard_userns_boundary_abort_transition_where(struct user_namespace *us
 	return true;
 
 quarantine:
-	auth_guard_transition_quarantine(&transition);
+	auth_guard_transition_quarantine(&userns_boundary_guard, &transition);
 	return false;
 }
 
@@ -2587,7 +2620,7 @@ bool auth_guard_userns_boundary_destroy_complete_where(struct user_namespace *us
 	if (!exact || !auth_guard_userns_boundary_empty(&boundary)) {
 		auth_guard_fail(&userns_boundary_guard, where,
 				"inexact destroy detach", user_ns);
-		auth_guard_transition_quarantine(&transition);
+		auth_guard_transition_quarantine(&userns_boundary_guard, &transition);
 		return false;
 	}
 
@@ -2803,7 +2836,7 @@ auth_guard_nsproxy_transition_begin_where(struct nsproxy *nsproxy,
 	if (!auth_guard_snapshot_valid(&nsproxy_authority_guard, where, nsproxy,
 				       &stamp, computed) ||
 	    !auth_guard_nsproxy_state_validate(nsproxy, &transaction->old, where)) {
-		auth_guard_transition_quarantine(&transition);
+		auth_guard_transition_quarantine(&nsproxy_authority_guard, &transition);
 		return AUTH_GUARD_CHECK_INVALID;
 	}
 	expected_state = auth_guard_nsproxy_state_hash(
@@ -2818,7 +2851,7 @@ auth_guard_nsproxy_transition_begin_where(struct nsproxy *nsproxy,
 		    expected_state) {
 		auth_guard_fail(&nsproxy_authority_guard, where,
 				"changed transition source", nsproxy);
-		auth_guard_transition_quarantine(&transition);
+		auth_guard_transition_quarantine(&nsproxy_authority_guard, &transition);
 		return AUTH_GUARD_CHECK_INVALID;
 	}
 	transaction->expected = transaction->old;
@@ -2857,7 +2890,7 @@ static bool auth_guard_nsproxy_finish_transition_where(struct nsproxy *nsproxy,
 		    &nsproxy_authority_guard, where, &transition,
 		    AUTH_GUARD_TRANSITION_ANCHOR_NONE, &old_stamp, false,
 		    NULL, &expected_state)) {
-		auth_guard_transition_quarantine(&transition);
+		auth_guard_transition_quarantine(&nsproxy_authority_guard, &transition);
 		return false;
 	}
 
@@ -2911,7 +2944,7 @@ endpoint_failed:
 	 * endpoint, so log mode must neither wait on an apparently active writer
 	 * nor make the mutated tuple look sealed.
 	 */
-	auth_guard_transition_quarantine(&transition);
+	auth_guard_transition_quarantine(&nsproxy_authority_guard, &transition);
 	return false;
 }
 
@@ -2980,7 +3013,7 @@ static bool auth_guard_nsproxy_abort_transition_checked(
 	return true;
 
 quarantine:
-	auth_guard_transition_quarantine(&transition);
+	auth_guard_transition_quarantine(&nsproxy_authority_guard, &transition);
 	return false;
 }
 
@@ -3032,7 +3065,7 @@ static bool auth_guard_nsproxy_transition_expect_state(
 		return true;
 	auth_guard_fail(&nsproxy_authority_guard, where,
 			"changed while declaring transition", transaction->nsproxy);
-	auth_guard_transition_quarantine(&marker);
+	auth_guard_transition_quarantine(&nsproxy_authority_guard, &marker);
 	return false;
 
 invalid:
@@ -3042,7 +3075,7 @@ invalid:
 				"invalid transition declaration",
 				transaction->nsproxy);
 		if (transaction->active)
-			auth_guard_transition_quarantine(&marker);
+			auth_guard_transition_quarantine(&nsproxy_authority_guard, &marker);
 	}
 	return false;
 }
@@ -3075,7 +3108,7 @@ static bool auth_guard_nsproxy_transition_state_matches(
 			"unexpected mutated transition", transaction->nsproxy);
 
 quarantine:
-	auth_guard_transition_quarantine(&marker);
+	auth_guard_transition_quarantine(&nsproxy_authority_guard, &marker);
 	return false;
 }
 
@@ -3091,7 +3124,7 @@ static enum auth_guard_mutation_result auth_guard_nsproxy_mutation_fail(
 		marker = auth_guard_nsproxy_transition(transaction->nsproxy);
 		auth_guard_fail(&nsproxy_authority_guard, where, what,
 				transaction->nsproxy);
-		auth_guard_transition_quarantine(&marker);
+		auth_guard_transition_quarantine(&nsproxy_authority_guard, &marker);
 	}
 	return result;
 }
