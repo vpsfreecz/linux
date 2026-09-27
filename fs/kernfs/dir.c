@@ -2097,7 +2097,7 @@ static int kernfs_dir_fop_open(struct inode *inode, struct file *filp)
 {
 	struct kernfs_vpsa_kernfs_filter_dir_state *state;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc(sizeof(*state), GFP_KERNEL_ACCOUNT);
 	if (!state)
 		return -ENOMEM;
 

@@ -1908,7 +1908,7 @@ int do_syslog(int type, char __user *buf, int len, int source,
 			break;
 		}
 
-		tmp = kmalloc(len + 1, GFP_KERNEL);
+		tmp = kmalloc(len + 1, GFP_KERNEL_ACCOUNT);
 		if (!tmp) {
 			error = -ENOMEM;
 			break;

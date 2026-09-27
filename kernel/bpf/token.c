@@ -344,7 +344,7 @@ bpf_token_get_for_container(const struct bpf_current_container *container)
 	    !bpf_ns_capable(tns->user_ns, CAP_NET_ADMIN))
 		return NULL;
 
-	token = kzalloc(sizeof(*token), GFP_KERNEL);
+	token = kzalloc(sizeof(*token), GFP_KERNEL_ACCOUNT);
 	if (!token)
 		return ERR_PTR(-ENOMEM);
 

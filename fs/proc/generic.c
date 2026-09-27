@@ -120,7 +120,7 @@ int proc_kernfs_filter_dir_open(struct inode *inode, struct file *file)
 {
 	struct proc_kernfs_filter_dir_state *state;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc(sizeof(*state), GFP_KERNEL_ACCOUNT);
 	if (!state)
 		return -ENOMEM;
 
