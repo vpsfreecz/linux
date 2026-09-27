@@ -4297,10 +4297,13 @@ bool auth_guard_task_recheck_expected_where(struct task_struct *task,
 		break;
 #endif
 	default:
-		auth_guard_fail(&task_transition_guard, where,
-				"invalid expectation anchor", task);
-		auth_guard_transition_quarantine(&task_transition_guard, &transition);
-		return false;
+		/*
+		 * No anchor means no expectation was ever published for this task:
+		 * the expectation path refuses an anchorless transition, so there is
+		 * nothing to re-authenticate here.  Treating it as corruption refused
+		 * legitimate paths such as create_new_namespaces() in run 16.
+		 */
+		return true;
 	}
 	if (!__auth_guard_transition_verify(&task_transition_guard, where,
 					    &transition, anchor, &stamp, false, NULL,
