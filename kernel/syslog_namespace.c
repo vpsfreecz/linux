@@ -28,6 +28,16 @@ static LIST_HEAD(syslog_ns_names);
 static int register_syslog_ns_name(struct syslog_namespace *ns);
 static void unregister_syslog_ns_name(struct syslog_namespace *ns);
 
+/*
+ * Namespace-owned memory is charged to the creating container (round 76): the
+ * ring buffer, its descriptor and info arrays and the namespace itself are
+ * allocated with __GFP_ACCOUNT so the cost lands in the creator's memory
+ * cgroup instead of the host's.  The text size is the compile-time
+ * __LOG_BUF_LEN (the caller passes it explicitly, never a container-chosen
+ * value), so one namespace costs at most ~2.5x that figure and the kernel-side
+ * bound stays a constant; only the count is limited by
+ * UCOUNT_SYSLOG_NAMESPACES, which is why the bytes must be attributed.
+ */
 static int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 				   unsigned long new_log_buf_len)
 {
@@ -44,11 +54,11 @@ static int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 		return -EINVAL;
 	}
 
-	ns_prb = kvzalloc(sizeof(*ns_prb), GFP_KERNEL);
+	ns_prb = kvzalloc(sizeof(*ns_prb), GFP_KERNEL_ACCOUNT);
 	if (!ns_prb)
 		return -ENOMEM;
 
-	log_buf = kvzalloc(new_log_buf_len, GFP_KERNEL);
+	log_buf = kvzalloc(new_log_buf_len, GFP_KERNEL_ACCOUNT);
 	if (!log_buf)
 		goto fail_free_prb;
 
@@ -56,12 +66,12 @@ static int syslog_ns_setup_log_buf(struct syslog_namespace *ns,
 	ns->log_buf_len = new_log_buf_len;
 
 	descs_size = descs_count * sizeof(*descs);
-	descs = kvzalloc(descs_size, GFP_KERNEL);
+	descs = kvzalloc(descs_size, GFP_KERNEL_ACCOUNT);
 	if (!descs)
 		goto fail_free_log_buf;
 
 	infos_size = descs_count * sizeof(*infos);
-	infos = kvzalloc(infos_size, GFP_KERNEL);
+	infos = kvzalloc(infos_size, GFP_KERNEL_ACCOUNT);
 	if (!infos)
 		goto fail_free_descs;
 
@@ -244,7 +254,7 @@ clone_syslog_ns(struct user_namespace *user_ns,
 	if (!ucounts)
 		return ERR_PTR(-ENOSPC);
 
-	ns = kzalloc(sizeof(*ns), GFP_KERNEL);
+	ns = kzalloc(sizeof(*ns), GFP_KERNEL_ACCOUNT);
 	if (!ns) {
 		err = -ENOMEM;
 		goto fail_dec;
@@ -259,7 +269,7 @@ clone_syslog_ns(struct user_namespace *user_ns,
 	ns->ucounts = ucounts;
 	ns->user_ns = get_user_ns(user_ns);
 	ns->parent = get_syslog_ns(old_ns);
-	ns->name = kstrdup(name, GFP_KERNEL);
+	ns->name = kstrdup(name, GFP_KERNEL_ACCOUNT);
 	if (!ns->name) {
 		err = -ENOMEM;
 		goto fail_common;
@@ -325,7 +335,7 @@ static int register_syslog_ns_name(struct syslog_namespace *ns)
 	if (!ns->name || !ns->name[0])
 		return 0;
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+	entry = kzalloc(sizeof(*entry), GFP_KERNEL_ACCOUNT);
 	if (!entry)
 		return -ENOMEM;
 

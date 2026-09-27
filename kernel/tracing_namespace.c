@@ -401,7 +401,8 @@ static struct tracing_namespace *clone_tracing_ns(struct user_namespace *user_ns
 	enum auth_guard_mutation_result mutation;
 	int err;
 
-	ns = kzalloc(sizeof(*ns), GFP_KERNEL);
+	/* Namespace-owned memory is charged to the creating container (round 76). */
+	ns = kzalloc(sizeof(*ns), GFP_KERNEL_ACCOUNT);
 	if (!ns)
 		return ERR_PTR(-ENOMEM);
 
