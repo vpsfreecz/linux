@@ -4300,9 +4300,16 @@ bool auth_guard_task_recheck_expected_where(struct task_struct *task,
 		/*
 		 * No anchor means no expectation was ever published for this task:
 		 * the expectation path refuses an anchorless transition, so there is
-		 * nothing to re-authenticate here.  Treating it as corruption refused
-		 * legitimate paths such as create_new_namespaces() in run 16.
+		 * nothing to re-authenticate here (treating it as corruption refused
+		 * legitimate paths such as create_new_namespaces() in run 16).  A
+		 * pending child syslog name is the exception: it can only have been
+		 * recorded while the task was anchored, so the transition was cleared
+		 * or aborted in between and the name must not be consumed without a
+		 * fresh authentication.
 		 */
+		if (READ_ONCE(task->syslog_ns_for_child) ||
+		    READ_ONCE(task->syslog_ns_for_child_name))
+			return false;
 		return true;
 	}
 	if (!__auth_guard_transition_verify(&task_transition_guard, where,
