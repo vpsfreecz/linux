@@ -179,6 +179,15 @@ struct fake_sysctl_buf {
 	char *buf;
 };
 
+/*
+ * Memory owned by a container-triggered object is charged to the triggering
+ * container (round 78, same rule as round 76): the fake-sysctl buffers live
+ * per user namespace and are created when a container writes to a faked
+ * sysctl/cgroup file, so they are allocated with __GFP_ACCOUNT and land in that
+ * container's memory cgroup instead of the host's.  The filter-policy objects
+ * follow the same rule for uniformity; their writers are init-userns privileged
+ * (host side), so they are charged to the root cgroup.
+ */
 void fake_sysctl_bufs_init(struct user_namespace *ns)
 {
 	xa_init(&ns->fake_sysctl_bufs);
@@ -279,10 +288,10 @@ ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 		if (!fbuf) {
 			void *old;
 
-			fbuf = kzalloc(sizeof(*fbuf), GFP_KERNEL);
+			fbuf = kzalloc(sizeof(*fbuf), GFP_KERNEL_ACCOUNT);
 			if (!fbuf)
 				return -ENOMEM;
-			fbuf->buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
+			fbuf->buf = kzalloc(PAGE_SIZE, GFP_KERNEL_ACCOUNT);
 			if (!fbuf->buf) {
 				kfree(fbuf);
 				return -ENOMEM;
@@ -291,7 +300,7 @@ ssize_t fake_sysfs_kf_write(struct kernfs_open_file *of, char *buf,
 			fbuf->kn = of->kn;
 			kernfs_get(fbuf->kn);
 			old = xa_cmpxchg(&ns->fake_sysctl_bufs, index, NULL, fbuf,
-					 GFP_KERNEL);
+					 GFP_KERNEL_ACCOUNT);
 			if (xa_is_err(old)) {
 				kernfs_put(fbuf->kn);
 				kfree(fbuf->buf);
@@ -951,7 +960,7 @@ static int vpsa_textbuf_reserve(struct vpsa_textbuf *tb, size_t extra)
 		new_cap <<= 1;
 	}
 
-	new_buf = krealloc(tb->buf, new_cap, GFP_KERNEL);
+	new_buf = krealloc(tb->buf, new_cap, GFP_KERNEL_ACCOUNT);
 	if (!new_buf)
 		return -ENOMEM;
 
@@ -1106,7 +1115,7 @@ static int vpsa_kernfs_filter_rule_compile_path(struct vpsa_kernfs_filter_rule *
 		} else {
 			char *segment_copy;
 
-			segment_copy = kmemdup_nul(seg, seglen, GFP_KERNEL);
+			segment_copy = kmemdup_nul(seg, seglen, GFP_KERNEL_ACCOUNT);
 			if (!segment_copy)
 				return -ENOMEM;
 
@@ -1154,11 +1163,11 @@ static int vpsa_kernfs_filter_rule_compile_path(struct vpsa_kernfs_filter_rule *
 		p = slash + 1;
 	}
 
-	storage = kstrdup(path + 1, GFP_KERNEL);
+	storage = kstrdup(path + 1, GFP_KERNEL_ACCOUNT);
 	if (!storage)
 		return -ENOMEM;
 
-	rule->segments = kcalloc(depth, sizeof(*rule->segments), GFP_KERNEL);
+	rule->segments = kcalloc(depth, sizeof(*rule->segments), GFP_KERNEL_ACCOUNT);
 	if (!rule->segments) {
 		kfree(storage);
 		return -ENOMEM;
@@ -1384,7 +1393,7 @@ static int vpsa_kernfs_filter_parse(struct vpsa_kernfs_filter **ret_policy,
 		return -E2BIG;
 	}
 
-	policy = kzalloc(sizeof(*policy), GFP_KERNEL);
+	policy = kzalloc(sizeof(*policy), GFP_KERNEL_ACCOUNT);
 	if (!policy)
 		return -ENOMEM;
 	refcount_set(&policy->refs, 1);
@@ -1396,7 +1405,7 @@ static int vpsa_kernfs_filter_parse(struct vpsa_kernfs_filter **ret_policy,
 	if (ret)
 		goto out;
 
-	scratch = kmemdup_nul(text, len, GFP_KERNEL);
+	scratch = kmemdup_nul(text, len, GFP_KERNEL_ACCOUNT);
 	if (!scratch) {
 		ret = -ENOMEM;
 		goto out;
@@ -1462,7 +1471,7 @@ static int vpsa_kernfs_filter_parse(struct vpsa_kernfs_filter **ret_policy,
 			struct vpsa_kernfs_filter_rule *new_rules;
 
 			new_rules = krealloc(rules, new_cap * sizeof(*new_rules),
-					     GFP_KERNEL);
+					     GFP_KERNEL_ACCOUNT);
 			if (!new_rules) {
 				ret = -ENOMEM;
 				goto out;
@@ -1816,7 +1825,7 @@ struct vpsa_kernfs_filter_view *vpsa_kernfs_filter_view_open(void)
 {
 	struct vpsa_kernfs_filter_view *view;
 
-	view = kzalloc(sizeof(*view), GFP_KERNEL);
+	view = kzalloc(sizeof(*view), GFP_KERNEL_ACCOUNT);
 	if (!view)
 		return NULL;
 
@@ -2045,7 +2054,7 @@ static int vpsa_kernfs_filter_replace_open(struct inode *inode, struct file *fil
 	if (ret)
 		return ret;
 
-	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	state = kzalloc(sizeof(*state), GFP_KERNEL_ACCOUNT);
 	if (!state)
 		return -ENOMEM;
 
