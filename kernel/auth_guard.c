@@ -130,6 +130,18 @@ auth_guard_crng_refusal_outcome(enum auth_guard_mode mode)
 }
 EXPORT_SYMBOL_GPL(auth_guard_crng_refusal_outcome);
 
+static const char *auth_guard_mode_name(void)
+{
+	switch (auth_guard_mode) {
+	case AUTH_GUARD_MODE_LOG:
+		return "log";
+	case AUTH_GUARD_MODE_OFF:
+		return "off";
+	default:
+		return "panic";
+	}
+}
+
 void __init auth_guard_init_domain(struct auth_guard_domain *domain)
 {
 	/*
@@ -152,13 +164,15 @@ void __init auth_guard_init_domain(struct auth_guard_domain *domain)
 		auth_guard_mode = refusal.mode;
 
 		pr_emerg("auth_guard: crng-refusal: %s: CRNG not initialized; refusing seed; "
-			 "node must fail containment preflight\n", domain->name);
+			 "node must fail containment preflight (mode=%s)\n", domain->name,
+			 auth_guard_mode_name());
 		return;
 	}
 
 	get_random_bytes(&domain->key, sizeof(domain->key));
 	domain->seeded = true;
-	pr_info("%s: key seeded (CRNG initialized)\n", domain->name);
+	pr_info("%s: key seeded (CRNG initialized) mode=%s\n", domain->name,
+		auth_guard_mode_name());
 }
 
 bool auth_guard_enabled(void)
