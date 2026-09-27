@@ -595,12 +595,17 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 	tuple->caller = AUTH_CONTRACT_SUBJECT_MANAGER;
 	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY) |
 		       BIT(AUTH_CONTRACT_ROOT_HOST_FILES);
+	before = auth_contract_row_count(2);
 	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_FORBIDDEN);
+	/* Round 19: a denied transition declares nothing, so it counts nothing. */
+	KUNIT_EXPECT_EQ(test, auth_contract_row_count(2), before);
 
 	/* An undeclared root in the same tuple keeps it undeclared. */
 	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY) |
 		       BIT(AUTH_CONTRACT_ROOT_CONTAINER_MOUNT);
+	before = auth_contract_row_count(2);
 	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_UNKNOWN);
+	KUNIT_EXPECT_EQ(test, auth_contract_row_count(2), before);
 
 	/* Every requested root declared is the only declared case, and the
 	 * declared row is the one that counts.
@@ -608,7 +613,7 @@ static void auth_contract_table_publish_and_judge(struct kunit *test)
 	tuple->roots = BIT(AUTH_CONTRACT_ROOT_CONTAINER_NSPROXY);
 	before = auth_contract_row_count(2);
 	KUNIT_EXPECT_EQ(test, auth_contract_judge(tuple), AUTH_VERDICT_DECLARED);
-	/* The earlier aggregation calls already counted this row's matches. */
+	/* Round 19: the declaring call is the one that counts this row. */
 	KUNIT_EXPECT_EQ(test, auth_contract_row_count(2), before + 1);
 
 	/* A second publication is refused. */

@@ -539,11 +539,12 @@ auth_contract_judge(const struct auth_transition_tuple *tuple)
 		return AUTH_VERDICT_UNKNOWN;
 
 	/*
-	 * A tuple may request several roots at once, and the verdict must cover
-	 * every one of them: a forbidden row denies the whole transition even
-	 * when another requested root has an allowed row (deny wins), and a root
-	 * that no row declares keeps the verdict undeclared.  Unknown is never a
-	 * silent pass, and table ordering must not decide the outcome.
+	 * First pass: the verdict only.  A tuple may request several roots at
+	 * once, and the verdict must cover every one of them: a forbidden row
+	 * denies the whole transition even when another requested root has an
+	 * allowed row (deny wins), and a root that no row declares keeps the
+	 * verdict undeclared.  Unknown is never a silent pass, and table ordering
+	 * must not decide the outcome.
 	 */
 	pending = tuple->roots;
 	for (i = 0; i < table->row_count; i++) {
@@ -561,15 +562,39 @@ auth_contract_judge(const struct auth_transition_tuple *tuple)
 
 		if (row->leaf == AUTH_CONTRACT_LEAF_FORBIDDEN)
 			return AUTH_VERDICT_FORBIDDEN;
+
+		pending &= ~root_bit;
+	}
+
+	if (pending)
+		return AUTH_VERDICT_UNKNOWN;
+
+	/*
+	 * Second pass (round 19): the per-row counters exist for *declared*
+	 * transitions.  Counting a matching allow row of a transition that is
+	 * denied or left undeclared would overstate declared usage in the fleet
+	 * evidence, so the increments happen only now, in the same selection the
+	 * declaring pass made (dedupe by requested root).
+	 */
+	pending = tuple->roots;
+	for (i = 0; i < table->row_count; i++) {
+		const struct auth_transition_row *row = &table->rows[i];
+		u32 root_bit;
+
+		if (row->kind != tuple->kind || row->trigger != tuple->trigger ||
+		    row->caller != tuple->caller ||
+		    row->subject_class != tuple->subject.klass)
+			continue;
+
+		root_bit = BIT(row->root_class);
+		if (!(tuple->roots & root_bit))
+			continue;
 		if (!(pending & root_bit))
 			continue;
 
 		atomic_long_inc(&counters[i]);
 		pending &= ~root_bit;
 	}
-
-	if (pending)
-		return AUTH_VERDICT_UNKNOWN;
 
 	return AUTH_VERDICT_DECLARED;
 }
