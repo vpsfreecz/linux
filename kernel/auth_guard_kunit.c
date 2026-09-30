@@ -11,6 +11,7 @@
 #include <kunit/test.h>
 
 #include <linux/auth_guard.h>
+#include <linux/kthread.h>
 
 static void auth_guard_crng_gate_allows_initialized(struct kunit *test)
 {
@@ -119,12 +120,69 @@ static void auth_guard_fail_logs_each_site_once(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, fresh_count, 1UL);
 }
 
+static int auth_guard_counter_worker(void *data)
+{
+	unsigned int iters = *(unsigned int *)data;
+	unsigned int i;
+
+	for (i = 0; i < iters; i++)
+		auth_guard_counter_inc(AUTH_GUARD_CTR_TEST);
+
+	while (!kthread_should_stop())
+		cond_resched();
+
+	return 0;
+}
+
+static void auth_guard_counters_lose_no_increments(struct kunit *test)
+{
+	const unsigned int nr_threads = 8;
+	const unsigned int iters = 10000;
+	struct task_struct *threads[8];
+	u64 before, after;
+
+	before = auth_guard_counters_total(AUTH_GUARD_CTR_TEST);
+	for (unsigned int i = 0; i < nr_threads; i++) {
+		threads[i] = kthread_run(auth_guard_counter_worker, (void *)&iters,
+					 "ag_ctr%u", i);
+		KUNIT_ASSERT_NOT_ERR_OR_NULL(test, threads[i]);
+	}
+	for (unsigned int i = 0; i < nr_threads; i++)
+		kthread_stop(threads[i]);
+
+	after = auth_guard_counters_total(AUTH_GUARD_CTR_TEST);
+	KUNIT_EXPECT_EQ(test, after - before, (u64)nr_threads * iters);
+}
+
+static void auth_guard_counters_snapshot_is_monotonic(struct kunit *test)
+{
+	u64 a[AUTH_GUARD_CTR_LAST], b[AUTH_GUARD_CTR_LAST];
+
+	auth_guard_counters_snapshot(a, AUTH_GUARD_CTR_LAST);
+	auth_guard_counters_snapshot(b, AUTH_GUARD_CTR_LAST);
+
+	for (int i = 0; i < AUTH_GUARD_CTR_LAST; i++)
+		KUNIT_EXPECT_GE(test, b[i], a[i]);
+
+	/* Only the suite touches the test class, so it is exactly stable. */
+	KUNIT_EXPECT_EQ(test, b[AUTH_GUARD_CTR_TEST], a[AUTH_GUARD_CTR_TEST]);
+}
+
+static void auth_guard_boot_id_is_drawn_when_enabled(struct kunit *test)
+{
+	if (auth_guard_enabled())
+		KUNIT_EXPECT_NE(test, auth_guard_boot_id(), 0);
+}
+
 static struct kunit_case auth_guard_test_cases[] = {
 	KUNIT_CASE(auth_guard_crng_gate_allows_initialized),
 	KUNIT_CASE(auth_guard_crng_gate_refuses_uninitialized),
 	KUNIT_CASE(auth_guard_crng_gate_honours_forced_unready),
 	KUNIT_CASE(auth_guard_crng_refusal_keeps_the_guard_mode),
 	KUNIT_CASE(auth_guard_fail_logs_each_site_once),
+	KUNIT_CASE(auth_guard_counters_lose_no_increments),
+	KUNIT_CASE(auth_guard_counters_snapshot_is_monotonic),
+	KUNIT_CASE(auth_guard_boot_id_is_drawn_when_enabled),
 	{}
 };
 
