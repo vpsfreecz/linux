@@ -260,10 +260,19 @@ static void auth_contract_table_seal_roundtrip(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, auth_contract_table_seal(table), 0);
 	KUNIT_EXPECT_TRUE(test, auth_guard_stamp_valid(&table->stamp));
 	KUNIT_EXPECT_EQ(test, auth_contract_table_verify(table), 0);
+
+	/*
+	 * The buffer path also enforces the P-05 narrow rule, so the same table
+	 * is installed as the global policy first: its ALLOWED rows then cover
+	 * themselves and the roundtrip expectation holds.
+	 */
+	KUNIT_ASSERT_EQ(test, auth_contract_global_policy_install(
+				    table, struct_size(table, rows, 2)), 0);
 	KUNIT_EXPECT_EQ(test,
-			auth_contract_table_verify_buffer(table,
-							      struct_size(table, rows, 2)),
+			auth_contract_table_verify_buffer(
+				table, struct_size(table, rows, 2)),
 			0);
+	auth_contract_global_policy_reset();
 }
 
 static void auth_contract_table_verify_buffer_rejects_malformed_length(struct kunit *test)
@@ -275,12 +284,10 @@ static void auth_contract_table_verify_buffer_rejects_malformed_length(struct ku
 
 	/*
 	 * Round 65: the wire form's row_count is attacker-supplied like the rest
-	 * of the buffer, so the length gate must be exact — a truncated row array
+	 * of the buffer, so the length gate must be exact -- a truncated row array
 	 * and a buffer carrying trailing bytes the sender did not sign are both
 	 * refused before any row is touched, and a NULL buffer is refused even
-	 * with a plausible length.  Without this the iterator and the digest
-	 * would walk past the received range while the keyed seal still refused
-	 * the forgery afterwards.
+	 * with a plausible length.
 	 */
 	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(table, exact - 1),
 			-EINVAL);
@@ -291,7 +298,11 @@ static void auth_contract_table_verify_buffer_rejects_malformed_length(struct ku
 			-EINVAL);
 	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(NULL, exact),
 			-EINVAL);
+
+	/* The success expectation needs the narrow rule satisfied as well. */
+	KUNIT_ASSERT_EQ(test, auth_contract_global_policy_install(table, exact), 0);
 	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(table, exact), 0);
+	auth_contract_global_policy_reset();
 }
 
 static void auth_contract_table_verify_rejects_tampered_row(struct kunit *test)
