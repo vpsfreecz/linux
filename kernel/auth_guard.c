@@ -85,6 +85,24 @@ u64 auth_guard_boot_id(void)
 	return auth_guard_boot_id_value;
 }
 
+bool auth_guard_quarantine_retain_counted(atomic_t *retained)
+{
+	int current;
+
+	if (!retained)
+		return false;
+
+	current = atomic_inc_return(retained);
+	if (current > AUTH_GUARD_QUARANTINE_QUOTA) {
+		atomic_dec(retained);
+		auth_guard_counter_inc(AUTH_GUARD_CTR_QUARANTINE_COLLAPSED);
+		return false;
+	}
+
+	auth_guard_counter_inc(AUTH_GUARD_CTR_QUARANTINE_RETAINED);
+	return true;
+}
+
 static int __init auth_guard_setup(char *str)
 {
 	if (!str)
@@ -6412,6 +6430,8 @@ static int auth_guard_stats_show(struct seq_file *m, void *v)
 		[AUTH_GUARD_CTR_COMMITS]	= "commits",
 		[AUTH_GUARD_CTR_QUARANTINES]	= "quarantines",
 		[AUTH_GUARD_CTR_FAILS]		= "fails",
+		[AUTH_GUARD_CTR_QUARANTINE_RETAINED]	= "quarantine_retained",
+		[AUTH_GUARD_CTR_QUARANTINE_COLLAPSED]	= "quarantine_collapsed",
 		[AUTH_GUARD_CTR_TEST]		= "test",
 	};
 	unsigned int i, cpu;

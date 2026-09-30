@@ -307,22 +307,23 @@ DEFINE_CHILD_USERNS_DEFAULT_RESTORER(tracing, tracing_namespace,
 
 #undef DEFINE_CHILD_USERNS_DEFAULT_RESTORER
 
-static bool restore_child_userns_boundary_defaults(
-	struct user_namespace *user_ns, struct nsproxy *installed,
-	struct nsproxy *previous)
+static enum auth_guard_mutation_result
+restore_child_userns_boundary_defaults(struct user_namespace *user_ns,
+				       struct nsproxy *installed,
+				       struct nsproxy *previous)
 {
-#ifdef CONFIG_TRACING_NS
-	if (restore_child_userns_tracing_default(
-		    user_ns, installed->tracing_ns, previous->tracing_ns) !=
-	    AUTH_GUARD_MUTATION_APPLIED)
-		return false;
-#endif
-	if (restore_child_userns_syslog_default(
-		    user_ns, installed->syslog_ns, previous->syslog_ns) !=
-	    AUTH_GUARD_MUTATION_APPLIED)
-		return false;
+	enum auth_guard_mutation_result worst = AUTH_GUARD_MUTATION_APPLIED;
 
-	return true;
+#ifdef CONFIG_TRACING_NS
+	worst = auth_guard_mutation_worst(worst,
+		restore_child_userns_tracing_default(
+			user_ns, installed->tracing_ns, previous->tracing_ns));
+#endif
+	worst = auth_guard_mutation_worst(worst,
+		restore_child_userns_syslog_default(
+			user_ns, installed->syslog_ns, previous->syslog_ns));
+
+	return worst;
 }
 
 struct nsproxy init_nsproxy = {
@@ -578,22 +579,37 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 	if ((flags & CLONE_VM) == 0) {
 		err = timens_on_fork(new_ns, tsk);
 		if (err) {
-			if (restore_child_userns_boundary_defaults(
-				    user_ns, new_ns, old_ns))
-				free_nsproxy_unpublished(new_ns);
+			enum auth_guard_mutation_result restored;
+
+			restored = restore_child_userns_boundary_defaults(
+				    user_ns, new_ns, old_ns);
+			/* Retain only while a quarantine or an in-flight mutation
+			 * still refers to the object and the quota allows it. */
+			if ((restored == AUTH_GUARD_MUTATION_QUARANTINED ||
+			     restored == AUTH_GUARD_MUTATION_BUSY) &&
+			    auth_guard_quarantine_retain_counted(
+				    &user_ns->auth_guard_quarantine_retained))
+				return err;
+			free_nsproxy_unpublished(new_ns);
 			return err;
 		}
 	}
 	/* cgroup_finalize_fork_authority() publishes the completed root. */
 	err = seal_nsproxy(new_ns, &sealed);
 	if (err) {
-		if (restore_child_userns_boundary_defaults(
-			    user_ns, new_ns, old_ns)) {
-			if (sealed)
-				free_nsproxy(new_ns);
-			else
-				free_nsproxy_rejected(new_ns);
-		}
+		enum auth_guard_mutation_result restored;
+
+		restored = restore_child_userns_boundary_defaults(
+			    user_ns, new_ns, old_ns);
+		if ((restored == AUTH_GUARD_MUTATION_QUARANTINED ||
+		     restored == AUTH_GUARD_MUTATION_BUSY) &&
+		    auth_guard_quarantine_retain_counted(
+			    &user_ns->auth_guard_quarantine_retained))
+			return err;
+		if (sealed)
+			free_nsproxy(new_ns);
+		else
+			free_nsproxy_rejected(new_ns);
 		return err;
 	}
 
@@ -744,13 +760,21 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 	if (!err && (unshare_flags & CLONE_NEWCGROUP))
 		err = cgroup_ns_activate_loadavg((*new_nsp)->cgroup_ns);
 	if (err) {
-		if (restore_child_userns_boundary_defaults(
-			    user_ns, *new_nsp, old_nsproxy)) {
-			if (sealed)
-				free_nsproxy(*new_nsp);
-			else
-				free_nsproxy_rejected(*new_nsp);
+		enum auth_guard_mutation_result restored;
+
+		restored = restore_child_userns_boundary_defaults(
+			    user_ns, *new_nsp, old_nsproxy);
+		if ((restored == AUTH_GUARD_MUTATION_QUARANTINED ||
+		     restored == AUTH_GUARD_MUTATION_BUSY) &&
+		    auth_guard_quarantine_retain_counted(
+			    &user_ns->auth_guard_quarantine_retained)) {
+			*new_nsp = NULL;
+			return err;
 		}
+		if (sealed)
+			free_nsproxy(*new_nsp);
+		else
+			free_nsproxy_rejected(*new_nsp);
 		*new_nsp = NULL;
 	}
 

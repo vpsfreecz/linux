@@ -111,6 +111,7 @@ struct user_namespace {
 #endif
 #ifdef CONFIG_AUTH_GUARD
 	struct auth_guard_stamp	auth_guard_boundary_stamp;
+	atomic_t		auth_guard_quarantine_retained;
 	struct auth_guard_unanchored_transition_state
 				auth_guard_boundary_transition;
 #endif

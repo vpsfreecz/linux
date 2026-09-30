@@ -271,9 +271,21 @@ enum auth_guard_counter {
 	AUTH_GUARD_CTR_COMMITS,
 	AUTH_GUARD_CTR_QUARANTINES,
 	AUTH_GUARD_CTR_FAILS,
+	AUTH_GUARD_CTR_QUARANTINE_RETAINED,
+	AUTH_GUARD_CTR_QUARANTINE_COLLAPSED,
 	AUTH_GUARD_CTR_TEST,
 	AUTH_GUARD_CTR_LAST,
 };
+
+/*
+ * Per-container quarantine quota (register E6 / contract plan §W6): retained
+ * quarantined objects are counted per user namespace, and once the quota is
+ * spent the caller auto-collapses the object (releases it) instead of letting
+ * a tenant pin unbounded state.  TRUE means "retained, within quota".
+ */
+#define AUTH_GUARD_QUARANTINE_QUOTA 64
+
+bool auth_guard_quarantine_retain_counted(atomic_t *retained);
 
 void auth_guard_counter_inc(enum auth_guard_counter counter);
 u64 auth_guard_counters_total(enum auth_guard_counter counter);

@@ -30,6 +30,32 @@ enum auth_guard_mutation_result {
 	AUTH_GUARD_MUTATION_QUARANTINED,
 };
 
+/*
+ * Retain-biased precedence for combining two receipt classes: QUARANTINED
+ * outranks BUSY outranks REJECTED outranks APPLIED.  A caller that has to
+ * decide whether a rejected mutation's object may be released must retain when
+ * *any* receipt is uncertain (quarantined or in flight) and release only when
+ * every receipt is REJECTED -- that is the release policy for rejected
+ * receipts the R108 residual asked for.
+ */
+static inline enum auth_guard_mutation_result
+auth_guard_mutation_worst(enum auth_guard_mutation_result a,
+			  enum auth_guard_mutation_result b)
+{
+	switch (a) {
+	case AUTH_GUARD_MUTATION_QUARANTINED:
+		return a;
+	case AUTH_GUARD_MUTATION_BUSY:
+		return b == AUTH_GUARD_MUTATION_QUARANTINED ? b : a;
+	case AUTH_GUARD_MUTATION_REJECTED:
+		return (b == AUTH_GUARD_MUTATION_QUARANTINED ||
+			b == AUTH_GUARD_MUTATION_BUSY) ? b : a;
+	case AUTH_GUARD_MUTATION_APPLIED:
+	default:
+		return b;
+	}
+}
+
 enum auth_guard_transition_anchor {
 	AUTH_GUARD_TRANSITION_ANCHOR_NONE,
 	AUTH_GUARD_TRANSITION_ANCHOR_CRED,
