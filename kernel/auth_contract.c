@@ -431,6 +431,7 @@ int auth_contract_table_verify_buffer(const void *buf, size_t len)
 {
 	const struct auth_transition_table *table = buf;
 	size_t expected;
+	int ret;
 
 	if (!buf || len < sizeof(*table))
 		return -EINVAL;
