@@ -174,6 +174,59 @@ static void auth_guard_boot_id_is_drawn_when_enabled(struct kunit *test)
 		KUNIT_EXPECT_NE(test, auth_guard_boot_id(), 0);
 }
 
+static void auth_guard_mutation_worst_is_retain_biased(struct kunit *test)
+{
+	static const enum auth_guard_mutation_result classes[] = {
+		AUTH_GUARD_MUTATION_REJECTED,
+		AUTH_GUARD_MUTATION_BUSY,
+		AUTH_GUARD_MUTATION_APPLIED,
+		AUTH_GUARD_MUTATION_QUARANTINED,
+	};
+	unsigned int i, j;
+
+	for (i = 0; i < ARRAY_SIZE(classes); i++) {
+		for (j = 0; j < ARRAY_SIZE(classes); j++) {
+			enum auth_guard_mutation_result worst =
+				auth_guard_mutation_worst(classes[i], classes[j]);
+
+			if (classes[i] == AUTH_GUARD_MUTATION_QUARANTINED ||
+			    classes[j] == AUTH_GUARD_MUTATION_QUARANTINED)
+				KUNIT_EXPECT_EQ(test, worst, AUTH_GUARD_MUTATION_QUARANTINED);
+			else if (classes[i] == AUTH_GUARD_MUTATION_BUSY ||
+				 classes[j] == AUTH_GUARD_MUTATION_BUSY)
+				KUNIT_EXPECT_EQ(test, worst, AUTH_GUARD_MUTATION_BUSY);
+			else if (classes[i] == AUTH_GUARD_MUTATION_REJECTED ||
+				 classes[j] == AUTH_GUARD_MUTATION_REJECTED)
+				KUNIT_EXPECT_EQ(test, worst, AUTH_GUARD_MUTATION_REJECTED);
+			else
+				KUNIT_EXPECT_EQ(test, worst, AUTH_GUARD_MUTATION_APPLIED);
+		}
+	}
+}
+
+static void auth_guard_quarantine_quota_collapses(struct kunit *test)
+{
+	atomic_t retained = ATOMIC_INIT(0);
+	u64 collapsed_before, collapsed_after;
+	unsigned int i;
+
+	for (i = 0; i < AUTH_GUARD_QUARANTINE_QUOTA; i++)
+		KUNIT_ASSERT_TRUE(test,
+			auth_guard_quarantine_retain_counted(&retained));
+
+	/* Past the quota the object collapses instead of being retained. */
+	collapsed_before = auth_guard_counters_total(
+		AUTH_GUARD_CTR_QUARANTINE_COLLAPSED);
+	KUNIT_EXPECT_FALSE(test, auth_guard_quarantine_retain_counted(&retained));
+	KUNIT_EXPECT_FALSE(test, auth_guard_quarantine_retain_counted(&retained));
+	collapsed_after = auth_guard_counters_total(
+		AUTH_GUARD_CTR_QUARANTINE_COLLAPSED);
+
+	KUNIT_EXPECT_GE(test, collapsed_after - collapsed_before, 2);
+	KUNIT_EXPECT_EQ(test, atomic_read(&retained),
+			(int)AUTH_GUARD_QUARANTINE_QUOTA);
+}
+
 static struct kunit_case auth_guard_test_cases[] = {
 	KUNIT_CASE(auth_guard_crng_gate_allows_initialized),
 	KUNIT_CASE(auth_guard_crng_gate_refuses_uninitialized),
@@ -183,6 +236,8 @@ static struct kunit_case auth_guard_test_cases[] = {
 	KUNIT_CASE(auth_guard_counters_lose_no_increments),
 	KUNIT_CASE(auth_guard_counters_snapshot_is_monotonic),
 	KUNIT_CASE(auth_guard_boot_id_is_drawn_when_enabled),
+	KUNIT_CASE(auth_guard_mutation_worst_is_retain_biased),
+	KUNIT_CASE(auth_guard_quarantine_quota_collapses),
 	{}
 };
 
