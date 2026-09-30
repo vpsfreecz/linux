@@ -259,6 +259,26 @@ struct auth_guard_fail_store {
 int auth_guard_fail_store_record(struct auth_guard_fail_store *store,
 				 const struct auth_guard_fail_key *key,
 				 unsigned long *count);
+
+/*
+ * Lock-free telemetry counters (§W6 of the implementation plan): every guarded
+ * event class has a per-CPU counter that no transition path takes a lock for,
+ * and readers only ever add the per-CPU values up.  AUTH_GUARD_CTR_TEST is
+ * reserved for the KUnit concurrency case; the guard itself never uses it.
+ */
+enum auth_guard_counter {
+	AUTH_GUARD_CTR_TRANSITIONS = 0,
+	AUTH_GUARD_CTR_COMMITS,
+	AUTH_GUARD_CTR_QUARANTINES,
+	AUTH_GUARD_CTR_FAILS,
+	AUTH_GUARD_CTR_TEST,
+	AUTH_GUARD_CTR_LAST,
+};
+
+void auth_guard_counter_inc(enum auth_guard_counter counter);
+u64 auth_guard_counters_total(enum auth_guard_counter counter);
+void auth_guard_counters_snapshot(u64 *totals, unsigned int nr);
+u64 auth_guard_boot_id(void);
 #else
 struct auth_guard_domain {
 };

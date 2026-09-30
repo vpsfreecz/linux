@@ -18,6 +18,9 @@
 #include <linux/nsproxy.h>
 #include <linux/overflow.h>
 #include <linux/printk.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/vpsadminos.h>
 #include <linux/random.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
@@ -41,6 +44,46 @@ enum auth_guard_task_lifecycle {
 static enum auth_guard_mode auth_guard_mode __ro_after_init =
 	AUTH_GUARD_MODE_PANIC;
 static atomic64_t auth_guard_generation = ATOMIC64_INIT(0);
+
+/*
+ * §W6 telemetry: lock-free per-CPU counters.  The guard increments these on the
+ * event paths below; the readout and any sampler only add per-CPU values up,
+ * so no transition path ever takes a lock for telemetry.
+ */
+static DEFINE_PER_CPU(u64, auth_guard_counters[AUTH_GUARD_CTR_LAST]);
+static u64 auth_guard_boot_id_value;
+
+void auth_guard_counter_inc(enum auth_guard_counter counter)
+{
+	if (WARN_ON_ONCE((unsigned int)counter >= AUTH_GUARD_CTR_LAST))
+		return;
+	this_cpu_add(auth_guard_counters[counter], 1);
+}
+
+u64 auth_guard_counters_total(enum auth_guard_counter counter)
+{
+	u64 total = 0;
+	int cpu;
+
+	if (WARN_ON_ONCE((unsigned int)counter >= AUTH_GUARD_CTR_LAST))
+		return 0;
+	for_each_possible_cpu(cpu)
+		total += data_race(per_cpu(auth_guard_counters[counter], cpu));
+	return total;
+}
+
+void auth_guard_counters_snapshot(u64 *totals, unsigned int nr)
+{
+	unsigned int i;
+
+	for (i = 0; i < nr && i < AUTH_GUARD_CTR_LAST; i++)
+		totals[i] = auth_guard_counters_total(i);
+}
+
+u64 auth_guard_boot_id(void)
+{
+	return auth_guard_boot_id_value;
+}
 
 static int __init auth_guard_setup(char *str)
 {
@@ -181,7 +224,8 @@ bool auth_guard_enabled(void)
 }
 
 u64 auth_guard_next_generation(struct auth_guard_domain *domain)
-{
+{	auth_guard_counter_inc(AUTH_GUARD_CTR_TRANSITIONS);
+
 	u64 generation;
 
 	if (unlikely(!READ_ONCE(domain->seeded)))
@@ -273,7 +317,8 @@ EXPORT_SYMBOL_GPL(auth_guard_fail_store_record);
 
 void auth_guard_fail(const struct auth_guard_domain *domain, const char *where,
 		     const char *what, const void *object)
-{
+{	auth_guard_counter_inc(AUTH_GUARD_CTR_FAILS);
+
 	if (auth_guard_mode == AUTH_GUARD_MODE_OFF)
 		return;
 
@@ -579,7 +624,8 @@ static u64 auth_guard_quarantined_seal(struct auth_guard_domain *domain,
 static void auth_guard_transition_quarantine(
 	struct auth_guard_domain *domain,
 	const struct auth_guard_transition *transition)
-{
+{	auth_guard_counter_inc(AUTH_GUARD_CTR_QUARANTINES);
+
 	u64 seal = READ_ONCE(*transition->seal);
 
 	/*
@@ -1231,7 +1277,8 @@ static bool auth_guard_task_transition_publish_exact_where(
 bool auth_guard_task_transition_publish_where(
 	struct task_struct *task, enum auth_guard_transition_anchor anchor,
 	const struct auth_guard_stamp *stamp, const char *where)
-{
+{	auth_guard_counter_inc(AUTH_GUARD_CTR_COMMITS);
+
 	u64 state;
 
 	if (!auth_guard_task_transition_enabled())
@@ -6351,3 +6398,68 @@ static int __init auth_guard_test_init(void)
 }
 late_initcall(auth_guard_test_init);
 #endif /* CONFIG_AUTH_GUARD_TEST */
+
+/*
+ * §W6/§10.4 readout: the host-only counters view.  Written for the adjudication
+ * loop rather than for tenants: it carries the mode, generation and boot id,
+ * the per-class per-CPU counters, and every latched fail site with its
+ * (domain, where, what, count) tuple.
+ */
+static int auth_guard_stats_show(struct seq_file *m, void *v)
+{
+	static const char *const names[AUTH_GUARD_CTR_LAST] = {
+		[AUTH_GUARD_CTR_TRANSITIONS]	= "transitions",
+		[AUTH_GUARD_CTR_COMMITS]	= "commits",
+		[AUTH_GUARD_CTR_QUARANTINES]	= "quarantines",
+		[AUTH_GUARD_CTR_FAILS]		= "fails",
+		[AUTH_GUARD_CTR_TEST]		= "test",
+	};
+	unsigned int i, cpu;
+
+	seq_printf(m, "mode: %s\n", auth_guard_mode_name());
+	seq_printf(m, "enabled: %u\n", auth_guard_enabled() ? 1 : 0);
+	seq_printf(m, "generation: %llu\n",
+		   (unsigned long long)atomic64_read(&auth_guard_generation));
+	seq_printf(m, "boot_id: %llu\n", (unsigned long long)auth_guard_boot_id_value);
+	for (i = 0; i < AUTH_GUARD_CTR_LAST; i++)
+		seq_printf(m, "counter %s: %llu\n", names[i],
+			   (unsigned long long)auth_guard_counters_total(i));
+	for_each_possible_cpu(cpu) {
+		seq_printf(m, "cpu%u:", cpu);
+		for (i = 0; i < AUTH_GUARD_CTR_LAST; i++)
+			seq_printf(m, " %s=%llu", names[i],
+				   (unsigned long long)data_race(per_cpu(auth_guard_counters[i], cpu)));
+		seq_putc(m, '\n');
+	}
+	spin_lock(&auth_guard_fail_lock);
+	seq_printf(m, "fail_sites: %u\n", auth_guard_fail_store.count);
+	for (i = 0; i < auth_guard_fail_store.count; i++)
+		seq_printf(m, "site %u: domain=%pS where=%s what=%s count=%lu\n",
+			   i, auth_guard_fail_store.keys[i].domain,
+			   auth_guard_fail_store.keys[i].where,
+			   auth_guard_fail_store.keys[i].what,
+			   auth_guard_fail_store.counts[i]);
+	spin_unlock(&auth_guard_fail_lock);
+	return 0;
+}
+
+static int __init auth_guard_stats_init(void)
+{
+	struct proc_dir_entry *dir;
+
+	if (!auth_guard_enabled() || !proc_vpsadminos)
+		return 0;
+
+	if (auth_guard_crng_confirmed())
+		auth_guard_boot_id_value = get_random_u64();
+	else
+		auth_guard_boot_id_value = (u64)ktime_get_boottime_ns();
+
+	dir = proc_mkdir("auth_guard", proc_vpsadminos);
+	if (!dir)
+		return -ENOMEM;
+	if (!proc_create_single("stats", 0400, dir, auth_guard_stats_show))
+		return -ENOMEM;
+	return 0;
+}
+late_initcall(auth_guard_stats_init);
