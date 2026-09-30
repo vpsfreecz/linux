@@ -60,6 +60,7 @@ void auth_guard_counter_inc(enum auth_guard_counter counter)
 		return;
 	this_cpu_add(auth_guard_counters[counter], 1);
 }
+EXPORT_SYMBOL_GPL(auth_guard_counter_inc);
 
 u64 auth_guard_counters_total(enum auth_guard_counter counter)
 {
@@ -72,6 +73,7 @@ u64 auth_guard_counters_total(enum auth_guard_counter counter)
 		total += data_race(per_cpu(auth_guard_counters[counter], cpu));
 	return total;
 }
+EXPORT_SYMBOL_GPL(auth_guard_counters_total);
 
 void auth_guard_counters_snapshot(u64 *totals, unsigned int nr)
 {
@@ -80,11 +82,13 @@ void auth_guard_counters_snapshot(u64 *totals, unsigned int nr)
 	for (i = 0; i < nr && i < AUTH_GUARD_CTR_LAST; i++)
 		totals[i] = auth_guard_counters_total(i);
 }
+EXPORT_SYMBOL_GPL(auth_guard_counters_snapshot);
 
 u64 auth_guard_boot_id(void)
 {
 	return auth_guard_boot_id_value;
 }
+EXPORT_SYMBOL_GPL(auth_guard_boot_id);
 
 bool auth_guard_quarantine_retain_counted(atomic_t *retained)
 {
@@ -103,6 +107,7 @@ bool auth_guard_quarantine_retain_counted(atomic_t *retained)
 	auth_guard_counter_inc(AUTH_GUARD_CTR_QUARANTINE_RETAINED);
 	return true;
 }
+EXPORT_SYMBOL_GPL(auth_guard_quarantine_retain_counted);
 
 static int __init auth_guard_setup(char *str)
 {
@@ -241,6 +246,7 @@ bool auth_guard_enabled(void)
 {
 	return auth_guard_mode != AUTH_GUARD_MODE_OFF;
 }
+EXPORT_SYMBOL_GPL(auth_guard_enabled);
 
 u64 auth_guard_next_generation(struct auth_guard_domain *domain)
 {	auth_guard_counter_inc(AUTH_GUARD_CTR_TRANSITIONS);
