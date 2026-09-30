@@ -807,6 +807,71 @@ static void auth_contract_global_policy_install_is_exact(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, auth_contract_global_policy_present());
 }
 
+static void auth_contract_row_hash_keyed_tracks_the_root(struct kunit *test)
+{
+	const struct auth_transition_row rows[] = {
+		{
+			.kind		= AUTH_CONTRACT_KIND_TASK_EXIT,
+			.subject_class	= AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+			.root_class	= AUTH_CONTRACT_ROOT_CONTAINER_CRED,
+			.trigger	= AUTH_CONTRACT_TRIGGER_EXIT,
+			.caller		= AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+			.leaf		= AUTH_CONTRACT_LEAF_FORBIDDEN,
+		},
+	};
+	siphash_key_t a = { .key = { 0x11111111, 0x22222222 } };
+	siphash_key_t b = { .key = { 0x33333333, 0x44444444 } };
+	u64 unkeyed, ka1, ka2, kb;
+
+	unkeyed = auth_contract_row_hash(rows, 1);
+	ka1 = auth_contract_row_hash_keyed(&a, rows, 1);
+	ka2 = auth_contract_row_hash_keyed(&a, rows, 1);
+	kb = auth_contract_row_hash_keyed(&b, rows, 1);
+
+	KUNIT_EXPECT_NE(test, unkeyed, ka1);
+	KUNIT_EXPECT_EQ(test, ka1, ka2);
+	KUNIT_EXPECT_NE(test, ka1, kb);
+}
+
+static void auth_contract_row_hash_check_requires_the_rooted_form(
+	struct kunit *test)
+{
+	const struct auth_transition_row rows[] = {
+		{
+			.kind		= AUTH_CONTRACT_KIND_TASK_EXIT,
+			.subject_class	= AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+			.root_class	= AUTH_CONTRACT_ROOT_CONTAINER_CRED,
+			.trigger	= AUTH_CONTRACT_TRIGGER_EXIT,
+			.caller		= AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+			.leaf		= AUTH_CONTRACT_LEAF_FORBIDDEN,
+		},
+	};
+	siphash_key_t root = { .key = { 0xdeadbeef, 0xfeedface } };
+	struct auth_transition_table *table;
+
+	auth_contract_row_hash_root_reset();
+	KUNIT_EXPECT_FALSE(test, auth_contract_row_hash_root_present());
+
+	/* No root: the deterministic unkeyed form passes. */
+	table = auth_contract_kunit_policy(test, rows, 1);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_row_hash_check(table), 0);
+
+	KUNIT_EXPECT_EQ(test, auth_contract_row_hash_root_install(&root, 8), -EINVAL);
+	KUNIT_ASSERT_EQ(test, auth_contract_row_hash_root_install(
+		&root, AUTH_CONTRACT_HASH_ROOT_LEN), 0);
+	KUNIT_ASSERT_TRUE(test, auth_contract_row_hash_root_present());
+
+	/* With a root installed the table must carry the keyed form. */
+	KUNIT_EXPECT_EQ(test, auth_contract_table_row_hash_check(table),
+			-EKEYREJECTED);
+	table->row_hash = auth_contract_row_hash_keyed(&root, table->rows, 1);
+	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_row_hash_check(table), 0);
+
+	auth_contract_row_hash_root_reset();
+	KUNIT_EXPECT_FALSE(test, auth_contract_row_hash_root_present());
+}
+
 static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_expectation_missing_region_fails_closed),
 	KUNIT_CASE(auth_expectation_record_lookup_roundtrip),
@@ -833,6 +898,8 @@ static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_contract_note_reports_the_verdict),
 	KUNIT_CASE(auth_contract_narrow_rule_rejects_widening),
 	KUNIT_CASE(auth_contract_global_policy_install_is_exact),
+	KUNIT_CASE(auth_contract_row_hash_keyed_tracks_the_root),
+	KUNIT_CASE(auth_contract_row_hash_check_requires_the_rooted_form),
 	{}
 };
 

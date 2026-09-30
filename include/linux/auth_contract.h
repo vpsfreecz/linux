@@ -5,6 +5,7 @@
 #include <linux/auth_guard_types.h>
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/siphash.h>
 
 /*
  * Regions whose measured value the authority-transition contract depends on.
@@ -286,6 +287,24 @@ bool auth_contract_row_key_eq(const struct auth_transition_row *a,
 			      const struct auth_transition_row *b);
 u64 auth_contract_row_hash(const struct auth_transition_row *rows,
 			   unsigned int count);
+
+/*
+ * Externally rooted row hashes (P-04's row_hash with an external root): when a
+ * root is installed, a table's row_hash must be the keyed form -- SipHash with
+ * that root -- so the value can only be produced by whoever holds the root
+ * (the TPM/PCR-sealed policy root in production, a test root in KUnit).
+ * Without a root the deterministic, unkeyed xxh64 form stays the fallback, and
+ * the seal remains the authenticator in either case.
+ */
+#define AUTH_CONTRACT_HASH_ROOT_LEN 16
+u64 auth_contract_row_hash_keyed(const siphash_key_t *root,
+				 const struct auth_transition_row *rows,
+				 unsigned int count);
+int auth_contract_row_hash_root_install(const void *key, size_t len);
+bool auth_contract_row_hash_root_present(void);
+/* Test-only: clears the installed root so cases stay independent. */
+void auth_contract_row_hash_root_reset(void);
+int auth_contract_table_row_hash_check(const struct auth_transition_table *table);
 int auth_contract_row_check(const struct auth_transition_row *row);
 int auth_contract_load(const struct auth_transition_table *table);
 

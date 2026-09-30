@@ -516,15 +516,68 @@ u64 auth_contract_row_hash(const struct auth_transition_row *rows,
 }
 EXPORT_SYMBOL_GPL(auth_contract_row_hash);
 
-static int
+/*
+ * The installed hash root.  Installation is rare (a policy revision) and takes
+ * the mutex; the fast path only reads the flag and the key.
+ */
+static DEFINE_MUTEX(auth_row_hash_root_lock);
+static siphash_key_t auth_row_hash_root;
+static bool auth_row_hash_root_set;
+
+u64 auth_contract_row_hash_keyed(const siphash_key_t *root,
+				 const struct auth_transition_row *rows,
+				 unsigned int count)
+{
+	return siphash(rows, array_size(count, sizeof(*rows)), root);
+}
+EXPORT_SYMBOL_GPL(auth_contract_row_hash_keyed);
+
+int auth_contract_row_hash_root_install(const void *key, size_t len)
+{
+	if (!key || len != AUTH_CONTRACT_HASH_ROOT_LEN)
+		return -EINVAL;
+
+	mutex_lock(&auth_row_hash_root_lock);
+	memcpy(&auth_row_hash_root, key, AUTH_CONTRACT_HASH_ROOT_LEN);
+	WRITE_ONCE(auth_row_hash_root_set, true);
+	mutex_unlock(&auth_row_hash_root_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(auth_contract_row_hash_root_install);
+
+bool auth_contract_row_hash_root_present(void)
+{
+	return READ_ONCE(auth_row_hash_root_set);
+}
+EXPORT_SYMBOL_GPL(auth_contract_row_hash_root_present);
+
+void auth_contract_row_hash_root_reset(void)
+{
+	mutex_lock(&auth_row_hash_root_lock);
+	WRITE_ONCE(auth_row_hash_root_set, false);
+	memzero_explicit(&auth_row_hash_root, sizeof(auth_row_hash_root));
+	mutex_unlock(&auth_row_hash_root_lock);
+}
+EXPORT_SYMBOL_GPL(auth_contract_row_hash_root_reset);
+
+int
 auth_contract_table_row_hash_check(const struct auth_transition_table *table)
 {
-	if (table->row_hash != auth_contract_row_hash(table->rows,
-						      table->row_count))
+	u64 expected;
+
+	if (READ_ONCE(auth_row_hash_root_set))
+		expected = auth_contract_row_hash_keyed(&auth_row_hash_root,
+							table->rows,
+							table->row_count);
+	else
+		expected = auth_contract_row_hash(table->rows, table->row_count);
+
+	if (table->row_hash != expected)
 		return -EKEYREJECTED;
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(auth_contract_table_row_hash_check);
 
 int auth_contract_load(const struct auth_transition_table *table)
 {
