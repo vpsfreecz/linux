@@ -3334,7 +3334,14 @@ void tty_unregister_device(struct tty_driver *driver, unsigned index)
 {
 	device_destroy(&tty_class, MKDEV(driver->major, driver->minor_start) + index);
 	if (!(driver->flags & TTY_DRIVER_DYNAMIC_ALLOC)) {
-		cdev_del(driver->cdevs[index]);
+		/*
+		 * A failed tty_cdev_add() clears the slot (upstream
+		 * 6645856f0df3), because cdev_add() failure already dropped the
+		 * cdev reference.  cdev_del() has no NULL guard of its own, so
+		 * a cleared slot must be skipped here, not passed through.
+		 */
+		if (driver->cdevs[index])
+			cdev_del(driver->cdevs[index]);
 		driver->cdevs[index] = NULL;
 	}
 }
@@ -3425,8 +3432,11 @@ static void destruct_tty_driver(struct kref *kref)
 				tty_unregister_device(driver, i);
 		}
 		proc_tty_unregister_driver(driver);
-		if (driver->flags & TTY_DRIVER_DYNAMIC_ALLOC)
-			cdev_del(driver->cdevs[0]);
+		if (driver->flags & TTY_DRIVER_DYNAMIC_ALLOC) {
+			/* Same cleared-slot rule as tty_unregister_device(). */
+			if (driver->cdevs[0])
+				cdev_del(driver->cdevs[0]);
+		}
 	}
 	kfree(driver->cdevs);
 	kfree(driver->ports);

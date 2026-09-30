@@ -424,6 +424,18 @@ config RPMSG_TTY
 	  To compile this driver as a module, choose M here: the module will be
 	  called rpmsg_tty.
 
+config TTY_KUNIT_TEST
+	tristate "KUnit tests for the tty core cdev-slot lifetime" if !KUNIT_ALL_TESTS
+	depends on KUNIT && TTY
+	default KUNIT_ALL_TESTS
+	help
+	  KUnit tests for tty core invariants.  The suite currently pins the
+	  cdev-slot lifetime around a failed tty_cdev_add() and the two places
+	  that later hand the slot to cdev_del(): tty_unregister_device() and
+	  the driver destruct loop.
+
+	  If unsure, say N.
+
 endif # TTY
 
 source "drivers/tty/serdev/Kconfig"
