@@ -703,6 +703,110 @@ static void auth_contract_note_reports_the_verdict(struct kunit *test)
 	}
 }
 
+static struct auth_transition_table *
+auth_contract_kunit_policy(struct kunit *test,
+			   const struct auth_transition_row *rows, u32 nr)
+{
+	struct auth_transition_table *table;
+
+	table = kunit_kzalloc(test, struct_size(table, rows, nr), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, table);
+	table->template_id = 1;
+	table->row_count = nr;
+	memcpy(table->rows, rows, nr * sizeof(*rows));
+	table->row_hash = auth_contract_row_hash(table->rows, nr);
+	KUNIT_ASSERT_EQ(test, auth_contract_table_seal(table), 0);
+	return table;
+}
+
+static void auth_contract_narrow_rule_rejects_widening(struct kunit *test)
+{
+	const struct auth_transition_row policy_rows[] = {
+		{
+			.kind		= AUTH_CONTRACT_KIND_CRED_COMMIT,
+			.subject_class	= AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+			.root_class	= AUTH_CONTRACT_ROOT_CONTAINER_CRED,
+			.trigger	= AUTH_CONTRACT_TRIGGER_CLONE,
+			.caller		= AUTH_CONTRACT_SUBJECT_TENANT_TASK,
+			.leaf		= AUTH_CONTRACT_LEAF_ALLOWED,
+		},
+	};
+	struct auth_transition_row same[] = { policy_rows[0] };
+	struct auth_transition_row other[] = { policy_rows[0] };
+	struct auth_transition_row forbidding[] = { policy_rows[0] };
+	const struct auth_transition_table *policy;
+	struct auth_transition_table *candidate;
+
+	other[0].trigger = AUTH_CONTRACT_TRIGGER_UNSHARE;
+	forbidding[0].leaf = AUTH_CONTRACT_LEAF_FORBIDDEN;
+
+	policy = auth_contract_kunit_policy(test, policy_rows, 1);
+	KUNIT_ASSERT_EQ(test, auth_contract_global_policy_install(
+		policy, struct_size(policy, rows, 1)), 0);
+	KUNIT_ASSERT_TRUE(test, auth_contract_global_policy_present());
+	KUNIT_ASSERT_NOT_NULL(test, auth_contract_global_policy_get());
+
+	/* Same key, allowed: narrows nothing, passes. */
+	candidate = auth_contract_kunit_policy(test, same, 1);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_narrow_check(candidate), 0);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(
+		candidate, struct_size(candidate, rows, 1)), 0);
+
+	/* Other key, allowed: widens, refused -- on the load path too. */
+	candidate = auth_contract_kunit_policy(test, other, 1);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_narrow_check(candidate), -EPERM);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_verify_buffer(
+		candidate, struct_size(candidate, rows, 1)), -EPERM);
+
+	/* Forbidding always narrows. */
+	candidate = auth_contract_kunit_policy(test, forbidding, 1);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_narrow_check(candidate), 0);
+
+	/* Without a policy the rule fails closed for ALLOWED rows. */
+	auth_contract_global_policy_reset();
+	KUNIT_EXPECT_FALSE(test, auth_contract_global_policy_present());
+	candidate = auth_contract_kunit_policy(test, same, 1);
+	KUNIT_EXPECT_EQ(test, auth_contract_table_narrow_check(candidate), -EPERM);
+}
+
+static void auth_contract_global_policy_install_is_exact(struct kunit *test)
+{
+	const struct auth_transition_row rows[] = {
+		{
+			.kind		= AUTH_CONTRACT_KIND_NS_CREATE,
+			.subject_class	= AUTH_CONTRACT_SUBJECT_MANAGER,
+			.root_class	= AUTH_CONTRACT_ROOT_HOST_NSPROXY,
+			.trigger	= AUTH_CONTRACT_TRIGGER_UNSHARE,
+			.caller		= AUTH_CONTRACT_SUBJECT_MANAGER,
+			.leaf		= AUTH_CONTRACT_LEAF_ALLOWED,
+		},
+	};
+	struct auth_transition_table *policy;
+	const struct auth_transition_table *first, *second;
+
+	KUNIT_EXPECT_EQ(test, auth_contract_global_policy_install(NULL, 0), -EINVAL);
+
+	policy = auth_contract_kunit_policy(test, rows, 1);
+	KUNIT_EXPECT_EQ(test, auth_contract_global_policy_install(
+		policy, struct_size(policy, rows, 1) - 1), -EINVAL);
+
+	KUNIT_ASSERT_EQ(test, auth_contract_global_policy_install(
+		policy, struct_size(policy, rows, 1)), 0);
+	first = auth_contract_global_policy_get();
+	KUNIT_ASSERT_NOT_NULL(test, first);
+
+	/* Replacing installs a fresh object and publishes it. */
+	KUNIT_ASSERT_EQ(test, auth_contract_global_policy_install(
+		policy, struct_size(policy, rows, 1)), 0);
+	second = auth_contract_global_policy_get();
+	KUNIT_ASSERT_NOT_NULL(test, second);
+	KUNIT_EXPECT_PTR_NE(test, first, second);
+	KUNIT_EXPECT_EQ(test, second->row_count, 1);
+
+	auth_contract_global_policy_reset();
+	KUNIT_EXPECT_FALSE(test, auth_contract_global_policy_present());
+}
+
 static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_expectation_missing_region_fails_closed),
 	KUNIT_CASE(auth_expectation_record_lookup_roundtrip),
@@ -727,6 +831,8 @@ static struct kunit_case auth_contract_test_cases[] = {
 	KUNIT_CASE(auth_contract_table_publish_rejects_unsealed),
 	KUNIT_CASE(auth_contract_table_publish_and_judge),
 	KUNIT_CASE(auth_contract_note_reports_the_verdict),
+	KUNIT_CASE(auth_contract_narrow_rule_rejects_widening),
+	KUNIT_CASE(auth_contract_global_policy_install_is_exact),
 	{}
 };
 
