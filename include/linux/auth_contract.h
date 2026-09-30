@@ -264,6 +264,26 @@ auth_contract_is_host_root_class(enum auth_contract_root_class klass)
 int auth_contract_table_seal(struct auth_transition_table *table);
 int auth_contract_table_verify(const struct auth_transition_table *table);
 int auth_contract_table_verify_buffer(const void *buf, size_t len);
+
+/*
+ * The global response policy (P-05): a sealed table that the policy region
+ * carries and that the load path compares candidate tables against.  A table
+ * may narrow it -- forbidding what the global policy merely allows -- never
+ * widen it: every ALLOWED row of a loaded table must have an exact-key ALLOWED
+ * row in the global policy (key = kind, trigger, subject class, root class;
+ * the caller field is an attribution, not part of what a row permits).  The
+ * rule fails closed: without an installed policy an ALLOWED row cannot be
+ * justified, so the load path installs the policy first and the KUnit suite
+ * installs a test policy.
+ */
+int auth_contract_global_policy_install(const void *buf, size_t len);
+bool auth_contract_global_policy_present(void);
+const struct auth_transition_table *auth_contract_global_policy_get(void);
+/* Test-only: clears the installed policy so cases stay independent. */
+void auth_contract_global_policy_reset(void);
+int auth_contract_table_narrow_check(const struct auth_transition_table *table);
+bool auth_contract_row_key_eq(const struct auth_transition_row *a,
+			      const struct auth_transition_row *b);
 u64 auth_contract_row_hash(const struct auth_transition_row *rows,
 			   unsigned int count);
 int auth_contract_row_check(const struct auth_transition_row *row);

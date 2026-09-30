@@ -299,6 +299,115 @@ int auth_contract_table_verify(const struct auth_transition_table *table)
 }
 EXPORT_SYMBOL_GPL(auth_contract_table_verify);
 
+/*
+ * The installed global response policy (P-05).  It is a verified, sealed table
+ * kept as its own allocation; installation is rare (a template revision) and
+ * takes the mutex, while the read side only needs the pointer plus the fact
+ * that the object was verified before publication.
+ */
+static DEFINE_MUTEX(auth_global_policy_lock);
+static struct auth_transition_table *auth_global_policy;
+
+bool auth_contract_row_key_eq(const struct auth_transition_row *a,
+			      const struct auth_transition_row *b)
+{
+	return a->kind == b->kind && a->trigger == b->trigger &&
+	       a->subject_class == b->subject_class &&
+	       a->root_class == b->root_class;
+}
+EXPORT_SYMBOL_GPL(auth_contract_row_key_eq);
+
+int auth_contract_global_policy_install(const void *buf, size_t len)
+{
+	const struct auth_transition_table *candidate = buf;
+	struct auth_transition_table *copy;
+	int ret;
+
+	if (!buf || len < sizeof(*candidate))
+		return -EINVAL;
+	if (candidate->row_count > AUTH_CONTRACT_MAX_ROWS)
+		return -EINVAL;
+	if (len != struct_size(candidate, rows, candidate->row_count))
+		return -EINVAL;
+
+	ret = auth_contract_table_verify(candidate);
+	if (ret)
+		return ret;
+
+	copy = kmalloc(len, GFP_KERNEL);
+	if (!copy)
+		return -ENOMEM;
+	memcpy(copy, candidate, len);
+
+	mutex_lock(&auth_global_policy_lock);
+	swap(auth_global_policy, copy);
+	mutex_unlock(&auth_global_policy_lock);
+
+	kfree(copy);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(auth_contract_global_policy_install);
+
+bool auth_contract_global_policy_present(void)
+{
+	return data_race(auth_global_policy) != NULL;
+}
+EXPORT_SYMBOL_GPL(auth_contract_global_policy_present);
+
+const struct auth_transition_table *auth_contract_global_policy_get(void)
+{
+	return data_race(auth_global_policy);
+}
+EXPORT_SYMBOL_GPL(auth_contract_global_policy_get);
+
+void auth_contract_global_policy_reset(void)
+{
+	struct auth_transition_table *old;
+
+	mutex_lock(&auth_global_policy_lock);
+	old = auth_global_policy;
+	auth_global_policy = NULL;
+	mutex_unlock(&auth_global_policy_lock);
+
+	kfree(old);
+}
+EXPORT_SYMBOL_GPL(auth_contract_global_policy_reset);
+
+int auth_contract_table_narrow_check(const struct auth_transition_table *table)
+{
+	const struct auth_transition_table *policy;
+	u32 i, j;
+
+	if (!table)
+		return -EINVAL;
+
+	policy = auth_contract_global_policy_get();
+
+	for (i = 0; i < table->row_count; i++) {
+		const struct auth_transition_row *row = &table->rows[i];
+
+		/* Forbidding always narrows: no global row required. */
+		if (row->leaf != AUTH_CONTRACT_LEAF_ALLOWED)
+			continue;
+
+		if (!policy)
+			return -EPERM;
+
+		for (j = 0; j < policy->row_count; j++) {
+			const struct auth_transition_row *global = &policy->rows[j];
+
+			if (global->leaf == AUTH_CONTRACT_LEAF_ALLOWED &&
+			    auth_contract_row_key_eq(row, global))
+				break;
+		}
+		if (j == policy->row_count)
+			return -EPERM;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(auth_contract_table_narrow_check);
+
 /**
  * auth_contract_table_verify_buffer - verify a table that arrived as a buffer
  * @buf: the received table image (head followed by its rows)
@@ -326,7 +435,15 @@ int auth_contract_table_verify_buffer(const void *buf, size_t len)
 	if (len != expected)
 		return -EINVAL;
 
-	return auth_contract_table_verify(table);
+	ret = auth_contract_table_verify(table);
+	if (ret)
+		return ret;
+
+	/*
+	 * The external load path is where the narrowing rule is enforced: a table
+	 * that arrives as bytes must not widen the installed global policy.
+	 */
+	return auth_contract_table_narrow_check(table);
 }
 EXPORT_SYMBOL_GPL(auth_contract_table_verify_buffer);
 
