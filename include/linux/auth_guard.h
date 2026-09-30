@@ -205,6 +205,13 @@ enum auth_guard_mutation_result auth_guard_task_replace_tracing_request_where(
 #ifdef CONFIG_AUTH_GUARD_CORE
 struct auth_guard_domain {
 	const char *name;
+	/*
+	 * W6 event tuple, domain-scope half: which subject/root classes events
+	 * from this domain can involve.  The per-event row context (template id,
+	 * the row's own classes) lands with the judge wiring (P-03/P-08).
+	 */
+	const char *subject_class;
+	const char *root_class;
 	siphash_key_t key;
 	bool seeded;
 };
@@ -212,6 +219,13 @@ struct auth_guard_domain {
 #define AUTH_GUARD_DOMAIN(_name)			\
 	{						\
 		.name = _name,				\
+	}
+
+#define AUTH_GUARD_DOMAIN_CLASSES(_name, _subject, _root)	\
+	{						\
+		.name = _name,				\
+		.subject_class = _subject,		\
+		.root_class = _root,			\
 	}
 
 void __init auth_guard_init_domain(struct auth_guard_domain *domain);

@@ -6,6 +6,8 @@
 #include <linux/cache.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/mutex.h>
+#include <linux/string.h>
 #include <linux/overflow.h>
 #include <linux/xxhash.h>
 #include <linux/rcupdate.h>
@@ -220,7 +222,9 @@ late_initcall(auth_expectation_init);
  * rows.
  */
 static struct auth_guard_domain auth_contract_guard __ro_after_init =
-	AUTH_GUARD_DOMAIN("auth_contract");
+	AUTH_GUARD_DOMAIN_CLASSES("auth_contract",
+			      "tenant|guest|manager|kernel_internal",
+			      "container|host");
 
 struct auth_contract_head {
 	u32 template_id;

@@ -31,6 +31,7 @@
 #include <linux/syslog.h>
 #include <linux/syslog_namespace.h>
 #include <linux/tracing_namespace.h>
+#include <linux/timekeeping.h>
 #include <linux/uaccess.h>
 #include <linux/user_namespace.h>
 
@@ -87,13 +88,13 @@ u64 auth_guard_boot_id(void)
 
 bool auth_guard_quarantine_retain_counted(atomic_t *retained)
 {
-	int current;
+	int retained_now;
 
 	if (!retained)
 		return false;
 
-	current = atomic_inc_return(retained);
-	if (current > AUTH_GUARD_QUARANTINE_QUOTA) {
+	retained_now = atomic_inc_return(retained);
+	if (retained_now > AUTH_GUARD_QUARANTINE_QUOTA) {
 		atomic_dec(retained);
 		auth_guard_counter_inc(AUTH_GUARD_CTR_QUARANTINE_COLLAPSED);
 		return false;
@@ -6453,12 +6454,19 @@ static int auth_guard_stats_show(struct seq_file *m, void *v)
 	}
 	spin_lock(&auth_guard_fail_lock);
 	seq_printf(m, "fail_sites: %u\n", auth_guard_fail_store.count);
-	for (i = 0; i < auth_guard_fail_store.count; i++)
-		seq_printf(m, "site %u: domain=%pS where=%s what=%s count=%lu\n",
+	for (i = 0; i < auth_guard_fail_store.count; i++) {
+		const struct auth_guard_domain *domain =
+			auth_guard_fail_store.keys[i].domain;
+
+		seq_printf(m,
+			   "site %u: domain=%pS subject=%s root=%s where=%s what=%s count=%lu\n",
 			   i, auth_guard_fail_store.keys[i].domain,
+			   domain->subject_class ? domain->subject_class : "n/a",
+			   domain->root_class ? domain->root_class : "n/a",
 			   auth_guard_fail_store.keys[i].where,
 			   auth_guard_fail_store.keys[i].what,
 			   auth_guard_fail_store.counts[i]);
+	}
 	spin_unlock(&auth_guard_fail_lock);
 	return 0;
 }
