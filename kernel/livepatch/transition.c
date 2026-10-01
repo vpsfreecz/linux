@@ -8,6 +8,10 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/cpu.h>
+#include <linux/overflow.h>
+#include <linux/slab.h>
+#include <linux/smp.h>
+#include <linux/sort.h>
 #include <linux/stacktrace.h>
 #include <linux/static_call.h>
 #include "core.h"
@@ -15,11 +19,12 @@
 #include "transition.h"
 
 #define MAX_STACK_ENTRIES  100
-static DEFINE_PER_CPU(unsigned long[MAX_STACK_ENTRIES], klp_stack_entries);
 
 #define STACK_ERR_BUF_SIZE 128
 
 #define SIGNALS_TIMEOUT 15
+
+#define KLP_TASK_BATCH_SIZE 256
 
 struct klp_patch *klp_transition_patch;
 
@@ -207,16 +212,20 @@ void klp_update_patch_state(struct task_struct *task)
 	preempt_enable_notrace();
 }
 
-/*
- * Determine whether the given stack trace includes any references to a
- * to-be-patched or to-be-unpatched function.
- */
-static int klp_check_stack_func(struct klp_func *func, unsigned long *entries,
-				unsigned int nr_entries)
+static int klp_compare_stack_entries(const void *a, const void *b)
 {
-	unsigned long func_addr, func_size, address;
-	struct klp_ops *ops;
-	int i;
+	unsigned long first = *(const unsigned long *)a;
+	unsigned long second = *(const unsigned long *)b;
+
+	return (first > second) - (first < second);
+}
+
+/* Check a forbidden function against the sorted, reliable stack addresses. */
+static int klp_check_stack_func(struct klp_func *func, unsigned long *entries,
+				unsigned int nr_entries, bool stable_funcs)
+{
+	unsigned long func_addr, func_size, func_end;
+	unsigned int low = 0, high = nr_entries, mid;
 
 	if (klp_target_state == KLP_TRANSITION_UNPATCHED) {
 		 /*
@@ -230,9 +239,25 @@ static int klp_check_stack_func(struct klp_func *func, unsigned long *entries,
 		 * Check for the to-be-patched function
 		 * (the previous func).
 		 */
-		ops = klp_find_ops(func->old_func);
+		bool original;
 
-		if (list_is_singular(&ops->func_stack)) {
+		if (stable_funcs) {
+			/*
+			 * The bulk caller holds klp_mutex, also while waiting for
+			 * its idle callbacks.  This transition is at func_stack's
+			 * head: equal neighbours mean there is no predecessor.
+			 */
+			original = READ_ONCE(func->stack_node.next) ==
+				   READ_ONCE(func->stack_node.prev);
+		} else {
+			struct klp_ops *ops = klp_find_ops(func->old_func);
+
+			/* Preserve the scheduler reader's existing lookup. */
+			if (WARN_ON_ONCE(!ops))
+				return -EINVAL;
+			original = list_is_singular(&ops->func_stack);
+		}
+		if (original) {
 			/* original function */
 			func_addr = (unsigned long)func->old_func;
 			func_size = func->old_size;
@@ -246,12 +271,19 @@ static int klp_check_stack_func(struct klp_func *func, unsigned long *entries,
 		}
 	}
 
-	for (i = 0; i < nr_entries; i++) {
-		address = entries[i];
+	if (check_add_overflow(func_addr, func_size, &func_end))
+		return -EOVERFLOW;
 
-		if (address >= func_addr && address < func_addr + func_size)
-			return -EAGAIN;
+	/* Find the first saved address at or above the function start. */
+	while (low < high) {
+		mid = low + (high - low) / 2;
+		if (entries[mid] < func_addr)
+			low = mid + 1;
+		else
+			high = mid;
 	}
+	if (low < nr_entries && entries[low] < func_end)
+		return -EAGAIN;
 
 	return 0;
 }
@@ -260,26 +292,38 @@ static int klp_check_stack_func(struct klp_func *func, unsigned long *entries,
  * Determine whether it's safe to transition the task to the target patch state
  * by looking for any to-be-patched or to-be-unpatched functions on its stack.
  */
-static int klp_check_stack(struct task_struct *task, const char **oldname)
+static noinline_for_stack int
+klp_check_stack(struct task_struct *task, const char **oldname, bool stable_funcs)
 {
-	unsigned long *entries = this_cpu_ptr(klp_stack_entries);
+	unsigned long entries[MAX_STACK_ENTRIES];
 	struct klp_object *obj;
 	struct klp_func *func;
 	int ret, nr_entries;
 
-	/* Protect 'klp_stack_entries' */
-	lockdep_assert_preemption_disabled();
+	/* Stabilize current and exclude interrupt-side transition checks. */
+	lockdep_assert_irqs_disabled();
 
 	ret = stack_trace_save_tsk_reliable(task, entries, MAX_STACK_ENTRIES);
 	if (ret < 0)
 		return -EINVAL;
 	nr_entries = ret;
 
+	/*
+	 * Index only this bounded stack, not the changing set of live objects.
+	 * Private scratch also cannot alias an older checker's per-CPU buffer
+	 * during live delivery.  No cross-task cache lifetime is needed.  Each
+	 * function costs O(log(MAX_STACK_ENTRIES)) address comparisons,
+	 * and its predecessor is read from the current function stack.
+	 */
+	sort(entries, nr_entries, sizeof(*entries), klp_compare_stack_entries, NULL);
+
 	klp_for_each_object(klp_transition_patch, obj) {
 		if (!obj->patched)
 			continue;
 		klp_for_each_func(obj, func) {
-			ret = klp_check_stack_func(func, entries, nr_entries);
+			ret = klp_check_stack_func(func, entries, nr_entries, stable_funcs);
+			if (ret && ret != -EAGAIN)
+				return ret;
 			if (ret) {
 				*oldname = func->old_name;
 				return -EADDRINUSE;
@@ -290,14 +334,15 @@ static int klp_check_stack(struct task_struct *task, const char **oldname)
 	return 0;
 }
 
-static int klp_check_and_switch_task(struct task_struct *task, void *arg)
+static int klp_check_and_switch_task(struct task_struct *task, const char **oldname,
+				     bool stable_funcs)
 {
 	int ret;
 
 	if (task_curr(task) && task != current)
 		return -EBUSY;
 
-	ret = klp_check_stack(task, arg);
+	ret = klp_check_stack(task, oldname, stable_funcs);
 	if (ret)
 		return ret;
 
@@ -311,9 +356,11 @@ static int klp_check_and_switch_task(struct task_struct *task, void *arg)
  * running, or it's sleeping on a to-be-patched or to-be-unpatched function, or
  * if the stack is unreliable, return false.
  */
-static bool klp_try_switch_task(struct task_struct *task)
+static bool klp_try_switch_task(struct task_struct *task, bool stable_funcs)
 {
 	const char *old_name;
+	unsigned long flags;
+	unsigned int state;
 	int ret;
 
 	/* check if this task has already switched over */
@@ -332,10 +379,55 @@ static bool klp_try_switch_task(struct task_struct *task)
 	 * functions.  If all goes well, switch the task to the target patch
 	 * state.
 	 */
-	if (task == current)
-		ret = klp_check_and_switch_task(current, &old_name);
-	else
-		ret = task_call_func(task, klp_check_and_switch_task, &old_name);
+	if (task == current) {
+		/*
+		 * Pin current and serialize its state update with the idle-task
+		 * IPI callback on this CPU.  Each check has private stack scratch.
+		 */
+		local_irq_save(flags);
+		ret = klp_check_and_switch_task(current, &old_name, stable_funcs);
+		local_irq_restore(flags);
+	} else {
+		/*
+		 * task_call_func() can hold the task's rq lock while invoking its
+		 * callback.  A cumulative livepatch stack check is not a lightweight
+		 * callback: it compares every saved frame against every transition
+		 * function.  Pin sleeping tasks with pi_lock instead and leave any
+		 * active task for one of the normal self-transition paths.
+		 */
+		raw_spin_lock_irqsave(&task->pi_lock, flags);
+
+		state = READ_ONCE(task->__state);
+		if (state == TASK_RUNNING || state == TASK_WAKING) {
+			ret = -EBUSY;
+			goto unlock;
+		}
+
+		/* Pair the scheduler state and on_rq observations. */
+		smp_rmb();
+		if (READ_ONCE(task->on_rq)) {
+			ret = -EBUSY;
+			goto unlock;
+		}
+
+#ifdef CONFIG_SMP
+		/*
+		 * A sleeping task can still be finishing __schedule().  Acquire
+		 * from finish_task() before inspecting its stack, but never wait
+		 * for it while holding scheduler state locks.
+		 */
+		smp_rmb();
+		/* Pairs with finish_task()'s smp_store_release(). */
+		if (smp_load_acquire(&task->on_cpu)) {
+			ret = -EBUSY;
+			goto unlock;
+		}
+#endif
+
+		ret = klp_check_and_switch_task(task, &old_name, stable_funcs);
+unlock:
+		raw_spin_unlock_irqrestore(&task->pi_lock, flags);
+	}
 
 	switch (ret) {
 	case 0:		/* success */
@@ -353,6 +445,9 @@ static bool klp_try_switch_task(struct task_struct *task)
 		pr_debug("%s: %s:%d is sleeping on function %s\n",
 			 __func__, task->comm, task->pid, old_name);
 		break;
+	case -EOVERFLOW:
+		pr_debug("%s: invalid transition function range\n", __func__);
+		break;
 
 	default:
 		pr_debug("%s: Unknown error code (%d) when trying to switch %s:%d\n",
@@ -361,6 +456,43 @@ static bool klp_try_switch_task(struct task_struct *task)
 	}
 
 	return !ret;
+}
+
+/*
+ * Try to switch this CPU's idle task while execution on the target CPU makes
+ * its stack stable.  Idle tasks always have TASK_RUNNING state, even when
+ * they are not current, so the ordinary sleeping-task path cannot handle
+ * them.  If the idle task is current, this callback runs on its stack.  If a
+ * different task is current, local IRQ disablement prevents the idle task
+ * from becoming runnable until its inactive stack walk has finished.
+ */
+static void klp_try_switch_idle_task(void *unused)
+{
+	struct task_struct *task = idle_task(smp_processor_id());
+	const char *old_name;
+	int ret;
+
+	if (task->patch_state == klp_target_state ||
+	    !klp_have_reliable_stack())
+		return;
+
+	ret = klp_check_and_switch_task(task, &old_name, true);
+	switch (ret) {
+	case 0:
+		break;
+	case -EINVAL:
+		pr_debug("%s: idle task %d has an unreliable stack\n",
+			 __func__, smp_processor_id());
+		break;
+	case -EADDRINUSE:
+		pr_debug("%s: idle task %d is sleeping on function %s\n",
+			 __func__, smp_processor_id(), old_name);
+		break;
+	default:
+		pr_debug("%s: error %d when trying to switch idle task %d\n",
+			 __func__, ret, smp_processor_id());
+		break;
+	}
 }
 
 void __klp_sched_try_switch(void)
@@ -374,8 +506,8 @@ void __klp_sched_try_switch(void)
 	 * deadlock.
 	 *
 	 * Instead, disable preemption to prevent racing with other callers of
-	 * klp_try_switch_task().  Thanks to task_call_func() they won't be
-	 * able to switch this task while it's running.
+	 * klp_try_switch_task().  Its non-current path leaves runnable and
+	 * on-CPU tasks pending, so they cannot switch this task while it runs.
 	 */
 	preempt_disable();
 
@@ -394,7 +526,7 @@ void __klp_sched_try_switch(void)
 	 */
 	smp_rmb();
 
-	klp_try_switch_task(current);
+	klp_try_switch_task(current, false);
 
 out:
 	preempt_enable();
@@ -452,7 +584,9 @@ void klp_try_complete_transition(void)
 {
 	unsigned int cpu;
 	struct task_struct *g, *task;
+	struct task_struct **tasks = NULL;
 	struct klp_patch *patch;
+	size_t capacity = 0, nr_tasks = 0, slack, i;
 	bool complete = true;
 
 	WARN_ON_ONCE(klp_target_state == KLP_TRANSITION_IDLE);
@@ -466,31 +600,115 @@ void klp_try_complete_transition(void)
 	 * Usually this will transition most (or all) of the tasks on a system
 	 * unless the patch includes changes to a very common function.
 	 */
+	/*
+	 * Keep tasklist_lock coverage to pointer collection.  Stack walking and
+	 * cumulative function comparison can be expensive on large systems and
+	 * must remain preemptible and outside this global lock.
+	 */
 	read_lock(&tasklist_lock);
-	for_each_process_thread(g, task)
-		if (!klp_try_switch_task(task))
+	for_each_process_thread(g, task) {
+		if (capacity == SIZE_MAX) {
 			complete = false;
+			goto count_done;
+		}
+		capacity++;
+	}
+count_done:
 	read_unlock(&tasklist_lock);
+	if (!complete)
+		goto idle_tasks;
+
+	if (capacity) {
+		/*
+		 * Leave room for forks between the count and fill passes.  Requiring
+		 * an exact task count here can starve completion under continuous
+		 * process churn, especially if this worker is preempted after dropping
+		 * tasklist_lock.  The bound remains conservative: an unexpectedly
+		 * larger burst still overflows the snapshot and forces a later retry.
+		 */
+		slack = max_t(size_t, KLP_TASK_BATCH_SIZE, capacity / 8);
+		if (check_add_overflow(capacity, slack, &capacity)) {
+			complete = false;
+			goto idle_tasks;
+		}
+
+		tasks = kvmalloc_array(capacity, sizeof(*tasks), GFP_KERNEL);
+		if (!tasks) {
+			complete = false;
+			goto idle_tasks;
+		}
+
+		read_lock(&tasklist_lock);
+		for_each_process_thread(g, task) {
+			/* A larger-than-anticipated fork burst forces a later retry. */
+			if (nr_tasks == capacity) {
+				complete = false;
+				goto snapshot_full;
+			}
+			get_task_struct(task);
+			tasks[nr_tasks++] = task;
+		}
+snapshot_full:
+		read_unlock(&tasklist_lock);
+
+		for (i = 0; i < nr_tasks; i++) {
+			if (!klp_try_switch_task(tasks[i], true))
+				complete = false;
+			put_task_struct(tasks[i]);
+
+			if ((i + 1) % KLP_TASK_BATCH_SIZE == 0)
+				cond_resched();
+		}
+		kvfree(tasks);
+	}
 
 	/*
 	 * Ditto for the idle "swapper" tasks.
 	 */
+idle_tasks:
 	cpus_read_lock();
+	for_each_online_cpu(cpu) {
+		/*
+		 * Execute on the idle task's own CPU so it is either current or
+		 * cannot become current while the callback walks its stack.  The
+		 * callback is synchronous and does not acquire any runqueue lock.
+		 */
+		if (idle_task(cpu)->patch_state != klp_target_state &&
+		    smp_call_function_single(cpu, klp_try_switch_idle_task,
+					     NULL, 1))
+			complete = false;
+	}
+
+	/* Verify every idle task after all target-CPU callbacks have returned. */
 	for_each_possible_cpu(cpu) {
 		task = idle_task(cpu);
-		if (cpu_online(cpu)) {
-			if (!klp_try_switch_task(task)) {
-				complete = false;
-				/* Make idle task go through the main loop. */
-				wake_up_if_idle(cpu);
-			}
-		} else if (task->patch_state != klp_target_state) {
+		if (!cpu_online(cpu) && task->patch_state != klp_target_state) {
 			/* offline idle tasks can be switched immediately */
 			clear_tsk_thread_flag(task, TIF_PATCH_PENDING);
 			task->patch_state = klp_target_state;
 		}
+		if (task->patch_state != klp_target_state)
+			complete = false;
 	}
 	cpus_read_unlock();
+
+	/*
+	 * A child can inherit the old state after snapshot collection but before
+	 * its parent is checked.  Verify the live set under the same lock used
+	 * by klp_copy_process(), without collecting stacks or taking pi_lock.
+	 * Once every parent is in the target state, later children inherit it.
+	 */
+	if (complete) {
+		read_lock(&tasklist_lock);
+		for_each_process_thread(g, task) {
+			if (READ_ONCE(task->patch_state) != klp_target_state) {
+				complete = false;
+				goto tasks_checked;
+			}
+		}
+tasks_checked:
+		read_unlock(&tasklist_lock);
+	}
 
 	if (!complete) {
 		if (klp_signals_cnt && !(klp_signals_cnt % SIGNALS_TIMEOUT))
@@ -702,10 +920,10 @@ void klp_copy_process(struct task_struct *child)
 	 * the thread flag was copied in setup_thread_stack earlier. Bring
 	 * the task flag up to date with the parent here.
 	 *
-	 * The operation is serialized against all klp_*_transition()
-	 * operations by the tasklist_lock. The only exceptions are
-	 * klp_update_patch_state(current) and __klp_sched_try_switch(), but we
-	 * cannot race with them because we are current.
+	 * tasklist_lock serializes this with transition initialization, the
+	 * final task-set check, and completion.  Remote stack checks cannot
+	 * change our state while we are runnable or on-CPU.  The remaining
+	 * state updates run on current, so they cannot race with us either.
 	 */
 	if (test_tsk_thread_flag(current, TIF_PATCH_PENDING))
 		set_tsk_thread_flag(child, TIF_PATCH_PENDING);
