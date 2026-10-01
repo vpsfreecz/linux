@@ -5422,6 +5422,7 @@ static void free_event_rcu(struct rcu_head *head)
 		btf_put(event->container_kprobe_btf);
 #endif
 	perf_event_free_filter(event);
+	kfree(event->addr_filter_ranges);
 	kmem_cache_free(perf_event_cache, event);
 }
 
@@ -5867,8 +5868,6 @@ static void __free_event(struct perf_event *event)
 
 	if (event->attach_state & PERF_ATTACH_CALLCHAIN)
 		put_callchain_buffers();
-
-	kfree(event->addr_filter_ranges);
 
 	if (event->attach_state & PERF_ATTACH_EXCLUSIVE)
 		exclusive_event_destroy(event);
