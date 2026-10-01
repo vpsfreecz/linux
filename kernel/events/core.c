@@ -14350,13 +14350,38 @@ static int __perf_cgroup_move(void *info)
 	return 0;
 }
 
+static void perf_cgroup_move_cpu(void *unused)
+{
+	perf_cgroup_switch(current);
+}
+
 static void perf_cgroup_attach(struct cgroup_taskset *tset)
 {
 	struct task_struct *task;
 	struct cgroup_subsys_state *css;
+	unsigned int nr_cpus = num_online_cpus();
+	unsigned int nr_tasks = 0;
 
-	cgroup_taskset_for_each(task, css, tset)
+	/* Keep small migrations from interrupting every online CPU. */
+	cgroup_taskset_for_each(task, css, tset) {
+		if (++nr_tasks > nr_cpus) {
+			/*
+			 * The cgroup core commits every task's css_set before
+			 * calling ->attach(). Only currently running tasks need
+			 * an explicit perf switch; other tasks pick up their new
+			 * cgroup when scheduled in. Updating each CPU's current
+			 * task therefore also covers tasks migrating between CPUs,
+			 * without sending a synchronous IPI for every task.
+			 */
+			on_each_cpu(perf_cgroup_move_cpu, NULL, 1);
+			return;
+		}
+	}
+
+	cgroup_taskset_for_each(task, css, tset) {
 		task_function_call(task, __perf_cgroup_move, task);
+		cond_resched();
+	}
 }
 
 struct cgroup_subsys perf_event_cgrp_subsys = {
