@@ -12,6 +12,7 @@
 
 #include <linux/auth_guard.h>
 #include <linux/kthread.h>
+#include <linux/timekeeping.h>
 
 static void auth_guard_crng_gate_allows_initialized(struct kunit *test)
 {
@@ -227,6 +228,44 @@ static void auth_guard_quarantine_quota_collapses(struct kunit *test)
 			(int)AUTH_GUARD_QUARANTINE_QUOTA);
 }
 
+/*
+ * W7/P-13 cost record: the seal primitive (siphash over a 64-byte block with
+ * the domain-key shape) and the per-CPU counter increment, so every run
+ * carries the guard's primitive costs in its log and the ledger.  The bounds
+ * are deliberately loose: this catches catastrophic regressions, not the few
+ * percent the design budgets.
+ */
+static void auth_guard_seal_cost_is_recorded(struct kunit *test)
+{
+	enum { OPS = 20000 };
+	siphash_key_t key = { .key = { 0x0123456789abcdefULL, 0xfedcba9876543210ULL } };
+	u8 data[64] = { };
+	u64 t0, t1, i, acc = 0;
+	u64 seal_ns, ctr_ns;
+
+	t0 = ktime_get_ns();
+	for (i = 0; i < OPS; i++)
+		acc ^= siphash(data, sizeof(data), &key);
+	t1 = ktime_get_ns();
+	seal_ns = (t1 - t0) / OPS;
+
+	t0 = ktime_get_ns();
+	for (i = 0; i < OPS; i++)
+		auth_guard_counter_inc(AUTH_GUARD_CTR_TEST);
+	t1 = ktime_get_ns();
+	ctr_ns = (t1 - t0) / OPS;
+
+	/* Keep the accumulated result observable. */
+	KUNIT_EXPECT_NE(test, acc, 0);
+
+	kunit_info(test, "cost: siphash64=%llu ns/op, counter_inc=%llu ns/op (%u ops)",
+		   (unsigned long long)seal_ns, (unsigned long long)ctr_ns,
+		   (unsigned)OPS);
+
+	KUNIT_EXPECT_LT(test, seal_ns, 5000);
+	KUNIT_EXPECT_LT(test, ctr_ns, 1000);
+}
+
 static struct kunit_case auth_guard_test_cases[] = {
 	KUNIT_CASE(auth_guard_crng_gate_allows_initialized),
 	KUNIT_CASE(auth_guard_crng_gate_refuses_uninitialized),
@@ -238,6 +277,7 @@ static struct kunit_case auth_guard_test_cases[] = {
 	KUNIT_CASE(auth_guard_boot_id_is_drawn_when_enabled),
 	KUNIT_CASE(auth_guard_mutation_worst_is_retain_biased),
 	KUNIT_CASE(auth_guard_quarantine_quota_collapses),
+	KUNIT_CASE(auth_guard_seal_cost_is_recorded),
 	{}
 };
 
