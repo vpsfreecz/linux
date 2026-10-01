@@ -245,7 +245,7 @@ static void auth_guard_seal_cost_is_recorded(struct kunit *test)
 
 	t0 = ktime_get_ns();
 	for (i = 0; i < OPS; i++)
-		acc ^= siphash(data, sizeof(data), &key);
+		acc += siphash(data, sizeof(data), &key);
 	t1 = ktime_get_ns();
 	seal_ns = (t1 - t0) / OPS;
 
