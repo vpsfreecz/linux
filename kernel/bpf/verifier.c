@@ -15661,9 +15661,6 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 	    !check_reg_sane_offset_ptr(env, ptr_reg, ptr_reg->type))
 		return -EINVAL;
 
-	/* pointer types do not carry 32-bit bounds at the moment. */
-	__mark_reg32_unbounded(dst_reg);
-
 	container_fixed_btf_alu = known &&
 		(container_restrict_fs_btf_fixed_ptr_alu_allowed(env, ptr_reg,
 								 opcode,
@@ -15678,6 +15675,14 @@ static int adjust_ptr_min_max_vals(struct bpf_verifier_env *env,
 		if (ret < 0)
 			return sanitize_err(env, insn, ret, off_reg, dst_reg);
 	}
+
+	/*
+	 * Pointer types do not carry 32-bit bounds at the moment. Blank r32
+	 * only after sanitize_ptr_alu() may have snapshotted dst_reg into a
+	 * speculative path: otherwise reg_bounds_sanity_check() might hit some
+	 * constraints violations.
+	 */
+	__mark_reg32_unbounded(dst_reg);
 
 	switch (opcode) {
 	case BPF_ADD:
