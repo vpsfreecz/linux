@@ -13819,7 +13819,9 @@ SYSCALL_DEFINE5(perf_event_open,
 	container_perfmon_capable =
 		bpf_container_capable(&container, CAP_PERFMON);
 
-	if (!attr.exclude_kernel) {
+	if (!attr.exclude_kernel ||
+	    ((attr.sample_type & PERF_SAMPLE_CALLCHAIN) &&
+	     !attr.exclude_callchain_kernel)) {
 		err = perf_allow_kernel();
 		if (err) {
 			if (!(bpf_container_tracing_enabled() &&
