@@ -226,6 +226,9 @@ static bool shutdown_match_client(const struct rpc_task *task, const void *data)
 
 static void shutdown_client(struct rpc_clnt *clnt)
 {
+	/* There is nothing to cancel if the client is absent. */
+	if (!clnt)
+		return;
 	clnt->cl_shutdown = 1;
 	rpc_cancel_tasks(clnt, -EIO, shutdown_match_client, NULL);
 }
