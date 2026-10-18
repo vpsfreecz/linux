@@ -2879,9 +2879,15 @@ static int do_sysinfo(struct sysinfo *info)
 		info->totalram = info->totalhigh = totalram;
 		info->freeram = info->freehigh = totalram - memusage;
 		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
-			if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
+			if (!memsw || (memsw == totalram)) {
 				info->totalswap = 0;
 				info->freeswap = 0;
+			} else if (memsw == PAGE_COUNTER_MAX) {
+				unsigned long swap_usage = memsw_usage > memusage ?
+					memsw_usage - memusage : 0;
+
+				info->freeswap = info->totalswap > swap_usage ?
+					info->totalswap - swap_usage : 0;
 			} else {
 				info->totalswap = memsw - totalram;
 				info->freeswap = info->totalswap - (memsw_usage - memusage);
@@ -2890,6 +2896,9 @@ static int do_sysinfo(struct sysinfo *info)
 			if (!memsw) {
 				info->totalswap = 0;
 				info->freeswap = 0;
+			} else if (memsw == PAGE_COUNTER_MAX) {
+				info->freeswap = info->totalswap > memsw_usage ?
+					info->totalswap - memsw_usage : 0;
 			} else {
 				info->totalswap = memsw;
 				info->freeswap = info->totalswap - memsw_usage;
