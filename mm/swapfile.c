@@ -3056,6 +3056,9 @@ static int fake_swap_show(struct seq_file *swap, void *v)
 		usedswap = memsw_usage * PAGE_SIZE;
 	}
 
+	if (!totalswap)
+		return 0;
+
 	seq_printf(swap, "%-40s%s\t%lu\t%s%lu\t%s%d\n",
 			"virtual",
 			"virtual\t",

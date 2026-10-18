@@ -80,14 +80,17 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		i.freeram = i.freehigh = totalram - memusage;
 
 		if (!cgroup_subsys_on_dfl(memory_cgrp_subsys)) { // if cgroup v1 (see do_memsw_account in mm/memcontrol.h)
-			if (!memsw || (memsw == totalram) || (memsw == PAGE_COUNTER_MAX)) {
+			if (!memsw || (memsw == totalram)) {
 				i.totalswap = 0;
 				i.freeswap = 0;
-			} else if (memsw == PAGE_COUNTER_MAX) {
-				i.freeswap = i.totalswap - memsw_usage;
 			} else {
-				i.freeswap = i.totalswap - (memsw_usage - memusage);
-				i.totalswap = memsw - totalram;
+				unsigned long swap_usage = memsw_usage > memusage ?
+					memsw_usage - memusage : 0;
+
+				if (memsw != PAGE_COUNTER_MAX)
+					i.totalswap = memsw - totalram;
+				i.freeswap = i.totalswap > swap_usage ?
+					i.totalswap - swap_usage : 0;
 			}
 		} else { // v2
 			if (!memsw) {
@@ -97,7 +100,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 				i.freeswap = i.totalswap - memsw_usage;
 			} else {
 				i.totalswap = memsw;
-				i.freeswap = i.totalswap - memsw_usage;
+				i.freeswap = i.totalswap > memsw_usage ?
+					i.totalswap - memsw_usage : 0;
 			}
 		}
 
