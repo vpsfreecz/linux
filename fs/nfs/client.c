@@ -1098,6 +1098,10 @@ static void delayed_free(struct rcu_head *p)
  */
 void nfs_free_server(struct nfs_server *server)
 {
+	/* Drain sysfs callbacks before destroying the clients they access. */
+	if (server->kobj.state_initialized)
+		nfs_sysfs_remove_server(server);
+
 	nfs_server_remove_lists(server);
 
 	if (server->destroy != NULL)
@@ -1110,10 +1114,8 @@ void nfs_free_server(struct nfs_server *server)
 
 	nfs_put_client(server->nfs_client);
 
-	if (server->kobj.state_initialized) {
-		nfs_sysfs_remove_server(server);
+	if (server->kobj.state_initialized)
 		kobject_put(&server->kobj);
-	}
 	ida_free(&s_sysfs_ids, server->s_sysfs_id);
 
 	put_cred(server->cred);
