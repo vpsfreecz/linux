@@ -816,7 +816,7 @@ static void nlmclnt_cancel_callback(struct rpc_task *task, void *data)
 	struct nlm_rqst	*req = data;
 	u32 status = ntohl(req->a_res.status);
 
-	if (RPC_SIGNALLED(task))
+	if (RPC_SIGNALLED(task) || task->tk_client->cl_shutdown)
 		goto die;
 
 	if (task->tk_status < 0) {
