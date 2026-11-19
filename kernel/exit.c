@@ -77,6 +77,9 @@
 
 #include "exit.h"
 
+/* Localized from PF_NO_NOTIFY_SIGNAL in upstream commit 22b7f491be8f. */
+#define PF_NO_NOTIFY_SIGNAL PF__HOLE__00800000
+
 /*
  * The default value should be high enough to not crash a system that randomly
  * crashes its kernel from time to time, but low enough to at least not permit
@@ -1701,7 +1704,9 @@ static long do_wait(struct wait_opts *wo)
 		retval = __do_wait(wo);
 		if (retval != -ERESTARTSYS)
 			break;
-		if (signal_pending(current))
+		if ((unlikely(test_tsk_thread_flag(current, TIF_NOTIFY_SIGNAL)) &&
+		     likely(!(READ_ONCE(current->flags) & PF_NO_NOTIFY_SIGNAL))) ||
+		    task_sigpending(current))
 			break;
 		schedule();
 	} while (1);
